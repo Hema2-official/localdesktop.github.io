@@ -4,6 +4,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
@@ -165,6 +166,22 @@ impl ArchProcess {
         let _ = fs::create_dir_all(&l2s_dir);
 
         let mut process = Command::new(context.native_library_dir.join("libproot.so"));
+        // Start from a clean signal state, like any process on Linux. The app's threads block
+        // SIGQUIT, SIGUSR1 and SIGPIPE for Android's runtime, and children inherit that: proot
+        // never saw the SIGQUIT that makes it end its processes, and Ctrl+\ did nothing.
+        unsafe {
+            process.pre_exec(|| {
+                let mut signals: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut signals);
+                libc::pthread_sigmask(libc::SIG_SETMASK, &signals, std::ptr::null_mut());
+                for signal in 1..32 {
+                    if signal != libc::SIGKILL && signal != libc::SIGSTOP {
+                        libc::signal(signal, libc::SIG_DFL);
+                    }
+                }
+                Ok(())
+            });
+        }
         process
             .env(
                 "PROOT_LOADER",
