@@ -305,6 +305,18 @@ static int handle_option_ashmem_memfd(Tracee *tracee, const Cli *cli UNUSED, con
 	return 0;
 }
 
+static int handle_option_uevent_stub(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	int status;
+
+	/* Initialize the uevent-stub extension.  */
+	status = initialize_extension(tracee, uevent_stub_callback, NULL);
+	if (status < 0)
+		note(tracee, WARNING, INTERNAL, "uevent-stub not initialized");
+
+	return 0;
+}
+
 static int handle_option_sysvipc(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {
 	int status;
