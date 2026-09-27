@@ -1210,7 +1210,6 @@ const PLASMA_DEFAULTS: &[(&str, &str)] = &[
         "kdeglobals",
         "[KDE]\n# KWin composites on the CPU here, so animations cost more than they add.\nAnimationDurationFactor=0\n",
     ),
-    ("ksplashrc", "[KSplash]\nEngine=none\nTheme=None\n"),
     (
         "ksmserverrc",
         "[General]\n# Don't reopen the last session's apps; startup is slow enough already.\nloginMode=emptySession\n",
@@ -1338,6 +1337,15 @@ exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
 
     let home_dir = chroot_home_dir(fs_root, &local_config.user.username);
     seed_desktop_items(&home_dir, "org.kde.okular.desktop");
+
+    // No splash screen: it only delays the desktop. Plasma puts its look-and-feel defaults
+    // (~/.config/kdedefaults, which turn the splash back on) ahead of PLASMA_XDG_DIR, so this one
+    // goes in the user's own config, create-if-missing so a splash chosen later sticks.
+    let ksplashrc = home_dir.join(".config/ksplashrc");
+    if !ksplashrc.exists() {
+        let _ = fs::create_dir_all(home_dir.join(".config"));
+        let _ = fs::write(&ksplashrc, "[KSplash]\nEngine=none\nTheme=None\n");
+    }
 
     None
 }
