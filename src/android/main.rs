@@ -19,6 +19,11 @@ use winit::{
 #[no_mangle]
 fn android_main(android_app: AndroidApp) {
     std::env::set_var("RUST_BACKTRACE", "full");
+    // The bundled libxkbcommon defaults to the official package's rootfs for its keymaps.
+    std::env::set_var(
+        "XKB_CONFIG_ROOT",
+        format!("{}/usr/share/X11/xkb", config::ARCH_FS_ROOT),
+    );
     let _guard = sentry::init((
         config::SENTRY_DSN,
         sentry::ClientOptions {
