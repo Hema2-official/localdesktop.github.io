@@ -1,4 +1,6 @@
-#[cfg(target_os = "android")]
+// Runs where the APK's ABI matches the host: on Android (Termux), or cross-compiling from an
+// aarch64 Linux host with `CARGO_BUILD_TARGET=aarch64-linux-android` (scripts/build-dev-apk.sh).
+#[cfg(any(target_os = "android", all(target_os = "linux", target_arch = "aarch64")))]
 pub mod apk {
     use anyhow::{bail, Context, Result};
     use byteorder::{LittleEndian, ReadBytesExt};
@@ -4221,14 +4223,14 @@ pub mod apk {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", all(target_os = "linux", target_arch = "aarch64"))))]
 fn main() {
     println!(
-        "`build_apk` is intended to run on Android hosts where the host and target architectures match."
+        "`build_apk` runs on Android hosts, or on aarch64 Linux hosts with CARGO_BUILD_TARGET=aarch64-linux-android."
     );
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", all(target_os = "linux", target_arch = "aarch64")))]
 fn main() {
     if let Err(err) = apk::build() {
         eprintln!("{err:?}");
