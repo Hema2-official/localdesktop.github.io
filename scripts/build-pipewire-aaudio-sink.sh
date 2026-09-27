@@ -40,6 +40,22 @@ esac
 
 TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG"
 CC="${CC:-$TOOLCHAIN/bin/${TARGET}${API}-clang}"
+AR="${AR:-$TOOLCHAIN/bin/llvm-ar}"
+
+# The NDK's compilers are x86_64-only: on aarch64 Linux hosts, use the host's clang with the
+# NDK's sysroot and runtime libraries instead, as scripts/build-dev-apk.sh does.
+if [[ "$(uname -s)-$(uname -m)" == Linux-aarch64 && ! -x "$CC" ]]; then
+  resource_dir=$(ls -d "$TOOLCHAIN"/lib/clang/* | head -n 1)
+  CC="${CARGO_TARGET_DIR:-$ROOT/target}/${TARGET}${API}-clang"
+  mkdir -p "$(dirname "$CC")"
+  cat > "$CC" <<EOF
+#!/bin/sh
+exec clang --target=${TARGET}${API} --sysroot="$TOOLCHAIN/sysroot" \\
+    -resource-dir="$resource_dir" -L"$resource_dir/lib/linux/aarch64" -fuse-ld=lld "\$@"
+EOF
+  chmod +x "$CC"
+  AR=llvm-ar
+fi
 
 # Cargo/cc/bindgen spell the same target three different ways.
 TARGET_SNAKE="${TARGET//-/_}"
@@ -50,7 +66,7 @@ export "CARGO_TARGET_${TARGET_SHOUT}_LINKER=$CC"
 # scripts/check_elf_alignment.sh verifies the result.
 export "CARGO_TARGET_${TARGET_SHOUT}_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384"
 export "CC_${TARGET_SNAKE}=$CC"
-export "AR_${TARGET_SNAKE}=$TOOLCHAIN/bin/llvm-ar"
+export "AR_${TARGET_SNAKE}=$AR"
 export BINDGEN_EXTRA_CLANG_ARGS="--target=${TARGET}${API} --sysroot=$TOOLCHAIN/sysroot ${BINDGEN_EXTRA_CLANG_ARGS:-}"
 
 # pipewire-sys/libspa-sys locate their headers through system-deps. Feed it the
