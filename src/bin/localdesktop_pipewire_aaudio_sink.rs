@@ -451,11 +451,52 @@ mod android {
         )))
     }
 
+    /// AAudio's channel order for the usual layouts. Without positions, the PulseAudio server
+    /// names the channels `aux0`, `aux1`, … and can't match them to the sink's volumes, so
+    /// volume controls show the sink muted at 0%.
+    fn channel_positions(channels: u32) -> Option<&'static [u32]> {
+        use spa::sys::*;
+        Some(match channels {
+            1 => &[SPA_AUDIO_CHANNEL_MONO],
+            2 => &[SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR],
+            4 => &[
+                SPA_AUDIO_CHANNEL_FL,
+                SPA_AUDIO_CHANNEL_FR,
+                SPA_AUDIO_CHANNEL_RL,
+                SPA_AUDIO_CHANNEL_RR,
+            ],
+            6 => &[
+                SPA_AUDIO_CHANNEL_FL,
+                SPA_AUDIO_CHANNEL_FR,
+                SPA_AUDIO_CHANNEL_FC,
+                SPA_AUDIO_CHANNEL_LFE,
+                SPA_AUDIO_CHANNEL_RL,
+                SPA_AUDIO_CHANNEL_RR,
+            ],
+            8 => &[
+                SPA_AUDIO_CHANNEL_FL,
+                SPA_AUDIO_CHANNEL_FR,
+                SPA_AUDIO_CHANNEL_FC,
+                SPA_AUDIO_CHANNEL_LFE,
+                SPA_AUDIO_CHANNEL_RL,
+                SPA_AUDIO_CHANNEL_RR,
+                SPA_AUDIO_CHANNEL_SL,
+                SPA_AUDIO_CHANNEL_SR,
+            ],
+            _ => return None,
+        })
+    }
+
     fn enum_format_pod(rate: u32, channels: u32) -> Vec<u8> {
         let mut info = spa::param::audio::AudioInfoRaw::new();
         info.set_format(spa::param::audio::AudioFormat::F32LE);
         info.set_rate(rate);
         info.set_channels(channels);
+        if let Some(positions) = channel_positions(channels) {
+            let mut position = [0; spa::sys::SPA_AUDIO_MAX_CHANNELS as usize];
+            position[..positions.len()].copy_from_slice(positions);
+            info.set_position(position);
+        }
 
         pod_bytes(&spa::pod::Value::Object(spa::pod::Object {
             type_: spa::utils::SpaTypes::ObjectParamFormat.as_raw(),
@@ -515,6 +556,31 @@ mod android {
     }
 
     // -- Stream events -------------------------------------------------------
+
+    /// The node's per-channel volumes stay empty until a format is first negotiated, which the
+    /// PulseAudio server reports as muted at 0%. Fill them in whenever they show up empty.
+    /// (WirePlumber saves this sink's volume but doesn't restore it, so it starts at 100%.)
+    fn on_control_info(
+        stream: &pw::stream::Stream,
+        sink: &mut &'static Sink,
+        id: u32,
+        control: *const pw::sys::pw_stream_control,
+    ) {
+        if id != spa::sys::SPA_PROP_channelVolumes {
+            return;
+        }
+        let Some(control) = (unsafe { control.as_ref() }) else {
+            return;
+        };
+        if control.n_values != 0 {
+            return;
+        }
+        let volumes = vec![1.0; sink.channels];
+        match stream.set_control(id, &volumes) {
+            Ok(()) => note!("filled in empty channel volumes"),
+            Err(e) => note!("failed to fill in channel volumes: {e}"),
+        }
+    }
 
     fn on_state_changed(
         _stream: &pw::stream::Stream,
@@ -653,6 +719,7 @@ mod android {
         let _listener = stream
             .add_local_listener_with_user_data(sink)
             .state_changed(on_state_changed)
+            .control_info(on_control_info)
             .param_changed(on_param_changed)
             .process(on_process)
             .register()
