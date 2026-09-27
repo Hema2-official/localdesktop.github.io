@@ -1,0 +1,112 @@
+#!/bin/sh
+# Smoke test for the proot quirks that break desktop and development tools inside Local Desktop.
+# Run it inside the guest, as a normal user and as root, e.g. over SSH:
+#   ssh -p 8022 user@phone 'sh -s' < scripts/guest/proot-smoke.sh
+# Prints one PASS/FAIL/INFO line per check; the exit status is the number of failures.
+
+failures=0
+pass() { echo "PASS  $1"; }
+fail() { echo "FAIL  $1${2:+: $2}"; failures=$((failures + 1)); }
+info() { echo "INFO  $1${2:+: $2}"; }
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/proot-smoke.XXXXXX") || exit 1
+cd "$work" || exit 1
+echo "proot smoke test as $(id -un) (uid $(id -u)) in $work"
+
+# Ownership records (.proot-meta-file.*) and hard-link targets (.proot.l2s.*) must not show up
+# in directory listings: cp -r, pnpm, makepkg and editors copy or index them otherwise.
+mkdir listing && touch listing/file && chmod 600 listing/file
+extra=$(ls -A listing | grep -v '^file$' | tr '\n' ' ')
+[ -z "$extra" ] && pass "directory listings show no proot records" \
+    || fail "directory listings show proot records" "$extra"
+
+# chmod/fchmod must change the real mode: install -m755 creates the file, then fchmods it.
+printf '#!/bin/sh\necho ok\n' > script
+install -m755 script installed 2>/dev/null
+[ "$(./installed 2>/dev/null)" = ok ] && pass "install -m755 produces an executable" \
+    || fail "install -m755 produces an executable" "$(ls -l installed 2>&1 | cut -c1-10)"
+cp script chmodded && chmod +x chmodded
+[ "$(./chmodded 2>/dev/null)" = ok ] && pass "chmod +x makes a file executable" \
+    || fail "chmod +x makes a file executable"
+
+# Hard links survive removal of the directory that held the original (pnpm's temp dirs).
+mkdir a b && echo linked > a/f && ln a/f b/f 2>/dev/null && rm -rf a
+[ "$(cat b/f 2>/dev/null)" = linked ] && pass "hard link survives removing the original's directory" \
+    || fail "hard link survives removing the original's directory"
+
+# rm -rf of a tree containing hard links succeeds in one pass.
+mkdir -p tree/x tree/y && echo data > tree/x/f && ln tree/x/f tree/y/f 2>/dev/null
+rm -rf tree 2>/dev/null
+[ ! -e tree ] && pass "rm -rf removes a tree with hard links in one pass" \
+    || fail "rm -rf removes a tree with hard links in one pass"
+
+# fstat() on sockets and eventfds (libwayland-server, Python's signal.set_wakeup_fd, Zed).
+if command -v python3 >/dev/null 2>&1; then
+    result=$(python3 - <<'PY' 2>&1
+import os, socket
+sock = socket.socket(socket.AF_UNIX)  # keep it referenced, or its fd closes before fstat
+fds = [("unix socket", sock.fileno())]
+if hasattr(os, "eventfd"):
+    fds.append(("eventfd", os.eventfd(0)))
+for name, fd in fds:
+    try:
+        os.fstat(fd)
+        print("ok", name)
+    except OSError as e:
+        print("bad", name, e.strerror)
+PY
+)
+    bad=$(echo "$result" | grep '^bad' | cut -d' ' -f2- | tr '\n' ';')
+    [ -z "$bad" ] && pass "fstat() works on sockets and eventfds" \
+        || fail "fstat() works on sockets and eventfds" "$bad"
+else
+    info "fstat() on sockets" "python3 not installed, skipped"
+fi
+
+# access() must agree with what actually happens on write (Xwayland trusted it for xkb). Probe a
+# root-owned directory that has an ownership record, i.e. one that pacman created.
+if [ "$(id -u)" != 0 ]; then
+    probe_dir=
+    for dir in /usr/lib/firefox /usr/share/xfce4 /usr/share/plasma /usr/share/labwc /etc/pacman.d; do
+        if [ -d "$dir" ] && [ -e "$(dirname "$dir")/.proot-meta-file.$(basename "$dir").meta" ]; then
+            probe_dir=$dir
+            break
+        fi
+    done
+    if [ -n "$probe_dir" ]; then
+        says=no; [ -w "$probe_dir" ] && says=yes
+        can=no; touch "$probe_dir/.proot-smoke" 2>/dev/null && can=yes && rm -f "$probe_dir/.proot-smoke"
+        [ "$says" = "$can" ] && pass "access() matches real permissions ($probe_dir writable: $can)" \
+            || fail "access() matches real permissions" "$probe_dir: access() says $says, writing: $can"
+    else
+        info "access() check" "no root-owned directory with an ownership record found"
+    fi
+    # Files that came with the rootfs tarball have no record, so any user may change them.
+    if touch /usr/.proot-smoke 2>/dev/null; then
+        rm -f /usr/.proot-smoke
+        info "files without ownership records" "a normal user can write to /usr"
+    fi
+else
+    info "access() check" "needs a normal user, skipped as root"
+fi
+
+# Things Android forbids; informational, since shims or app changes cover them.
+if command -v python3 >/dev/null 2>&1; then
+    uevent=$(python3 -c '
+import socket
+try:
+    s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 15)
+    s.bind((0, 1))
+    print("available")
+except OSError as e:
+    print("unavailable (" + e.strerror + ")")' 2>&1)
+    info "udev netlink uevents" "$uevent"
+fi
+[ -r /dev/kgsl-3d0 ] && info "GPU (/dev/kgsl-3d0)" "accessible" || info "GPU (/dev/kgsl-3d0)" "not accessible"
+[ -r /dev/dri/renderD128 ] && info "DRM render node" "accessible" || info "DRM render node" "not accessible"
+if [ -n "${LD_PRELOAD:-}" ]; then info "LD_PRELOAD" "$LD_PRELOAD"; fi
+
+cd / && rm -rf "$work" 2>/dev/null
+rm -rf "$work" 2>/dev/null  # under proot, removing hard-link leftovers can take a second pass
+echo "$failures failure(s)"
+exit "$failures"
