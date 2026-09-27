@@ -47,6 +47,7 @@ else
 fi
 
 adb shell run-as "$package" sh -c "'cat > $root/tmp/.dev-shell.sh'" < "$payload"
+# The guest's stdout goes through a pipe: proot's fstat() fails on adb's socket, which breaks cat.
 adb shell run-as "$package" sh -c "'
 PROOT_LOADER=$lib/libproot_loader.so PROOT_TMP_DIR=$data $lib/libproot.so \
     -r $root -w $home -L --link2symlink --sysvipc --kill-on-exit --root-id \
@@ -63,5 +64,5 @@ PROOT_LOADER=$lib/libproot_loader.so PROOT_TMP_DIR=$data $lib/libproot.so \
     /usr/bin/env -i HOME=$home LANG=C.UTF-8 TERM=xterm-256color TMPDIR=/tmp \
     USER=$user LOGNAME=$user \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-    $shell < /dev/null
+    $shell < /dev/null | cat
 '" < /dev/null
