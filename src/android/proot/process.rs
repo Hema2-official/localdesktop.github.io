@@ -129,6 +129,9 @@ impl ArchProcess {
             // Hide proot's `.proot*` bookkeeping files (ownership records, hard link targets)
             // from directory listings, so tools that copy or index trees don't pick them up.
             .arg("-H")
+            // Android refuses uevent netlink sockets; a silent stand-in keeps libudev monitors
+            // (and KWin, which needs one) working.
+            .arg("--uevent-stub")
             .arg("--bind=/dev")
             .arg("--bind=/proc")
             .arg("--bind=/sys")
