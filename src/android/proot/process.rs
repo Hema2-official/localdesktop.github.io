@@ -1,5 +1,5 @@
 use crate::android::utils::application_context::get_application_context;
-use crate::core::config;
+use crate::core::{config, hard_links};
 use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -106,7 +106,7 @@ impl ArchProcess {
         // Keep the files behind emulated hard links in one place instead of next to the first
         // link, so removing that link's directory neither breaks the other links nor fails on
         // leftovers hidden by -H.
-        let l2s_dir = format!("{}/.l2s", config::ARCH_FS_ROOT);
+        let l2s_dir = Path::new(config::ARCH_FS_ROOT).join(hard_links::STORE_DIR);
         let _ = fs::create_dir_all(&l2s_dir);
 
         let mut process = Command::new(context.native_library_dir.join("libproot.so"));

@@ -1,5 +1,6 @@
 pub mod core {
     pub mod config;
+    pub mod hard_links;
 }
 
 #[cfg(target_os = "android")]

@@ -9,9 +9,12 @@ use crate::{
         utils::application_context::get_application_context,
         utils::ndk::{density_dpi, long_press_timeout_ms, scale_factor, touch_slop_px},
     },
-    core::config::{
-        CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
-        PULSE_GUEST_SERVER,
+    core::{
+        config::{
+            CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL,
+            PIPEWIRE_GUEST_RUNTIME_DIR, PULSE_GUEST_SERVER,
+        },
+        hard_links,
     },
 };
 use pathdiff::diff_paths;
@@ -1165,6 +1168,26 @@ fn fix_xkb_symlink(options: &SetupOptions) -> StageOutput {
     None
 }
 
+/// Hard links made before `PROOT_L2S_DIR` keep their data next to the first link; move it into
+/// the shared store once, so removing that directory works like it does for newer links.
+fn migrate_hard_links(_: &SetupOptions) -> StageOutput {
+    match hard_links::migrate(Path::new(ARCH_FS_ROOT)) {
+        Ok(Some(migration)) => {
+            log::info!(
+                "Moved {} hard link(s) into the shared store, repointed {} name(s)",
+                migration.moved,
+                migration.relinked
+            );
+            for (link, error) in migration.failed {
+                log::warn!("Could not move hard link {}: {error}", link.display());
+            }
+        }
+        Ok(None) => {}
+        Err(error) => log::warn!("Hard link migration failed: {error}"),
+    }
+    None
+}
+
 pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
     let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
@@ -1201,6 +1224,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_onboard_signal_fix), // Step 9. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
         Box::new(setup_xfce_wayland),       // Step 10. Setup Xfce Wayland launch and HiDPI scaling
         Box::new(fix_xkb_symlink),          // Step 11. Fix xkb symlink
+        Box::new(migrate_hard_links),       // Step 12. Move old hard link data into the shared store (once)
     ];
 
     let handle_stage_error = |e: Box<dyn std::any::Any + Send>, sender: &Sender<SetupMessage>| {
