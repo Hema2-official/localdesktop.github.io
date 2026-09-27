@@ -1,26 +1,31 @@
 use super::bind::bind_socket;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_pointer_constraints,
+    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
+    delegate_pointer_constraints,
     delegate_presentation, delegate_seat, delegate_shm, delegate_single_pixel_buffer,
     delegate_viewporter, delegate_xdg_shell,
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
-        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{protocol::wl_seat, Display},
     },
-    utils::{Logical, Monotonic, Point, Serial, Size, Time},
+    utils::{Logical, Monotonic, Point, Serial, Size},
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
-            SurfaceAttributes, TraversalAction,
+            with_states, with_surface_tree_downward, CompositorClientState, CompositorHandler,
+            CompositorState, SurfaceAttributes, TraversalAction,
+        },
+        fractional_scale::{
+            with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState,
         },
         output::OutputHandler,
         pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
-        presentation::{PresentationFeedbackCachedState, PresentationState, Refresh},
+        presentation::{
+            PresentationFeedbackCachedState, PresentationFeedbackCallback, PresentationState,
+        },
         selection::{
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -40,7 +45,7 @@ use smithay::{
     reexports::wayland_server::{
         backend::{ClientData, ClientId, DisconnectReason, GlobalId},
         protocol::{wl_buffer, wl_surface::WlSurface},
-        Client, ListeningSocket,
+        Client, ListeningSocket, Resource,
     },
 };
 use std::{error::Error, os::unix::io::OwnedFd, time::Instant};
@@ -72,7 +77,63 @@ pub struct State {
     pub single_pixel_buffer_state: SinglePixelBufferState,
     pub pointer_constraints_state: PointerConstraintsState,
     pub presentation_state: PresentationState,
+    pub fractional_scale_state: FractionalScaleManagerState,
+    /// The Android window's size in physical pixels.
     pub size: Size<i32, Logical>,
+    /// The scale offered to clients that support fractional scaling: the Android UI scale.
+    pub client_scale: f64,
+    /// Surfaces whose clients asked for fractional scaling. They get logical sizes and are drawn
+    /// scaled by `client_scale`; everyone else works in physical pixels.
+    pub scaled_surfaces: Vec<WlSurface>,
+}
+
+impl State {
+    /// The scale a surface's content maps to the screen with.
+    pub fn surface_scale(&self, surface: &WlSurface) -> f64 {
+        if self.scaled_surfaces.contains(surface) {
+            self.client_scale
+        } else {
+            1.0
+        }
+    }
+
+    /// Configure a toplevel to fill the window, in the toplevel's own size units.
+    pub fn configure_toplevel(&self, toplevel: &ToplevelSurface) {
+        let scale = self.surface_scale(toplevel.wl_surface());
+        let size = Size::from((
+            (self.size.w as f64 / scale).round() as i32,
+            (self.size.h as f64 / scale).round() as i32,
+        ));
+        toplevel.with_pending_state(|state| {
+            state.size = Some(size);
+            state.states.set(xdg_toplevel::State::Activated);
+        });
+        toplevel.send_configure();
+    }
+
+    /// Reconfigure the toplevels that already got their first configure (the others get it on
+    /// their initial commit), e.g. after the window size or scale changed.
+    pub fn reconfigure_toplevels(&self) {
+        for toplevel in self.xdg_shell_state.toplevel_surfaces() {
+            if toplevel.is_initial_configure_sent() {
+                self.configure_toplevel(toplevel);
+            }
+        }
+    }
+
+    /// Change the scale offered to clients that support fractional scaling.
+    pub fn set_client_scale(&mut self, scale: f64) {
+        if self.client_scale == scale {
+            return;
+        }
+        self.client_scale = scale;
+        self.scaled_surfaces.retain(|surface| surface.is_alive());
+        for surface in &self.scaled_surfaces {
+            with_states(surface, |states| {
+                with_fractional_scale(states, |fractional| fractional.set_preferred_scale(scale))
+            });
+        }
+    }
 }
 
 impl BufferHandler for State {
@@ -84,12 +145,9 @@ impl XdgShellHandler for State {
         &mut self.xdg_shell_state
     }
 
-    fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        surface.with_pending_state(|state| {
-            state.size.replace(self.size);
-            state.states.set(xdg_toplevel::State::Activated);
-        });
-        surface.send_configure();
+    fn new_toplevel(&mut self, _surface: ToplevelSurface) {
+        // Configured on its initial commit, once the client has set up everything that affects
+        // the configure (such as fractional scaling).
     }
 
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
@@ -136,6 +194,18 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+
+        let toplevel = self
+            .xdg_shell_state
+            .toplevel_surfaces()
+            .iter()
+            .find(|toplevel| {
+                toplevel.wl_surface() == surface && !toplevel.is_initial_configure_sent()
+            })
+            .cloned();
+        if let Some(toplevel) = toplevel {
+            self.configure_toplevel(&toplevel);
+        }
     }
 }
 
@@ -171,38 +241,42 @@ impl PointerConstraintsHandler for State {
     }
 }
 
-/// Tell the surfaces' wp_presentation listeners that their content reached the screen.
-pub fn send_presentation_feedback_surface_tree(
+impl FractionalScaleHandler for State {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        let scale = self.client_scale;
+        with_states(&surface, |states| {
+            with_fractional_scale(states, |fractional| fractional.set_preferred_scale(scale))
+        });
+        self.scaled_surfaces.retain(|surface| surface.is_alive());
+        self.scaled_surfaces.push(surface.clone());
+
+        // A toplevel that was already configured gets its logical size now.
+        self.reconfigure_toplevels();
+    }
+}
+
+/// Take the wp_presentation feedback requests of the surfaces' current state, to answer once the
+/// frame showing that state is on screen.
+pub fn take_presentation_feedback_surface_tree(
     surface: &WlSurface,
-    output: &Output,
-    time: Time<Monotonic>,
-    refresh: Refresh,
-    sequence: u64,
-) {
+) -> Vec<PresentationFeedbackCallback> {
+    let mut callbacks = Vec::new();
     with_surface_tree_downward(
         surface,
         (),
         |_, _, &()| TraversalAction::DoChildren(()),
         |_surf, states, &()| {
-            let callbacks = std::mem::take(
+            callbacks.append(
                 &mut states
                     .cached_state
                     .get::<PresentationFeedbackCachedState>()
                     .current()
                     .callbacks,
             );
-            for callback in callbacks {
-                callback.presented(
-                    output,
-                    time,
-                    refresh,
-                    sequence,
-                    wp_presentation_feedback::Kind::Vsync,
-                );
-            }
         },
         |_, _, &()| true,
     );
+    callbacks
 }
 
 pub fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
@@ -251,6 +325,7 @@ delegate_viewporter!(State);
 delegate_single_pixel_buffer!(State);
 delegate_pointer_constraints!(State);
 delegate_presentation!(State);
+delegate_fractional_scale!(State);
 
 impl Compositor {
     pub fn build() -> Result<Compositor, Box<dyn Error>> {
@@ -285,7 +360,10 @@ impl Compositor {
                 &dh,
                 smithay::utils::Clock::<Monotonic>::new().id() as u32,
             ),
+            fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
             size: (1920, 1080).into(),
+            client_scale: 1.0,
+            scaled_surfaces: Vec::new(),
         };
 
         Ok(Compositor {
