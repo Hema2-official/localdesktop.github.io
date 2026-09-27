@@ -1,10 +1,11 @@
 use crate::android::proot::setup::SetupMessage;
 use serde_json::json;
 use std::net::TcpStream;
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use websocket::sync::{Client, Server};
+use websocket::sync::{Server, Writer};
 use websocket::OwnedMessage;
 
 pub enum ErrorVariant {
@@ -18,35 +19,64 @@ pub struct WebviewBackend {
     pub error: ErrorVariant,
 }
 
+fn desktop_question(progress: u16) -> OwnedMessage {
+    OwnedMessage::Text(
+        json!({
+            "progress": progress,
+            "message": "Choose a desktop",
+            "choose": "desktop",
+        })
+        .to_string(),
+    )
+}
+
 impl WebviewBackend {
-    /// Start accepting connections and listening for messages
-    pub fn build(receiver: Receiver<SetupMessage>, progress: Arc<Mutex<u16>>) -> Self {
+    /// Start accepting connections and listening for messages. The page's answer to
+    /// `SetupMessage::ChooseDesktop` goes to `desktop_choice`.
+    pub fn build(
+        receiver: Receiver<SetupMessage>,
+        progress: Arc<Mutex<u16>>,
+        desktop_choice: Sender<String>,
+    ) -> Self {
         let socket = Server::bind("127.0.0.1:0").expect("Failed to bind socket");
         let socket_port = socket.local_addr().unwrap().port();
 
-        let active_client: Arc<Mutex<Option<Client<TcpStream>>>> = Arc::new(Mutex::new(None));
+        let active_client: Arc<Mutex<Option<Writer<TcpStream>>>> = Arc::new(Mutex::new(None));
+        // The question stays open until the page answers, so a page that connects (or reloads)
+        // later still gets it.
+        let desktop_question_open = Arc::new(AtomicBool::new(false));
 
         let active_client_clone = active_client.clone();
         let progress_clone = progress.clone();
+        let question_open = desktop_question_open.clone();
         thread::spawn(move || {
             for message in receiver {
                 let progress = *progress_clone.lock().unwrap();
-                let json_message = match message {
-                    SetupMessage::Progress(msg) => json!({
-                        "progress": progress,
-                        "message": msg,
-                    }),
-                    SetupMessage::Error(msg) => {
-                        log::info!("Setup error [{}%]: {}", progress, msg);
+                let message = match message {
+                    SetupMessage::Progress(msg) => OwnedMessage::Text(
                         json!({
                             "progress": progress,
                             "message": msg,
-                            "isError": true
                         })
+                        .to_string(),
+                    ),
+                    SetupMessage::Error(msg) => {
+                        log::info!("Setup error [{}%]: {}", progress, msg);
+                        OwnedMessage::Text(
+                            json!({
+                                "progress": progress,
+                                "message": msg,
+                                "isError": true
+                            })
+                            .to_string(),
+                        )
+                    }
+                    SetupMessage::ChooseDesktop => {
+                        question_open.store(true, Ordering::Release);
+                        desktop_question(progress)
                     }
                 };
 
-                let message = OwnedMessage::Text(json_message.to_string());
                 let mut active_client = active_client_clone.lock().unwrap();
 
                 if let Some(writer) = active_client.as_mut() {
@@ -69,7 +99,7 @@ impl WebviewBackend {
                     continue;
                 }
 
-                let mut client = match request.use_protocol("rust-websocket").accept() {
+                let client = match request.use_protocol("rust-websocket").accept() {
                     Ok(client) => client,
                     Err(error) => {
                         log::warn!("Failed to accept setup progress client: {error:?}");
@@ -82,6 +112,13 @@ impl WebviewBackend {
                         log::warn!("Failed to read setup progress client address: {error}")
                     }
                 }
+                let (mut reader, mut writer) = match client.split() {
+                    Ok(halves) => halves,
+                    Err(error) => {
+                        log::warn!("Failed to split setup progress client: {error}");
+                        continue;
+                    }
+                };
 
                 let progress = *progress_clone.lock().unwrap();
                 let message = OwnedMessage::Text(
@@ -91,13 +128,40 @@ impl WebviewBackend {
                     })
                     .to_string(),
                 );
-                if client.send_message(&message).is_err() {
+                if writer.send_message(&message).is_err() {
                     log::info!("Setup progress client disconnected during initial update");
                     continue;
                 }
 
+                let question_open = desktop_question_open.clone();
+                let desktop_choice = desktop_choice.clone();
+                thread::spawn(move || {
+                    for message in reader.incoming_messages() {
+                        match message {
+                            Ok(OwnedMessage::Text(text)) => {
+                                let value: serde_json::Value =
+                                    serde_json::from_str(&text).unwrap_or_default();
+                                if let Some(desktop) = value["desktop"].as_str() {
+                                    if question_open.swap(false, Ordering::AcqRel) {
+                                        let _ = desktop_choice.send(desktop.to_string());
+                                    }
+                                }
+                            }
+                            Ok(OwnedMessage::Close(_)) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                    }
+                });
+
+                // Under the lock, so a question asked meanwhile reaches this client either way.
                 let mut active_client = active_client_clone.lock().unwrap();
-                if active_client.replace(client).is_some() {
+                if desktop_question_open.load(Ordering::Acquire)
+                    && writer.send_message(&desktop_question(progress)).is_err()
+                {
+                    log::info!("Setup progress client disconnected during initial update");
+                    continue;
+                }
+                if active_client.replace(writer).is_some() {
                     log::info!("Replaced stale setup progress client");
                 }
             }

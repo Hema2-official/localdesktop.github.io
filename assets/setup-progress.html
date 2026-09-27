@@ -65,6 +65,63 @@
             <div style="flex: 1; white-space: pre-wrap">{{ log.message }}</div>
           </div>
         </div>
+        <div
+          v-if="choosingDesktop"
+          style="
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            background-color: rgba(0, 0, 0, 0.55);
+            font-family: system-ui, sans-serif;
+          "
+        >
+          <div
+            style="
+              width: 100%;
+              max-width: 420px;
+              padding: 20px;
+              border-radius: 12px;
+              background-color: white;
+              color: #1c1c1c;
+            "
+          >
+            <h2 style="margin: 0 0 6px; font-size: 20px">Choose your desktop</h2>
+            <p style="margin: 0 0 16px; color: #555; font-size: 14px">
+              The download continues meanwhile. You can switch later in
+              /etc/localdesktop/localdesktop.toml.
+            </p>
+            <button
+              v-for="option in desktopOptions"
+              :key="option.preset"
+              @click="chooseDesktop(option.preset)"
+              style="
+                display: block;
+                width: 100%;
+                margin-top: 10px;
+                padding: 14px;
+                border: 1px solid #ccc;
+                border-radius: 10px;
+                background-color: #f6f6f6;
+                color: inherit;
+                font: inherit;
+                text-align: left;
+                cursor: pointer;
+              "
+            >
+              <div style="font-size: 17px; font-weight: 600">{{ option.name }}</div>
+              <div style="margin-top: 4px; color: #555; font-size: 14px">
+                {{ option.description }}
+              </div>
+            </button>
+          </div>
+        </div>
       </div>
       <div
         @click="toggleView"
@@ -122,6 +179,20 @@
             logs: [],
             logCounter: 0,
             hasError: false,
+            choosingDesktop: false,
+            desktopOptions: [
+              {
+                preset: "xfce",
+                name: "Xfce",
+                description: "Light and quick to install.",
+              },
+              {
+                preset: "plasma",
+                name: "KDE Plasma",
+                description:
+                  "Full-featured, with an on-screen keyboard. Takes longer to install.",
+              },
+            ],
           };
         },
         computed: {
@@ -138,8 +209,15 @@
           toggleView() {
             this.showFullLog = !this.showFullLog;
           },
+          chooseDesktop(preset) {
+            this.ws.send(JSON.stringify({ desktop: preset }));
+            this.choosingDesktop = false;
+          },
           handleWebSocketMessage(data) {
             this.progress = data.progress;
+            if (data.choose === "desktop") {
+              this.choosingDesktop = true;
+            }
 
             const isError = data.isError || false;
             this.hasError = isError;
@@ -163,6 +241,7 @@
           const params = new URLSearchParams(window.location.search);
           const port = params.get("port");
           const ws = new WebSocket(`ws://127.0.0.1:${port}`, "rust-websocket");
+          this.ws = ws;
 
           ws.onopen = () => {
             console.log("WebSocket connection established");

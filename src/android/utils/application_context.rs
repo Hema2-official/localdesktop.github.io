@@ -115,6 +115,19 @@ impl ApplicationContext {
 }
 
 static APPLICATION_CONTEXT: RwLock<Option<ApplicationContext>> = RwLock::new(None);
+
+/// Read the config file again, for when setup has just written it.
+pub fn reload_local_config() {
+    let local_config = parse_config(format!("{}{}", ARCH_FS_ROOT, CONFIG_FILE));
+    if let Some(context) = APPLICATION_CONTEXT
+        .write()
+        .expect("Failed to write application context")
+        .as_mut()
+    {
+        context.local_config = local_config;
+    }
+}
+
 pub fn get_application_context() -> ApplicationContext {
     return APPLICATION_CONTEXT
         .read()

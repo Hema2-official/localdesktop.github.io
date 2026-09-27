@@ -4,7 +4,7 @@ title: Using other Desktop Environments
 
 ## Desktop presets
 
-Local Desktop can install and start one of two desktops for you:
+Local Desktop can install and start one of two desktops for you. A fresh install asks which one, and saves the answer in the config:
 
 ```toml title="/etc/localdesktop/localdesktop.toml"
 [desktop]

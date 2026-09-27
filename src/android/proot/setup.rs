@@ -6,13 +6,13 @@ use crate::{
             wayland::{Compositor, TouchMode, WaylandBackend},
             webview::{ErrorVariant, WebviewBackend},
         },
-        utils::application_context::get_application_context,
+        utils::application_context::{get_application_context, reload_local_config},
         utils::ndk::{density_dpi, long_press_timeout_ms, scale_factor, touch_slop_px},
     },
     core::{
         config::{
-            CommandConfig, DesktopPreset, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL,
-            PIPEWIRE_GUEST_RUNTIME_DIR, PULSE_GUEST_SERVER,
+            CommandConfig, DesktopPreset, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, CONFIG_FILE,
+            DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR, PULSE_GUEST_SERVER,
         },
         hard_links,
     },
@@ -26,7 +26,7 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        mpsc::{self, Sender},
+        mpsc::{self, Receiver, Sender, TryRecvError},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -40,11 +40,15 @@ use xz2::read::XzDecoder;
 pub enum SetupMessage {
     Progress(String),
     Error(String),
+    /// Ask the setup page which desktop preset to install; it answers through `desktop_choice`.
+    ChooseDesktop,
 }
 
 pub struct SetupOptions {
     pub android_app: AndroidApp,
     pub mpsc_sender: Sender<SetupMessage>,
+    /// Set on a fresh install, where the setup page asks which desktop to install.
+    pub desktop_choice: Option<Arc<Mutex<Receiver<String>>>>,
 }
 
 /// Setup is a process that should be done **only once** when the user installed the app.
@@ -285,11 +289,51 @@ fn generate_machine_id() -> String {
     format!("{:016x}{:016x}", nanos as u64, process::id() as u64)
 }
 
+/// On a fresh install the setup page asks which desktop to install while the rootfs downloads;
+/// write the answer to the config before `install_dependencies` reads it.
+fn apply_desktop_choice(options: &SetupOptions) -> StageOutput {
+    let receiver = options.desktop_choice.clone()?;
+    let config_path = Path::new(ARCH_FS_ROOT).join(CONFIG_FILE.trim_start_matches('/'));
+    if config_path.exists() {
+        return None;
+    }
+
+    let mpsc_sender = options.mpsc_sender.clone();
+    Some(thread::spawn(move || {
+        let receiver = receiver.lock().unwrap();
+        let choice = match receiver.try_recv() {
+            Ok(choice) => choice,
+            Err(TryRecvError::Empty) => {
+                mpsc_sender
+                    .send(SetupMessage::Progress(
+                        "Choose a desktop to continue".to_string(),
+                    ))
+                    .unwrap_or(());
+                receiver.recv().unwrap_or_default()
+            }
+            Err(TryRecvError::Disconnected) => String::new(),
+        };
+        let preset = if choice == "plasma" { "plasma" } else { "xfce" };
+
+        fs::create_dir_all(config_path.parent().unwrap())
+            .expect("Failed to create the config directory");
+        fs::write(
+            &config_path,
+            format!(
+                "# Local Desktop's config: {DOCS_HOME_URL}docs/user/configurations\n\
+                 [desktop]\n\
+                 # \"xfce\" or \"plasma\". Changing it installs the other desktop on the next start.\n\
+                 preset = \"{preset}\"\n"
+            ),
+        )
+        .expect("Failed to write the config");
+        reload_local_config();
+        log::info!("Desktop preset chosen during setup: {preset}");
+    }))
+}
+
 fn install_dependencies(options: &SetupOptions) -> StageOutput {
-    let SetupOptions {
-        mpsc_sender,
-        android_app: _,
-    } = options;
+    let SetupOptions { mpsc_sender, .. } = options;
 
     let context = get_application_context();
     let CommandConfig {
@@ -1337,25 +1381,36 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         });
     }
 
+    // A fresh install asks which desktop to install; the answer is applied once the rootfs exists.
+    let (choice_sender, choice_receiver) = mpsc::channel();
+    let fresh_install = Path::new(ARCH_FS_ROOT)
+        .read_dir()
+        .map_or(true, |mut d| d.next().is_none());
+    if fresh_install {
+        sender.send(SetupMessage::ChooseDesktop).unwrap_or(());
+    }
+
     let options = SetupOptions {
         android_app: android_app.clone(),
         mpsc_sender: sender.clone(),
+        desktop_choice: fresh_install.then(|| Arc::new(Mutex::new(choice_receiver))),
     };
 
     let stages: Vec<SetupStage> = vec![
         Box::new(setup_arch_fs),                // Step 1. Setup Arch FS (extract)
         Box::new(simulate_linux_sysdata_stage), // Step 2. Simulate Linux system data
-        Box::new(install_dependencies),         // Step 3. Install dependencies
-        Box::new(setup_machine_id),             // Step 4. Seed /etc/machine-id for D-Bus clients
-        Box::new(setup_pipewire_package_lock), // Step 5. Hold guest PipeWire packages for the Android-side PipeWire POC
-        Box::new(setup_firefox_config),        // Step 6. Setup Firefox config
-        Box::new(setup_fake_bwrap), // Step 7. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
-        Box::new(setup_chromium_no_sandbox), // Step 8. Make Chromium/Electron apps launchable without a terminal
-        Box::new(setup_onboard_signal_fix), // Step 9. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
-        Box::new(setup_xfce_wayland),       // Step 10. Setup Xfce Wayland launch and HiDPI scaling
-        Box::new(setup_plasma),             // Step 11. Setup the Plasma launcher and defaults
-        Box::new(fix_xkb_symlink),          // Step 12. Fix xkb symlink
-        Box::new(migrate_hard_links),       // Step 13. Move old hard link data into the shared store (once)
+        Box::new(apply_desktop_choice),         // Step 3. Write the desktop chosen on a fresh install
+        Box::new(install_dependencies),         // Step 4. Install dependencies
+        Box::new(setup_machine_id),             // Step 5. Seed /etc/machine-id for D-Bus clients
+        Box::new(setup_pipewire_package_lock), // Step 6. Hold guest PipeWire packages for the Android-side PipeWire POC
+        Box::new(setup_firefox_config),        // Step 7. Setup Firefox config
+        Box::new(setup_fake_bwrap), // Step 8. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
+        Box::new(setup_chromium_no_sandbox), // Step 9. Make Chromium/Electron apps launchable without a terminal
+        Box::new(setup_onboard_signal_fix), // Step 10. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
+        Box::new(setup_xfce_wayland),       // Step 11. Setup Xfce Wayland launch and HiDPI scaling
+        Box::new(setup_plasma),             // Step 12. Setup the Plasma launcher and defaults
+        Box::new(fix_xkb_symlink),          // Step 13. Fix xkb symlink
+        Box::new(migrate_hard_links),       // Step 14. Move old hard link data into the shared store (once)
     ];
 
     let handle_stage_error = |e: Box<dyn std::any::Any + Send>, sender: &Sender<SetupMessage>| {
@@ -1442,6 +1497,6 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
             android_app,
         })
     } else {
-        PolarBearBackend::WebView(WebviewBackend::build(receiver, progress))
+        PolarBearBackend::WebView(WebviewBackend::build(receiver, progress, choice_sender))
     }
 }
