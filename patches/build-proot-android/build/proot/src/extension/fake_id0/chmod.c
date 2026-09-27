@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <linux/limits.h>
+#include <sys/stat.h>
 
 #include "syscall/sysnum.h"
 #include "extension/fake_id0/chmod.h"
@@ -51,6 +52,19 @@ int handle_chmod_enter_end(Tracee *tracee, Reg path_sysarg, Reg mode_sysarg,
 		return -EPERM;
 
 	call_mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
-	set_sysnum(tracee, PR_getuid);
-	return write_meta_file(meta_path, call_mode, owner, group, 0, config);
+	status = write_meta_file(meta_path, call_mode, owner, group, 0, config);
+	if(status < 0)
+		return status;
+
+	/* The record holds the mode the emulated users see, but the kernel only knows the real
+	 * owner. Apply the mode for real too, so execute bits take effect, while the real owner
+	 * keeps read/write access (and search access to directories). Set-id bits stay in the
+	 * record only. */
+	struct stat real;
+	mode_t real_mode = (call_mode & 01777) | S_IRUSR | S_IWUSR;
+	if((call_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0
+	   || (lstat(path, &real) == 0 && S_ISDIR(real.st_mode)))
+		real_mode |= S_IXUSR;
+	poke_reg(tracee, mode_sysarg, real_mode);
+	return 0;
 }
