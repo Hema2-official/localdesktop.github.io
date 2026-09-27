@@ -800,9 +800,14 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 		poke_reg(tracee, SYSARG_RESULT, 0);
 		if ((int)result <= 0)
 			return result;
+		if (result >= PATH_MAX)
+			return -ENAMETOOLONG;
 
-		status = read_sysarg_path(tracee, path, SYSARG_3, MODIFIED);
-		if(status < 0) 
+		/* readlink(2) doesn't terminate what it writes: read exactly that many bytes. Reading
+		 * it as a string ran on into whatever the tracee's stack held after it and failed with
+		 * ENAMETOOLONG when that had no zero byte, e.g. dlopen() failing to stat libraries.  */
+		status = read_data(tracee, path, peek_reg(tracee, MODIFIED, SYSARG_3), result);
+		if (status < 0)
 			return status;
 
 		path[result] = '\0';
