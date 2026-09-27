@@ -1366,6 +1366,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
     let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
 
+    ArchProcess::remove_stale_temp_files();
     if ArchProcess::is_supported(&android_app) {
         sender
             .send(SetupMessage::Progress(

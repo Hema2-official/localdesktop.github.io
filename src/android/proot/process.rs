@@ -26,6 +26,37 @@ pub struct ArchProcess {
 }
 
 impl ArchProcess {
+    /// proot removes its `proot-<pid>-*` and `prootshm-<pid>-*` temporary files when it exits,
+    /// but not when Android kills it along with the app, so remove those of dead processes.
+    pub fn remove_stale_temp_files() {
+        let Ok(entries) = fs::read_dir(get_application_context().data_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(rest) = name.to_str().and_then(|name| {
+                name.strip_prefix("proot-")
+                    .or_else(|| name.strip_prefix("prootshm-"))
+            }) else {
+                continue;
+            };
+            let pid = rest.split('-').next().unwrap_or_default();
+            if pid.is_empty()
+                || !pid.bytes().all(|b| b.is_ascii_digit())
+                || Path::new("/proc").join(pid).exists()
+            {
+                continue;
+            }
+            let removed = match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => fs::remove_dir_all(entry.path()),
+                _ => fs::remove_file(entry.path()),
+            };
+            if let Err(error) = removed {
+                log::warn!("Could not remove {}: {error}", entry.path().display());
+            }
+        }
+    }
+
     fn ensure_support_probe_rootfs(android_app: &AndroidApp) -> Option<()> {
         let context = get_application_context();
         let probe_exec = context.data_dir.join(SUPPORT_CHECK_BINARY);
