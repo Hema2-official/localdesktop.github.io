@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -145,6 +145,8 @@ pub struct EventLoop<T: 'static> {
     cause: StartCause,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
+    /// Last reported pointer button mask per input device.
+    pointer_buttons: HashMap<i32, u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -157,6 +159,27 @@ impl Default for PlatformSpecificEventLoopAttributes {
     fn default() -> Self {
         Self { android_app: Default::default(), ignore_volume_keys: true }
     }
+}
+
+/// The mouse buttons set in an Android button mask.
+fn mouse_buttons(state: input::ButtonState) -> Vec<MouseButton> {
+    let mut buttons = Vec::new();
+    if state.primary() || state.stylus_primary() {
+        buttons.push(MouseButton::Left);
+    }
+    if state.secondary() || state.stylus_secondary() {
+        buttons.push(MouseButton::Right);
+    }
+    if state.teriary() {
+        buttons.push(MouseButton::Middle);
+    }
+    if state.back() {
+        buttons.push(MouseButton::Back);
+    }
+    if state.forward() {
+        buttons.push(MouseButton::Forward);
+    }
+    buttons
 }
 
 impl<T: 'static> EventLoop<T> {
@@ -194,6 +217,7 @@ impl<T: 'static> EventLoop<T> {
             cause: StartCause::Init,
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
+            pointer_buttons: HashMap::new(),
         })
     }
 
@@ -428,22 +452,6 @@ impl<T: 'static> EventLoop<T> {
                                 return input_status;
                             }
 
-                            let button = match button {
-                                _ if button.primary() => MouseButton::Left,
-                                _ if button.secondary() => MouseButton::Right,
-                                _ if button.teriary() => MouseButton::Middle,
-                                _ if button.back() => MouseButton::Back,
-                                _ if button.forward() => MouseButton::Forward,
-                                _ if button.stylus_primary() => MouseButton::Left,
-                                _ if button.stylus_secondary() => {
-                                    MouseButton::Right
-                                },
-                                _  => {
-                                    warn!("Unknown button: {:?}", button);
-                                    MouseButton::Left
-                                },
-                            };
-
                             let state = match action {
                                 MotionAction::ButtonPress
                                 | MotionAction::Down
@@ -451,17 +459,45 @@ impl<T: 'static> EventLoop<T> {
                                 _ => event::ElementState::Released,
                             };
 
-                            callback(
-                                Event::WindowEvent {
-                                    window_id,
-                                    event: WindowEvent::MouseInput {
-                                        device_id,
-                                        state,
-                                        button,
+                            // `button_state()` is the mask *after* this event, so a released
+                            // button is already missing from it. Compare with the device's
+                            // previous mask to find the buttons that actually changed.
+                            let previous = self
+                                .pointer_buttons
+                                .insert(motion_event.device_id(), button.0)
+                                .unwrap_or(0);
+                            let changed = match action {
+                                MotionAction::Cancel => previous,
+                                _ if state == event::ElementState::Pressed => button.0 & !previous,
+                                _ => previous & !button.0,
+                            };
+                            if action == MotionAction::Cancel {
+                                self.pointer_buttons.remove(&motion_event.device_id());
+                            }
+
+                            let mut buttons = mouse_buttons(input::ButtonState(changed));
+                            if buttons.is_empty() {
+                                // No known button changed, e.g. a stylus touching down without
+                                // pressing one: treat it as the primary button.
+                                if changed != 0 {
+                                    warn!("Unknown button: {changed:#x}");
+                                }
+                                buttons.push(MouseButton::Left);
+                            }
+
+                            for button in buttons {
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::MouseInput {
+                                            device_id,
+                                            state,
+                                            button,
+                                        },
                                     },
-                                },
-                                self.window_target(),
-                            );
+                                    self.window_target(),
+                                );
+                            }
                         },
                         MotionAction::Scroll => {
                             // Mouse wheel scroll
