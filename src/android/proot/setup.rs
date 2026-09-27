@@ -185,10 +185,26 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
     None
 }
 
+/// The empty directory proot binds over `/sys/fs/selinux`. The rootfs ships `/sys` read-only
+/// (0555), so it has to become writable first; earlier setups skipped that and never created it.
+fn ensure_empty_sys_dir(fs_root: &Path) {
+    let empty = fs_root.join("sys/.empty");
+    if empty.exists() {
+        return;
+    }
+    let _ = fs::create_dir_all(fs_root.join("sys"));
+    let _ = fs::set_permissions(fs_root.join("sys"), fs::Permissions::from_mode(0o700));
+    if let Err(error) = fs::create_dir_all(&empty) {
+        log::warn!("Failed to create {}: {error}", empty.display());
+    }
+    let _ = fs::set_permissions(&empty, fs::Permissions::from_mode(0o700));
+}
+
 fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     let mpsc_sender = options.mpsc_sender.clone();
 
+    ensure_empty_sys_dir(fs_root);
     if !fs_root.join("proc/.version").exists() {
         return Some(thread::spawn(move || {
             mpsc_sender
@@ -199,21 +215,8 @@ fn simulate_linux_sysdata_stage(options: &SetupOptions) -> StageOutput {
 
             // Create necessary directories - don't fail if they already exist
             let _ = fs::create_dir_all(fs_root.join("proc"));
-            let _ = fs::create_dir_all(fs_root.join("sys"));
-            let _ = fs::create_dir_all(fs_root.join("sys/.empty"));
-
-            // Set permissions - only try to set permissions if we're on Unix and have the capability
-            #[cfg(unix)]
-            {
-                // Try to set permissions, but don't fail if we can't
-                let _ =
-                    fs::set_permissions(fs_root.join("proc"), fs::Permissions::from_mode(0o700));
-                let _ = fs::set_permissions(fs_root.join("sys"), fs::Permissions::from_mode(0o700));
-                let _ = fs::set_permissions(
-                    fs_root.join("sys/.empty"),
-                    fs::Permissions::from_mode(0o700),
-                );
-            }
+            // Try to set permissions, but don't fail if we can't
+            let _ = fs::set_permissions(fs_root.join("proc"), fs::Permissions::from_mode(0o700));
 
             // Create fake proc files
             let proc_files = [
