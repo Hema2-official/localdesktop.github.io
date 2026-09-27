@@ -6,8 +6,9 @@ use std::{
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Inside the data directory of the package this build is for, see `build.rs`.
 #[cfg(not(test))]
-pub const ARCH_FS_ROOT: &str = "/data/data/app.polarbear/files/arch";
+pub const ARCH_FS_ROOT: &str = concat!("/data/data/", env!("LOCALDESKTOP_PACKAGE"), "/files/arch");
 #[cfg(test)]
 pub const ARCH_FS_ROOT: &str = "/data/local/tmp/arch";
 
@@ -28,7 +29,12 @@ pub const WAYLAND_SOCKET_NAME: &str = "wayland-0";
 
 pub const MAX_PANEL_LOG_ENTRIES: usize = 100;
 
+#[cfg(official_package)]
 pub const SENTRY_DSN: &str = "https://d8af27f864ade027ff81ecadea91b02e@o4509548388417536.ingest.de.sentry.io/4509548392480848";
+/// Builds under another package name (forks, side-by-side dev builds) don't report to the
+/// maintainers' Sentry project; an empty DSN leaves the Sentry client disabled.
+#[cfg(not(official_package))]
+pub const SENTRY_DSN: &str = "";
 
 /// PipeWire runtime path as seen from inside the proot guest.
 pub const PIPEWIRE_GUEST_RUNTIME_DIR: &str = "/tmp";
