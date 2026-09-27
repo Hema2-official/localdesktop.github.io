@@ -1204,7 +1204,7 @@ const PLASMA_XDG_DIR: &str = "etc/localdesktop/plasma";
 const PLASMA_DEFAULTS: &[(&str, &str)] = &[
     (
         "kwinrc",
-        "[Wayland]\n# Plasma's on-screen keyboard, for touch-only use.\nInputMethod=/usr/share/applications/org.kde.plasma.keyboard.desktop\n",
+        "[Wayland]\n# Plasma's on-screen keyboard, for touch-only use.\nInputMethod=/usr/share/applications/org.kde.plasma.keyboard.desktop\n# Show it for any input: touches reach KWin as mouse events, which it would otherwise ignore.\nVirtualKeyboardMode=2\n",
     ),
     (
         "kdeglobals",
