@@ -19,7 +19,19 @@ android:
       label: "Local Desktop"
       extract_native_libs: true # Required for proot invocations
       use_cleartext_traffic: true # Required for connecting to ws://127.0.0.1, see assets/setup-progress.html
+      activities:
+        - {} # The NativeActivity; the APK builder fills it in
+        - name: app.polarbear.WebPageActivity # The app's own pages, such as the terminal
+          label: "Local Desktop"
+          exported: false
+          launch_mode: singleTop
+          window_soft_input_mode: adjustResize
+          # Keep the page (and the terminal session in it) when the phone rotates or a keyboard attaches
+          config_changes: "orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
       services:
+        - name: app.polarbear.SessionService
+          exported: false
+          foreground_service_type: "0x40000000" # specialUse, newer than the android.jar the manifest compiles against
         - name: app.polarbear.KeyboardAccessibilityService
           permission: android.permission.BIND_ACCESSIBILITY_SERVICE
           label: "@string/keyboard_service_label"
@@ -44,6 +56,8 @@ android:
       - name: android.permission.INTERNET
       - name: android.permission.ACCESS_NETWORK_STATE
       - name: android.permission.POST_NOTIFICATIONS
+      - name: android.permission.FOREGROUND_SERVICE
+      - name: android.permission.FOREGROUND_SERVICE_SPECIAL_USE
       - name: android.permission.MANAGE_EXTERNAL_STORAGE
       - name: android.permission.READ_EXTERNAL_STORAGE
       - name: android.permission.WRITE_EXTERNAL_STORAGE

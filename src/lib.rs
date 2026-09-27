@@ -8,6 +8,7 @@ pub mod android {
     pub mod accessibility;
 
     pub mod main;
+    pub mod session;
     pub mod terminal;
     pub mod app {
         pub mod build;

@@ -2,6 +2,8 @@ use crate::{
     android::{
         accessibility::{register_event_loop_proxy, AppUserEvent},
         app::build::PolarBearApp,
+        proot::launch,
+        session,
         utils::{
             application_context::ApplicationContext,
             fullscreen_immersive::{enable_fullscreen_immersive_mode, keep_screen_on},
@@ -64,6 +66,7 @@ fn android_main(android_app: AndroidApp) {
     }
 
     ApplicationContext::build(&android_app);
+    session::register_natives(&android_app);
 
     run_in_jvm(enable_fullscreen_immersive_mode, android_app.clone());
     run_in_jvm(keep_screen_on, android_app.clone());
@@ -88,4 +91,8 @@ fn android_main(android_app: AndroidApp) {
 
     // Phase 2: Run
     event_loop.run_app(&mut app).expect("Failed to run app");
+
+    // The activity is gone. The session service would keep this process alive, but a new
+    // activity can't run in it (winit builds one event loop per process), so leave for good.
+    launch::quit();
 }

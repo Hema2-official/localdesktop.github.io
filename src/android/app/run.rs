@@ -12,7 +12,7 @@ use crate::android::{
         webview::ErrorVariant,
     },
     proot::launch::launch,
-    terminal,
+    session, terminal,
     utils::{
         ndk::{self, run_in_jvm},
         webview::show_webview_popup,
@@ -96,7 +96,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 thread::spawn(move || {
                     run_in_jvm(
                         move |env, app| {
-                            show_webview_popup(env, app, &url, false);
+                            show_webview_popup(env, app, &url);
                         },
                         android_app,
                     );
@@ -125,9 +125,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 }
                 handle(CentralizedEvent::Redraw, backend, event_loop);
                 launch();
-                if ndk::take_open_request(&self.frontend.android_app).as_deref() == Some("terminal")
-                {
-                    terminal::open(&self.frontend.android_app);
+                let android_app = &self.frontend.android_app;
+                session::request_notification_permission(android_app);
+                session::start_service(android_app);
+                if ndk::take_open_request(android_app).as_deref() == Some("terminal") {
+                    terminal::open(android_app);
                 }
                 // Start the standalone-client PipeWire/AAudio backend.
                 pipewire_standalone_aaudio::spawn_after_ready(self.frontend.android_app.clone());

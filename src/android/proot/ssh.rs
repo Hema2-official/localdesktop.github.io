@@ -155,6 +155,13 @@ chown -R "$user:" "$home/.ssh"
     output.status.success()
 }
 
+/// The user and port to log in with, when the SSH server runs.
+pub fn login(local_config: &LocalConfig) -> Option<(String, u16)> {
+    let username = &local_config.user.username;
+    (wanted(&local_config.ssh, username) && Path::new(ARCH_FS_ROOT).join(SSHD).exists())
+        .then(|| (username.clone(), local_config.ssh.port))
+}
+
 /// Start sshd next to the desktop, once per app process.
 pub fn start(local_config: &LocalConfig) {
     let username = local_config.user.username.clone();

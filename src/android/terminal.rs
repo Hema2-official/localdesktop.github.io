@@ -8,7 +8,7 @@
 
 use crate::android::proot::process::ArchProcess;
 use crate::android::utils::application_context::get_application_context;
-use crate::android::utils::{ndk::run_in_jvm, webview::show_webview_popup};
+use crate::android::session;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -38,20 +38,10 @@ pub fn url() -> io::Result<String> {
 
 /// Show the terminal over the desktop.
 pub fn open(android_app: &AndroidApp) {
-    let url = match url() {
-        Ok(url) => url,
-        Err(error) => {
-            log::error!("Failed to start the terminal: {error}");
-            return;
-        }
-    };
-    let android_app = android_app.clone();
-    thread::spawn(move || {
-        run_in_jvm(
-            move |env, app| show_webview_popup(env, app, &url, true),
-            android_app,
-        );
-    });
+    match url() {
+        Ok(url) => session::open_page(android_app, &url),
+        Err(error) => log::error!("Failed to start the terminal: {error}"),
+    }
 }
 
 fn random_token() -> io::Result<String> {

@@ -1,15 +1,20 @@
 use super::process::ArchProcess;
 use crate::android::utils::application_context::get_application_context;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::io::{BufRead, BufReader};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 static LAUNCH_RUNNING: AtomicBool = AtomicBool::new(false);
+/// The proot running the desktop session, 0 when there is none.
+static DESKTOP_PID: AtomicU32 = AtomicU32::new(0);
 
 struct LaunchRunningGuard;
 
 impl Drop for LaunchRunningGuard {
     fn drop(&mut self) {
+        DESKTOP_PID.store(0, Ordering::Release);
         LAUNCH_RUNNING.store(false, Ordering::Release);
     }
 }
@@ -39,11 +44,81 @@ pub fn launch() {
         super::ssh::start(&local_config);
         let username = local_config.user.username;
 
-        ArchProcess {
+        let desktop = ArchProcess {
             command: local_config.command.launch,
             user: Some(username),
-            log: Some(Arc::new(|it| log::trace!("{}", it))),
+            log: None,
+        };
+        let spawned = desktop
+            .command()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(error) => {
+                log::error!("Failed to start the desktop session: {error}");
+                return;
+            }
+        };
+        DESKTOP_PID.store(child.id(), Ordering::Release);
+        for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+            match line {
+                Ok(line) => log::trace!("{}", line),
+                Err(_) => break,
+            }
         }
-        .run();
+        let status = child.wait();
+        log::info!("Desktop session ended: {status:?}");
     });
+}
+
+/// End the desktop session and start it again, e.g. when it hangs. proot's --kill-on-exit takes
+/// everything the session started down with it.
+pub fn restart() {
+    let pid = DESKTOP_PID.load(Ordering::Acquire);
+    if pid != 0 {
+        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while LAUNCH_RUNNING.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    launch();
+}
+
+/// End every process the app started (proot and everything inside it, the audio daemons), as
+/// the app process itself exits: Android doesn't always take them down with it.
+pub fn kill_children() {
+    let me = std::process::id();
+    let uid = unsafe { libc::getuid() };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|it| it.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == me {
+            continue;
+        }
+        // Not the /proc entry's owner: that reads as root for non-dumpable processes.
+        let owned = std::fs::read_to_string(entry.path().join("status"))
+            .ok()
+            .and_then(|status| {
+                let line = status.lines().find(|it| it.starts_with("Uid:"))?;
+                line.split_whitespace().nth(1)?.parse::<u32>().ok()
+            })
+            == Some(uid);
+        if owned {
+            unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        }
+    }
+}
+
+/// Stop everything and leave.
+pub fn quit() -> ! {
+    log::info!("Quitting");
+    kill_children();
+    std::process::exit(0);
 }

@@ -1,0 +1,198 @@
+//! The session notification (`SessionService`) and the calls it makes back into Rust
+//! (`app.polarbear.Native`). Java sources are in `src/android/java/app/polarbear/`.
+
+use crate::android::proot::{launch, ssh};
+use crate::android::terminal;
+use crate::android::utils::application_context::get_application_context;
+use crate::android::utils::ndk::run_in_jvm;
+use jni::errors::Result as JniResult;
+use jni::objects::{JClass, JObject, JString, JValue};
+use jni::sys::_jobject;
+use jni::{JNIEnv, NativeMethod};
+use std::thread;
+use winit::platform::android::activity::AndroidApp;
+
+/// Load one of the app's own classes. `FindClass` on a native thread only sees the system's.
+fn app_class<'local>(
+    env: &mut JNIEnv<'local>,
+    activity: &JObject,
+    name: &str,
+) -> JniResult<JClass<'local>> {
+    let loader = env
+        .call_method(activity, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])?
+        .l()?;
+    let name = env.new_string(name)?;
+    let class = env
+        .call_method(
+            loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[(&name).into()],
+        )?
+        .l()?;
+    Ok(JClass::from(class))
+}
+
+fn sdk_version(env: &mut JNIEnv) -> i32 {
+    env.get_static_field("android/os/Build$VERSION", "SDK_INT", "I")
+        .and_then(|it| it.i())
+        .unwrap_or(0)
+}
+
+/// Run a JNI call against the activity, logging (and clearing) whatever it throws.
+fn with_activity(android_app: &AndroidApp, what: &str, call: impl FnOnce(&mut JNIEnv, &JObject) -> JniResult<()>) {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            if let Err(error) = call(env, &activity) {
+                log::error!("Failed to {what}: {error}");
+                if env.exception_check().unwrap_or(false) {
+                    let _ = env.exception_describe();
+                    let _ = env.exception_clear();
+                }
+            }
+        },
+        android_app.clone(),
+    );
+}
+
+/// Make `Native.onAction` reach `on_action`. NativeActivity loads this library without
+/// `System.loadLibrary`, so the JVM can't find it by symbol name.
+pub fn register_natives(android_app: &AndroidApp) {
+    with_activity(android_app, "register native methods", |env, activity| {
+        let class = app_class(env, activity, "app.polarbear.Native")?;
+        env.register_native_methods(
+            &class,
+            &[NativeMethod {
+                name: "onAction".into(),
+                sig: "(Ljava/lang/String;)V".into(),
+                fn_ptr: on_action as *mut std::ffi::c_void,
+            }],
+        )
+    });
+}
+
+extern "system" fn on_action(mut env: JNIEnv, _class: JClass, action: JString) {
+    let action: String = env
+        .get_string(&action)
+        .map(Into::into)
+        .unwrap_or_default();
+    match action.as_str() {
+        // Off the service's main thread: restarting waits for the old session to end.
+        "restart" => {
+            thread::spawn(launch::restart);
+        }
+        "quit" => launch::quit(),
+        _ => log::warn!("Unknown session action {action}"),
+    }
+}
+
+/// Android 13+ only shows the notification with the user's permission; ask once.
+pub fn request_notification_permission(android_app: &AndroidApp) {
+    with_activity(android_app, "request the notification permission", |env, activity| {
+        if sdk_version(env) < 33 {
+            return Ok(());
+        }
+        let permission = env.new_string("android.permission.POST_NOTIFICATIONS")?;
+        let granted = env
+            .call_method(
+                activity,
+                "checkSelfPermission",
+                "(Ljava/lang/String;)I",
+                &[(&permission).into()],
+            )?
+            .i()?
+            == 0;
+        if !granted {
+            let permissions = env.new_object_array(1, "java/lang/String", &permission)?;
+            env.call_method(
+                activity,
+                "requestPermissions",
+                "([Ljava/lang/String;I)V",
+                &[(&permissions).into(), JValue::Int(1)],
+            )?;
+        }
+        Ok(())
+    });
+}
+
+/// Start the foreground service, with what its notification shows.
+pub fn start_service(android_app: &AndroidApp) {
+    let local_config = get_application_context().local_config;
+    let terminal_url = terminal::url()
+        .map_err(|error| log::error!("Failed to start the terminal server: {error}"))
+        .ok();
+    let login = ssh::login(&local_config);
+
+    with_activity(android_app, "start the session service", |env, activity| {
+        let class = app_class(env, activity, "app.polarbear.SessionService")?;
+        let intent = env.new_object(
+            "android/content/Intent",
+            "(Landroid/content/Context;Ljava/lang/Class;)V",
+            &[activity.into(), (&class).into()],
+        )?;
+        let put_string = |env: &mut JNIEnv, key: &str, value: &str| -> JniResult<()> {
+            let key = env.new_string(key)?;
+            let value = env.new_string(value)?;
+            env.call_method(
+                &intent,
+                "putExtra",
+                "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+                &[(&key).into(), (&value).into()],
+            )?;
+            Ok(())
+        };
+        if let Some(url) = &terminal_url {
+            put_string(env, "terminal_url", url)?;
+        }
+        if let Some((user, port)) = &login {
+            put_string(env, "ssh_user", user)?;
+            let key = env.new_string("ssh_port")?;
+            env.call_method(
+                &intent,
+                "putExtra",
+                "(Ljava/lang/String;I)Landroid/content/Intent;",
+                &[(&key).into(), JValue::Int(*port as i32)],
+            )?;
+        }
+        let start = if sdk_version(env) >= 26 {
+            "startForegroundService"
+        } else {
+            "startService"
+        };
+        env.call_method(
+            activity,
+            start,
+            "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+            &[(&intent).into()],
+        )?;
+        Ok(())
+    });
+}
+
+/// Show one of the app's pages (e.g. the terminal) in `WebPageActivity`.
+pub fn open_page(android_app: &AndroidApp, url: &str) {
+    with_activity(android_app, "open a page", |env, activity| {
+        let class = app_class(env, activity, "app.polarbear.WebPageActivity")?;
+        let intent = env.new_object(
+            "android/content/Intent",
+            "(Landroid/content/Context;Ljava/lang/Class;)V",
+            &[activity.into(), (&class).into()],
+        )?;
+        let key = env.new_string("url")?;
+        let value = env.new_string(url)?;
+        env.call_method(
+            &intent,
+            "putExtra",
+            "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+            &[(&key).into(), (&value).into()],
+        )?;
+        env.call_method(
+            activity,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[(&intent).into()],
+        )?;
+        Ok(())
+    });
+}
