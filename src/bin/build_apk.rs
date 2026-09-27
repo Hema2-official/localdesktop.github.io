@@ -1212,6 +1212,8 @@ pub mod apk {
             pub enabled: Option<bool>,
             #[serde(rename(serialize = "android:exported"))]
             pub exported: Option<bool>,
+            #[serde(rename(serialize = "android:foregroundServiceType"))]
+            pub foreground_service_type: Option<String>,
             #[serde(rename(serialize = "meta-data"))]
             #[serde(default)]
             pub meta_data: Vec<MetaData>,
@@ -3325,6 +3327,12 @@ pub mod apk {
                         let mut data = 0;
                         let mut data_type = ResValueType::Null;
                         for flag in value.split('|') {
+                            // A number for flags newer than the android.jar the table comes from.
+                            if let Some(hex) = flag.strip_prefix("0x") {
+                                data |= u32::from_str_radix(hex, 16)?;
+                                data_type = ResValueType::IntHex;
+                                continue;
+                            }
                             let id = table.entry_by_ref(Ref::id(flag))?.id();
                             let value = entry.lookup_value(id).unwrap();
                             data |= value.data;
