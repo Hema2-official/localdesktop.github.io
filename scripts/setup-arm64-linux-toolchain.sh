@@ -6,6 +6,7 @@
 # compiling and linking; the NDK only provides the Android sysroot and clang's runtime libraries.
 #
 # Install these as root first (Debian/Ubuntu): sudo apt install clang lld llvm curl unzip
+# Building proot (patches/build-proot-android/build-on-arm64-linux.sh) also needs gawk.
 #
 # Downloads go to LOCALDESKTOP_DEV_DIR (default ~/.cache/localdesktop). Rust goes wherever
 # RUSTUP_HOME and CARGO_HOME point (default ~/.rustup and ~/.cargo).
