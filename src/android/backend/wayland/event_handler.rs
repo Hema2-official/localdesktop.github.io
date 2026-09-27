@@ -1,7 +1,9 @@
 use crate::android::{
     accessibility,
     backend::wayland::{
-        compositor::{send_frames_surface_tree, ClientState, State},
+        compositor::{
+            send_frames_surface_tree, send_presentation_feedback_surface_tree, ClientState, State,
+        },
         write_guest_output_state, CentralizedEvent, TouchMode, WaylandBackend,
     },
 };
@@ -17,6 +19,7 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer;
 use smithay::reexports::wayland_server::protocol::wl_pointer::ButtonState as WlButtonState;
 use smithay::utils::{Point, Rectangle, Transform, SERIAL_COUNTER};
+use smithay::wayland::presentation::Refresh;
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::{
     backend::input::{
@@ -26,6 +29,7 @@ use smithay::{
     output::{Mode, Scale},
 };
 use std::sync::Arc;
+use std::time::Duration;
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
 /// Linux input event code for the left mouse button (`BTN_LEFT`).
@@ -484,6 +488,25 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     winit
         .submit(Some(&[damage]))
         .map_err(|error| format!("Failed to submit frame: {error}"))?;
+
+    // The frame is on screen: answer wp_presentation feedback, which KWin paces itself by.
+    let compositor = &mut backend.compositor;
+    compositor.frame_sequence += 1;
+    let sequence = compositor.frame_sequence;
+    if let Some(output) = &compositor.output {
+        // Matches the 60 Hz mode the output advertises.
+        let refresh = Refresh::fixed(Duration::from_micros(16_667));
+        let time = backend.clock.now();
+        for surface in compositor.state.xdg_shell_state.toplevel_surfaces() {
+            send_presentation_feedback_surface_tree(
+                surface.wl_surface(),
+                output,
+                time,
+                refresh,
+                sequence,
+            );
+        }
+    }
 
     Ok(())
 }

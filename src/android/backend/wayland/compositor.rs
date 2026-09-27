@@ -1,15 +1,17 @@
 use super::bind::bind_socket;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_pointer_constraints,
+    delegate_presentation, delegate_seat, delegate_shm, delegate_single_pixel_buffer,
+    delegate_viewporter, delegate_xdg_shell,
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
+        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{protocol::wl_seat, Display},
     },
-    utils::{Logical, Serial, Size},
+    utils::{Logical, Monotonic, Point, Serial, Size, Time},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -17,6 +19,8 @@ use smithay::{
             SurfaceAttributes, TraversalAction,
         },
         output::OutputHandler,
+        pointer_constraints::{PointerConstraintsHandler, PointerConstraintsState},
+        presentation::{PresentationFeedbackCachedState, PresentationState, Refresh},
         selection::{
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -27,6 +31,8 @@ use smithay::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
         },
         shm::{ShmHandler, ShmState},
+        single_pixel_buffer::SinglePixelBufferState,
+        viewporter::ViewporterState,
     },
 };
 use smithay::{
@@ -51,6 +57,8 @@ pub struct Compositor {
     pub pointer: PointerHandle<State>,
     pub output: Option<Output>,
     pub output_global: Option<GlobalId>,
+    /// Frames presented so far, for presentation feedback.
+    pub frame_sequence: u64,
 }
 
 pub struct State {
@@ -59,6 +67,11 @@ pub struct State {
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
     pub seat_state: SeatState<Self>,
+    // Nested compositors such as KWin require these.
+    pub viewporter_state: ViewporterState,
+    pub single_pixel_buffer_state: SinglePixelBufferState,
+    pub pointer_constraints_state: PointerConstraintsState,
+    pub presentation_state: PresentationState,
     pub size: Size<i32, Logical>,
 }
 
@@ -145,6 +158,53 @@ impl SeatHandler for State {
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: input::pointer::CursorImageStatus) {}
 }
 
+impl PointerConstraintsHandler for State {
+    // Android input stays absolute, so pointer locks and confinement are never activated.
+    fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {}
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+    }
+}
+
+/// Tell the surfaces' wp_presentation listeners that their content reached the screen.
+pub fn send_presentation_feedback_surface_tree(
+    surface: &WlSurface,
+    output: &Output,
+    time: Time<Monotonic>,
+    refresh: Refresh,
+    sequence: u64,
+) {
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, &()| TraversalAction::DoChildren(()),
+        |_surf, states, &()| {
+            let callbacks = std::mem::take(
+                &mut states
+                    .cached_state
+                    .get::<PresentationFeedbackCachedState>()
+                    .current()
+                    .callbacks,
+            );
+            for callback in callbacks {
+                callback.presented(
+                    output,
+                    time,
+                    refresh,
+                    sequence,
+                    wp_presentation_feedback::Kind::Vsync,
+                );
+            }
+        },
+        |_, _, &()| true,
+    );
+}
+
 pub fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
     with_surface_tree_downward(
         surface,
@@ -187,6 +247,10 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_data_device!(State);
 delegate_output!(State);
+delegate_viewporter!(State);
+delegate_single_pixel_buffer!(State);
+delegate_pointer_constraints!(State);
+delegate_presentation!(State);
 
 impl Compositor {
     pub fn build() -> Result<Compositor, Box<dyn Error>> {
@@ -214,6 +278,13 @@ impl Compositor {
             shm_state: ShmState::new::<State>(&dh, vec![]),
             data_device_state: DataDeviceState::new::<State>(&dh),
             seat_state,
+            viewporter_state: ViewporterState::new::<State>(&dh),
+            single_pixel_buffer_state: SinglePixelBufferState::new::<State>(&dh),
+            pointer_constraints_state: PointerConstraintsState::new::<State>(&dh),
+            presentation_state: PresentationState::new::<State>(
+                &dh,
+                smithay::utils::Clock::<Monotonic>::new().id() as u32,
+            ),
             size: (1920, 1080).into(),
         };
 
@@ -229,6 +300,7 @@ impl Compositor {
             pointer,
             output: None,
             output_global: None,
+            frame_sequence: 0,
         })
     }
 }
