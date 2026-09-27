@@ -1259,6 +1259,43 @@ const PLASMA_HIDDEN_AUTOSTART: &[&str] = &[
     "powerdevil.desktop",
 ];
 
+/// A Plasma update script: plasmashell runs each one once per user, also on a brand-new layout.
+const PLASMA_UNPIN_MISSING_APPS: (&str, &str) = (
+    "usr/share/plasma/shells/org.kde.plasma.desktop/contents/updates/localdesktop_unpin_missing_apps.js",
+    r#"// Local Desktop: unpin task manager launchers for applications that aren't installed, such as
+// Discover in Plasma's default pins, which the Plasma preset leaves out. readConfig() can't see
+// the widget's built-in defaults, so an unset list stands for this copy of them
+// (plasma-desktop 6.7, applets/taskmanager/main.xml).
+var defaultLaunchers = [
+    "applications:systemsettings.desktop",
+    "applications:org.kde.discover.desktop",
+    "preferred://filemanager",
+    "preferred://browser",
+];
+
+panels().forEach(function (panel) {
+    panel.widgets().forEach(function (widget) {
+        if (widget.type !== "org.kde.plasma.icontasks" && widget.type !== "org.kde.plasma.taskmanager") {
+            return;
+        }
+        widget.currentConfigGroup = ["General"];
+        var launchers = widget.readConfig("launchers", defaultLaunchers);
+        if (typeof launchers === "string") {
+            launchers = launchers ? launchers.split(",") : [];
+        }
+        var kept = launchers.filter(function (launcher) {
+            var match = /^applications:(.+)$/.exec(launcher);
+            return !match || applicationExists(match[1]);
+        });
+        if (kept.length !== launchers.length) {
+            widget.writeConfig("launchers", kept);
+            widget.reloadConfig();
+        }
+    });
+});
+"#,
+);
+
 fn setup_plasma(_: &SetupOptions) -> StageOutput {
     let local_config = get_application_context().local_config;
     if local_config.desktop.preset() != DesktopPreset::Plasma {
@@ -1292,6 +1329,12 @@ exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
         fs::write(autostart_dir.join(name), "[Desktop Entry]\nHidden=true\n")
             .expect("Failed to hide a Plasma autostart entry");
     }
+    let (script_path, script) = PLASMA_UNPIN_MISSING_APPS;
+    let script_path = fs_root.join(script_path);
+    if let Some(parent) = script_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    fs::write(script_path, script).expect("Failed to write a Plasma update script");
 
     let home_dir = chroot_home_dir(fs_root, &local_config.user.username);
     seed_desktop_items(&home_dir, "org.kde.okular.desktop");
