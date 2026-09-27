@@ -90,17 +90,37 @@ else
     info "access() check" "needs a normal user, skipped as root"
 fi
 
-# Things Android forbids; informational, since shims or app changes cover them.
+# libudev monitors, which need a uevent netlink socket (KWin's GPU manager dereferences a NULL
+# monitor otherwise).
 if command -v python3 >/dev/null 2>&1; then
-    uevent=$(python3 -c '
-import socket
-try:
-    s = socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 15)
-    s.bind((0, 1))
-    print("available")
-except OSError as e:
-    print("unavailable (" + e.strerror + ")")' 2>&1)
-    info "udev netlink uevents" "$uevent"
+    monitor=$(python3 - <<'PY' 2>&1
+import ctypes, ctypes.util
+name = ctypes.util.find_library("udev")
+if not name:
+    print("skip libudev not installed")
+    raise SystemExit
+udev = ctypes.CDLL(name)
+udev.udev_new.restype = ctypes.c_void_p
+udev.udev_monitor_new_from_netlink.restype = ctypes.c_void_p
+udev.udev_monitor_new_from_netlink.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+udev.udev_monitor_enable_receiving.argtypes = [ctypes.c_void_p]
+udev.udev_monitor_get_fd.argtypes = [ctypes.c_void_p]
+monitor = udev.udev_monitor_new_from_netlink(udev.udev_new(), b"udev")
+if not monitor:
+    print("bad udev_monitor_new_from_netlink returned NULL")
+elif udev.udev_monitor_enable_receiving(monitor) != 0:
+    print("bad udev_monitor_enable_receiving failed")
+elif udev.udev_monitor_get_fd(monitor) < 0:
+    print("bad no monitor fd")
+else:
+    print("ok")
+PY
+)
+    case "$monitor" in
+        ok) pass "libudev monitor can be created and enabled" ;;
+        skip*) info "libudev monitor" "${monitor#skip }" ;;
+        *) fail "libudev monitor can be created and enabled" "${monitor#bad }" ;;
+    esac
 fi
 [ -r /dev/kgsl-3d0 ] && info "GPU (/dev/kgsl-3d0)" "accessible" || info "GPU (/dev/kgsl-3d0)" "not accessible"
 [ -r /dev/dri/renderD128 ] && info "DRM render node" "accessible" || info "DRM render node" "not accessible"
