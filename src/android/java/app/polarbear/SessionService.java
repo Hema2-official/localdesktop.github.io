@@ -67,6 +67,10 @@ public class SessionService extends Service {
             callApp("quit");
             return START_NOT_STICKY;
         }
+        if (PhantomProcessKiller.ACTION_DISMISS.equals(action)) {
+            PhantomProcessKiller.dismiss(this);
+            return START_NOT_STICKY;
+        }
         if (intent == null) {
             stopSelf();
             return START_NOT_STICKY;
@@ -79,6 +83,7 @@ public class SessionService extends Service {
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
+        PhantomProcessKiller.check(this);
         return START_NOT_STICKY;
     }
 

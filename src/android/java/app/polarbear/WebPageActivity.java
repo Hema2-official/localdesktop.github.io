@@ -1,11 +1,14 @@
 package app.polarbear;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.Insets;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.View;
 import android.view.ViewGroup;
@@ -22,6 +25,8 @@ public class WebPageActivity extends Activity {
     static final String EXTRA_URL = "url";
     private static final String PAGE_PREFIX = "file:///android_asset/";
     private static final String TERMINAL_PAGE = PAGE_PREFIX + "terminal.html";
+    /** A link pages can use to open Android's Developer options. */
+    private static final String DEVELOPER_OPTIONS = "localdesktop:developer-options";
 
     private WebView webView;
     /** Keystrokes as typed, no autocorrect or word suggestions: what a terminal needs. */
@@ -44,7 +49,25 @@ public class WebPageActivity extends Activity {
             }
         };
         webView.getSettings().setJavaScriptEnabled(true);
-        webView.setWebViewClient(new WebViewClient());
+        webView.setWebViewClient(new WebViewClient() {
+            @Override
+            public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                if (url.startsWith(PAGE_PREFIX)) {
+                    return false;
+                }
+                // Links out of the app's pages go to other apps.
+                Intent intent = DEVELOPER_OPTIONS.equals(url)
+                        ? new Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)
+                        : new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                try {
+                    startActivity(intent);
+                } catch (ActivityNotFoundException e) {
+                    // Developer options aren't turned on yet: the main settings screen instead.
+                    startActivity(new Intent(Settings.ACTION_SETTINGS));
+                }
+                return true;
+            }
+        });
 
         FrameLayout container = new FrameLayout(this);
         container.setBackgroundColor(Color.rgb(0x1c, 0x1c, 0x1c));

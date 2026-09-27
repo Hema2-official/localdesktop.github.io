@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Phantom process killer</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 20px 16px 32px;
+        background-color: #1c1c1c;
+        color: #e8e8e8;
+        font: 16px/1.5 system-ui, sans-serif;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 22px;
+        line-height: 1.25;
+      }
+      h2 {
+        margin: 28px 0 6px;
+        font-size: 17px;
+      }
+      p {
+        margin: 8px 0;
+      }
+      .muted {
+        color: #aaa;
+        font-size: 14px;
+      }
+      .command {
+        display: flex;
+        gap: 8px;
+        margin: 10px 0;
+      }
+      .command pre {
+        flex: 1;
+        margin: 0;
+        padding: 10px 12px;
+        border-radius: 8px;
+        background-color: #2b2b2b;
+        font: 13px monospace;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      button,
+      .button {
+        display: inline-block;
+        flex: none;
+        padding: 10px 14px;
+        border: none;
+        border-radius: 8px;
+        background-color: #9cdcfe;
+        color: #1c1c1c;
+        font: 600 15px system-ui, sans-serif;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+
+  <body>
+    <h1>Keep Android from stopping Linux programs</h1>
+    <p>
+      Since Android 12, a <em>phantom process killer</em> ends apps' background processes when
+      there are more than 32 of them across all apps, or when one of them uses a lot of CPU.
+      Programs on Local Desktop can spawn a lot of these, which means that anything could stop
+      suddenly without warning.
+    </p>
+    <p>Turn it off once with any of these. It stays off until you turn it back on.</p>
+
+    <section id="developer-options">
+      <h2>On this phone</h2>
+      <p>In Developer options, turn on <strong>Disable child process restrictions</strong>.</p>
+      <p><a class="button" href="localdesktop:developer-options">Open Developer options</a></p>
+      <p class="muted">
+        No Developer options? Tap Build number seven times in Settings › About phone ›
+        Software information.
+      </p>
+    </section>
+
+    <h2>From a computer with adb</h2>
+    <div class="command"><pre id="disable"></pre><button data-copy="disable">Copy</button></div>
+
+    <section id="grant-section">
+      <h2>Let Local Desktop turn it off by itself</h2>
+      <p>Allow this once, and it turns the killer off on every start and stops this notice:</p>
+      <div class="command"><pre id="grant"></pre><button data-copy="grant">Copy</button></div>
+    </section>
+
+    <script>
+      // Both come from the running app (PhantomProcessKiller.guideUrl): the package name is the
+      // manifest's, so dev and fork builds get their own commands.
+      const params = new URLSearchParams(location.search);
+      const packageName = params.get("package");
+      const sdk = Number(params.get("sdk")) || 0;
+
+      // Android 12 keeps the limit in device_config, which apps can't write; 12L and later have
+      // a switch in the global settings, and 14 and later show it in Developer options (unless
+      // the phone's maker removed it, which the app can't check).
+      document.getElementById("disable").textContent =
+        sdk === 31
+          ? 'adb shell "/system/bin/device_config set_sync_disabled_for_tests persistent; /system/bin/device_config put activity_manager max_phantom_processes 2147483647"'
+          : "adb shell settings put global settings_enable_monitor_phantom_procs false";
+      document.getElementById("grant").textContent =
+        `adb shell pm grant ${packageName} android.permission.WRITE_SECURE_SETTINGS`;
+      document.getElementById("developer-options").hidden = sdk < 34;
+      document.getElementById("grant-section").hidden = sdk === 31;
+
+      for (const button of document.querySelectorAll("[data-copy]")) {
+        button.onclick = () => {
+          // navigator.clipboard isn't available to file:// pages in every WebView.
+          const text = document.createElement("textarea");
+          text.value = document.getElementById(button.dataset.copy).textContent;
+          document.body.appendChild(text);
+          text.select();
+          document.execCommand("copy");
+          text.remove();
+          button.textContent = "Copied";
+          setTimeout(() => (button.textContent = "Copy"), 1500);
+        };
+      }
+    </script>
+  </body>
+</html>

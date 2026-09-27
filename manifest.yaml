@@ -3,6 +3,7 @@ android:
   assets:
     - assets/setup-progress.html
     - assets/terminal.html
+    - assets/phantom-process-killer.html
     - assets/xterm
     - assets/unsupported.html
     - assets/ld-linux-aarch64.so.1
