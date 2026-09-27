@@ -103,13 +103,20 @@ impl ArchProcess {
         let context = get_application_context();
         let user = self.user.as_deref().unwrap_or("root");
 
+        // Keep the files behind emulated hard links in one place instead of next to the first
+        // link, so removing that link's directory neither breaks the other links nor fails on
+        // leftovers hidden by -H.
+        let l2s_dir = format!("{}/.l2s", config::ARCH_FS_ROOT);
+        let _ = fs::create_dir_all(&l2s_dir);
+
         let mut process = Command::new(context.native_library_dir.join("libproot.so"));
         process
             .env(
                 "PROOT_LOADER",
                 context.native_library_dir.join("libproot_loader.so"),
             )
-            .env("PROOT_TMP_DIR", context.data_dir);
+            .env("PROOT_TMP_DIR", context.data_dir)
+            .env("PROOT_L2S_DIR", l2s_dir);
 
         process
             .arg("-r")
@@ -119,6 +126,9 @@ impl ArchProcess {
             .arg("--sysvipc")
             .arg("--kill-on-exit")
             .arg("--root-id")
+            // Hide proot's `.proot*` bookkeeping files (ownership records, hard link targets)
+            // from directory listings, so tools that copy or index trees don't pick them up.
+            .arg("-H")
             .arg("--bind=/dev")
             .arg("--bind=/proc")
             .arg("--bind=/sys")
