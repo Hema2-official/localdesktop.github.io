@@ -11,7 +11,9 @@ import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import java.net.Inet4Address;
 
 /**
@@ -29,17 +31,36 @@ public class SessionService extends Service {
     private static final int NOTIFICATION_ID = 1;
     /** ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE, which android-33's jar doesn't have. */
     private static final int FOREGROUND_SERVICE_TYPE_SPECIAL_USE = 1 << 30;
+    /** About how long Plasma takes to come back: the restart button stays hidden that long. */
+    private static final long RESTART_MILLIS = 30_000;
+
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    /** The extras the app started the service with, to rebuild the notification from. */
+    private Intent details;
+    private boolean restarting;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
-        if (ACTION_RESTART.equals(action) || ACTION_QUIT.equals(action)) {
-            try {
-                Native.onAction(ACTION_RESTART.equals(action) ? "restart" : "quit");
-            } catch (UnsatisfiedLinkError e) {
-                // The app isn't running any more; nothing left to manage.
-                stopSelf();
+        if (ACTION_RESTART.equals(action)) {
+            // Once only: a restarting desktop looks the same as a dead one behind the
+            // notification shade, which invites pressing again and again.
+            if (!restarting && details != null) {
+                restarting = true;
+                showNotification();
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        restarting = false;
+                        showNotification();
+                    }
+                }, RESTART_MILLIS);
+                callApp("restart");
             }
+            return START_NOT_STICKY;
+        }
+        if (ACTION_QUIT.equals(action)) {
+            callApp("quit");
             return START_NOT_STICKY;
         }
         if (intent == null) {
@@ -47,7 +68,8 @@ public class SessionService extends Service {
             return START_NOT_STICKY;
         }
 
-        Notification notification = buildNotification(intent);
+        details = intent;
+        Notification notification = buildNotification();
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         } else {
@@ -56,7 +78,21 @@ public class SessionService extends Service {
         return START_NOT_STICKY;
     }
 
-    private Notification buildNotification(Intent intent) {
+    private void callApp(String action) {
+        try {
+            Native.onAction(action);
+        } catch (UnsatisfiedLinkError e) {
+            // The app isn't running any more; nothing left to manage.
+            stopSelf();
+        }
+    }
+
+    private void showNotification() {
+        getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, buildNotification());
+    }
+
+    private Notification buildNotification() {
+        Intent intent = details;
         Notification.Builder builder;
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationManager manager = getSystemService(NotificationManager.class);
@@ -71,9 +107,12 @@ public class SessionService extends Service {
         Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
         builder.setSmallIcon(getApplicationInfo().icon)
                 .setContentTitle("Local Desktop is running")
-                .setContentText(details(intent))
+                .setContentText(restarting ? "Restarting the desktop…" : details(intent))
                 .setOngoing(true)
                 .setContentIntent(PendingIntent.getActivity(this, 0, open, flags));
+        if (restarting) {
+            builder.setProgress(0, 0, true);
+        }
 
         String terminalUrl = intent.getStringExtra(EXTRA_TERMINAL_URL);
         if (terminalUrl != null) {
@@ -82,8 +121,10 @@ public class SessionService extends Service {
                     .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
             builder.addAction(0, "Terminal", PendingIntent.getActivity(this, 1, terminal, flags));
         }
-        builder.addAction(0, "Restart desktop", PendingIntent.getService(
-                this, 2, new Intent(this, SessionService.class).setAction(ACTION_RESTART), flags));
+        if (!restarting) {
+            builder.addAction(0, "Restart desktop", PendingIntent.getService(
+                    this, 2, new Intent(this, SessionService.class).setAction(ACTION_RESTART), flags));
+        }
         builder.addAction(0, "Quit", PendingIntent.getService(
                 this, 3, new Intent(this, SessionService.class).setAction(ACTION_QUIT), flags));
         return builder.build();

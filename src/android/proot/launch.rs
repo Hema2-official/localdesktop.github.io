@@ -83,6 +83,11 @@ pub fn stop_proot(pid: u32) {
 
 /// End the desktop session and start it again, e.g. when it hangs.
 pub fn restart() {
+    static RESTARTING: AtomicBool = AtomicBool::new(false);
+    if RESTARTING.swap(true, Ordering::AcqRel) {
+        log::info!("Ignoring a restart request while the desktop is already restarting");
+        return;
+    }
     let pid = DESKTOP_PID.load(Ordering::Acquire);
     if pid != 0 {
         stop_proot(pid);
@@ -92,6 +97,7 @@ pub fn restart() {
         }
     }
     launch();
+    RESTARTING.store(false, Ordering::Release);
 }
 
 /// End every process the app started (proot and everything inside it, the audio daemons), as
