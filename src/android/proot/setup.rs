@@ -7,7 +7,7 @@ use crate::{
             webview::{ErrorVariant, WebviewBackend},
         },
         utils::application_context::{get_application_context, reload_local_config},
-        utils::ndk::{density_dpi, long_press_timeout_ms, scale_factor, touch_slop_px},
+        utils::ndk::{density_dpi, long_press_timeout_ms, scale_factor, time_zone, touch_slop_px},
     },
     core::{
         config::{
@@ -267,6 +267,32 @@ fn setup_machine_id(_: &SetupOptions) -> StageOutput {
         Err(err) => panic!("Failed to inspect /var/lib/dbus/machine-id: {}", err),
     }
 
+    None
+}
+
+/// Follow Android's time zone, so Linux clocks show the phone's time. A relative link, like the
+/// xkb one below, so it also resolves outside proot.
+fn setup_time_zone(options: &SetupOptions) -> StageOutput {
+    let Some(zone) = time_zone(&options.android_app) else {
+        return None;
+    };
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    if zone.split('/').any(|part| part.is_empty() || part == "..")
+        || !fs_root.join("usr/share/zoneinfo").join(&zone).is_file()
+    {
+        log::warn!("No zone file for Android's time zone {zone}");
+        return None;
+    }
+    let target = Path::new("../usr/share/zoneinfo").join(&zone);
+    let localtime = fs_root.join("etc/localtime");
+    if fs::read_link(&localtime).is_ok_and(|it| it == target) {
+        return None;
+    }
+    let _ = fs::remove_file(&localtime);
+    match symlink(&target, &localtime) {
+        Ok(()) => log::info!("Set the guest's time zone to {zone}"),
+        Err(error) => log::warn!("Failed to set the guest's time zone to {zone}: {error}"),
+    }
     None
 }
 
@@ -1460,16 +1486,17 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(apply_desktop_choice),         // Step 3. Write the desktop chosen on a fresh install
         Box::new(install_dependencies),         // Step 4. Install dependencies
         Box::new(setup_machine_id),             // Step 5. Seed /etc/machine-id for D-Bus clients
-        Box::new(setup_pipewire_package_lock), // Step 6. Hold guest PipeWire packages for the Android-side PipeWire POC
-        Box::new(setup_firefox_config),        // Step 7. Setup Firefox config
-        Box::new(setup_fake_bwrap), // Step 8. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
-        Box::new(setup_chromium_no_sandbox), // Step 9. Make Chromium/Electron apps launchable without a terminal
-        Box::new(setup_onboard_signal_fix), // Step 10. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
-        Box::new(setup_xfce_wayland),       // Step 11. Setup Xfce Wayland launch and HiDPI scaling
-        Box::new(setup_plasma),             // Step 12. Setup the Plasma launcher and defaults
-        Box::new(super::ssh::setup_ssh),    // Step 13. Install and configure sshd when [ssh] wants it
-        Box::new(fix_xkb_symlink),          // Step 14. Fix xkb symlink
-        Box::new(migrate_hard_links),       // Step 15. Move old hard link data into the shared store (once)
+        Box::new(setup_time_zone),              // Step 6. Follow Android's time zone
+        Box::new(setup_pipewire_package_lock), // Step 7. Hold guest PipeWire packages for the Android-side PipeWire POC
+        Box::new(setup_firefox_config),        // Step 8. Setup Firefox config
+        Box::new(setup_fake_bwrap), // Step 9. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
+        Box::new(setup_chromium_no_sandbox), // Step 10. Make Chromium/Electron apps launchable without a terminal
+        Box::new(setup_onboard_signal_fix), // Step 11. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
+        Box::new(setup_xfce_wayland),       // Step 12. Setup Xfce Wayland launch and HiDPI scaling
+        Box::new(setup_plasma),             // Step 13. Setup the Plasma launcher and defaults
+        Box::new(super::ssh::setup_ssh),    // Step 14. Install and configure sshd when [ssh] wants it
+        Box::new(fix_xkb_symlink),          // Step 15. Fix xkb symlink
+        Box::new(migrate_hard_links),       // Step 16. Move old hard link data into the shared store (once)
     ];
 
     let handle_stage_error = |e: Box<dyn std::any::Any + Send>, sender: &Sender<SetupMessage>| {

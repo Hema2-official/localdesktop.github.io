@@ -105,6 +105,30 @@ pub fn take_open_request(android_app: &AndroidApp) -> Option<String> {
     )
 }
 
+/// Android's current time zone, e.g. `Europe/Amsterdam`.
+pub fn time_zone(android_app: &AndroidApp) -> Option<String> {
+    run_in_jvm(
+        |env, _| {
+            let zone = (|| {
+                let zone = env
+                    .call_static_method("java/util/TimeZone", "getDefault", "()Ljava/util/TimeZone;", &[])
+                    .and_then(|it| it.l())
+                    .ok()?;
+                let id = env
+                    .call_method(zone, "getID", "()Ljava/lang/String;", &[])
+                    .and_then(|it| it.l())
+                    .ok()?;
+                env.get_string(&JString::from(id)).ok().map(String::from)
+            })();
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
+            zone
+        },
+        android_app.clone(),
+    )
+}
+
 /// Guest UI scale factor derived from the device density, never below 1x.
 pub fn scale_factor(android_app: &AndroidApp) -> f64 {
     (density_dpi(android_app) as f64 / BASELINE_DPI).max(1.0)
