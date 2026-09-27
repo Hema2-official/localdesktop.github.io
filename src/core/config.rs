@@ -53,6 +53,9 @@ pub struct LocalConfig {
     #[serde(default)]
     pub user: UserConfig,
 
+    #[serde(default)]
+    pub desktop: DesktopConfig,
+
     /// What happens if we don't assign this `#[serde(default)]` attribute?
     /// The answer: If the user omits the `[command]` group, the WHOLE config fails to parse
     /// => The default `[user]` group is applied (with `username=root`) even if the `[user]` settings are completely valid.
@@ -74,38 +77,89 @@ impl Default for UserConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopPreset {
+    Xfce,
+    Plasma,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+pub struct DesktopConfig {
+    /// `xfce` (the default) or `plasma`. Kept as a string so that an unknown value falls back to
+    /// Xfce instead of invalidating the whole config.
+    #[serde(default)]
+    pub preset: String,
+}
+
+impl DesktopConfig {
+    pub fn preset(&self) -> DesktopPreset {
+        match self.preset.trim() {
+            "plasma" => DesktopPreset::Plasma,
+            _ => DesktopPreset::Xfce,
+        }
+    }
+}
+
+/// Commands left out or empty come from the desktop preset, see `LocalConfig::with_preset_commands`.
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct CommandConfig {
-    #[serde(default = "default_check")]
+    #[serde(default)]
     pub check: String,
-    #[serde(default = "default_install")]
+    #[serde(default)]
     pub install: String,
-    #[serde(default = "default_launch")]
+    #[serde(default)]
     pub launch: String,
 }
 
-fn default_check() -> String {
+fn xfce_check() -> String {
     "pacman -Q noto-fonts && pacman -Q xfce4-session && pacman -Q xfce4-panel && pacman -Q xfce4-settings && pacman -Q xfce4-terminal && pacman -Q thunar && pacman -Q xfdesktop && pacman -Q xfconf && pacman -Q labwc && pacman -Q wlr-randr && pacman -Q xorg-xwayland && pacman -Q xdg-desktop-portal && pacman -Q xdg-desktop-portal-gtk && pacman -Q onboard && pacman -Q firefox && pacman -Q evince && pacman -Q pipewire && pacman -Q pipewire-audio && pacman -Q pipewire-alsa"
         .to_string()
 }
 
-fn default_install() -> String {
+fn xfce_install() -> String {
     "stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar noto-fonts xfce4 labwc wlr-randr xorg-xwayland xdg-desktop-portal xdg-desktop-portal-gtk onboard firefox evince pipewire pipewire-audio pipewire-alsa"
         .to_string()
 }
 /// Direct the desktop session to the compositor and the host PipeWire socket.
-fn default_launch() -> String {
+fn xfce_launch() -> String {
     format!("export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR} PULSE_SERVER={PULSE_GUEST_SERVER}; WAYLAND_DISPLAY=/tmp/wayland-0 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=XFCE /usr/local/bin/startxfce4-localdesktop 2>&1")
         .to_string()
 }
 
-impl Default for CommandConfig {
-    fn default() -> Self {
-        Self {
-            check: default_check(),
-            install: default_install(),
-            launch: default_launch(),
+/// Plasma without the parts that need hardware or services Android doesn't give proot (Bluetooth,
+/// NetworkManager, disks, printers). KWin nests directly on Local Desktop's compositor.
+const PLASMA_PACKAGES: &str = "noto-fonts plasma-desktop plasma-keyboard plasma-pa kscreen konsole dolphin okular xdg-desktop-portal-kde xorg-xwayland firefox pipewire pipewire-audio pipewire-alsa";
+
+fn plasma_check() -> String {
+    format!("pacman -Q {PLASMA_PACKAGES}")
+}
+
+fn plasma_install() -> String {
+    format!("stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar {PLASMA_PACKAGES}")
+}
+
+/// `startplasma-localdesktop` is written by setup, like `startxfce4-localdesktop`.
+fn plasma_launch() -> String {
+    "/usr/local/bin/startplasma-localdesktop 2>&1".to_string()
+}
+
+impl LocalConfig {
+    /// Fill the commands the config leaves out from the desktop preset.
+    fn with_preset_commands(mut self) -> Self {
+        let (check, install, launch) = match self.desktop.preset() {
+            DesktopPreset::Xfce => (xfce_check(), xfce_install(), xfce_launch()),
+            DesktopPreset::Plasma => (plasma_check(), plasma_install(), plasma_launch()),
+        };
+        for (value, preset_value) in [
+            (&mut self.command.check, check),
+            (&mut self.command.install, install),
+            (&mut self.command.launch, launch),
+        ] {
+            if value.trim().is_empty() {
+                *value = preset_value;
+            }
         }
+        self
     }
 }
 
@@ -185,11 +239,10 @@ pub fn parse_config(full_config_path: String) -> LocalConfig {
     let lines = process_config_file(full_config_path);
     let content = lines.join("\n");
     if let Ok(config) = toml::from_str::<LocalConfig>(&content) {
-        return config;
+        return config.with_preset_commands();
     }
     // Config malformed, use the default config and the user can modify it again
-    let default_config = LocalConfig::default();
-    default_config
+    LocalConfig::default().with_preset_commands()
 }
 
 #[cfg(test)]
@@ -249,6 +302,77 @@ mod tests {
                 assert_eq!(config.user.username, "testuser");
                 assert_eq!(config.command.check, "try-check");
                 assert_eq!(config.command.install, "install-cmd")
+            },
+        );
+    }
+
+    #[test]
+    fn should_default_to_the_xfce_preset() {
+        with_config_file(
+            r#"
+                [user]
+                username = "alice"
+            "#,
+            |full_config_path| {
+                let config = parse_config(full_config_path);
+                assert_eq!(config.desktop.preset(), DesktopPreset::Xfce);
+                assert_eq!(config.command.launch, xfce_launch());
+                assert_eq!(config.command.install, xfce_install());
+            },
+        );
+    }
+
+    #[test]
+    fn should_fill_commands_from_the_plasma_preset() {
+        with_config_file(
+            r#"
+                [desktop]
+                preset = "plasma"
+
+                [command]
+                launch = "launch-cmd"
+            "#,
+            |full_config_path| {
+                let config = parse_config(full_config_path);
+                assert_eq!(config.desktop.preset(), DesktopPreset::Plasma);
+                assert_eq!(config.command.check, plasma_check());
+                assert_eq!(config.command.install, plasma_install());
+                assert_eq!(config.command.launch, "launch-cmd");
+            },
+        );
+    }
+
+    #[test]
+    fn should_try_a_preset_once() {
+        with_config_file(
+            r#"
+                [desktop]
+                preset = "xfce"
+                try_preset = "plasma"
+            "#,
+            |full_config_path| {
+                let config = parse_config(full_config_path.clone());
+                assert_eq!(config.desktop.preset(), DesktopPreset::Plasma);
+                let config = parse_config(full_config_path);
+                assert_eq!(config.desktop.preset(), DesktopPreset::Xfce);
+            },
+        );
+    }
+
+    #[test]
+    fn should_fall_back_to_xfce_for_unknown_presets() {
+        with_config_file(
+            r#"
+                [user]
+                username = "alice"
+
+                [desktop]
+                preset = "gnome"
+            "#,
+            |full_config_path| {
+                let config = parse_config(full_config_path);
+                assert_eq!(config.user.username, "alice");
+                assert_eq!(config.desktop.preset(), DesktopPreset::Xfce);
             },
         );
     }

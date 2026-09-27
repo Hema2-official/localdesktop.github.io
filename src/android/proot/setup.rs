@@ -11,7 +11,7 @@ use crate::{
     },
     core::{
         config::{
-            CommandConfig, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL,
+            CommandConfig, DesktopPreset, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, DOCS_HOME_URL,
             PIPEWIRE_GUEST_RUNTIME_DIR, PULSE_GUEST_SERVER,
         },
         hard_links,
@@ -857,9 +857,78 @@ fn android_ui_scale(density_dpi: i32) -> i32 {
     ((density_dpi as f32) / 160.0 * 1.1).max(1.0).round() as i32
 }
 
+/// The start of every session launcher: audio, a private runtime directory, the compositor socket.
+fn session_environment() -> String {
+    format!(
+        r#"export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR}
+export PULSE_SERVER={PULSE_GUEST_SERVER}
+# A private runtime directory per user, like logind would provide, so sockets, locks and dconf
+# state that another user's session left in the shared /tmp don't get in the way.
+if [ -z "${{XDG_RUNTIME_DIR:-}}" ] || [ "$XDG_RUNTIME_DIR" = /tmp ]; then
+    XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)
+fi
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+export XDG_RUNTIME_DIR
+# Local Desktop's own compositor socket stays in /tmp.
+case "${{WAYLAND_DISPLAY:=wayland-0}}" in
+    /*) ;;
+    *) WAYLAND_DISPLAY=/tmp/$WAYLAND_DISPLAY ;;
+esac
+export WAYLAND_DISPLAY
+# Electron adds --no-sandbox when this is set; Android has no user namespaces for it to use.
+export ELECTRON_DISABLE_SANDBOX=1
+"#
+    )
+}
+
+/// Desktop items are seeded create-if-missing (the run-once mechanism described on
+/// `StageOutput`): write only when absent, so we never clobber the user's edits or re-create on
+/// every launch. Deleting an item re-seeds it next launch, same as the rest of the managed
+/// environment.
+fn seed_desktop_items(home_dir: &Path, pdf_viewer: &str) {
+    let desktop_dir = home_dir.join("Desktop");
+    let _ = fs::create_dir_all(&desktop_dir);
+
+    let online_docs = desktop_dir.join("localdesktop-online-docs.desktop");
+    if !online_docs.exists() {
+        let _ = fs::write(
+            &online_docs,
+            format!(
+                r#"[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Local Desktop - Online Docs
+Comment=Open the Local Desktop documentation website
+Exec=firefox {DOCS_HOME_URL}
+Icon=firefox
+Terminal=false
+StartupNotify=true
+"#
+            ),
+        );
+    }
+    // Remove the launcher's former name so existing installs pick up the rename.
+    let _ = fs::remove_file(desktop_dir.join("localdesktop-documentation.desktop"));
+
+    // Open PDFs (e.g. the User Manual) in the desktop's viewer instead of Firefox.
+    // Create-if-missing so we don't stomp a user's own default-app choices.
+    let mimeapps = home_dir.join(".config/mimeapps.list");
+    if !mimeapps.exists() {
+        let _ = fs::create_dir_all(home_dir.join(".config"));
+        let _ = fs::write(
+            &mimeapps,
+            format!("[Default Applications]\napplication/pdf={pdf_viewer}\n"),
+        );
+    }
+}
+
 fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
+    let local_config = get_application_context().local_config;
+    if local_config.desktop.preset() != DesktopPreset::Xfce {
+        return None;
+    }
     let fs_root = Path::new(ARCH_FS_ROOT);
-    let username = get_application_context().local_config.user.username;
+    let username = local_config.user.username;
     let home_dir = chroot_home_dir(fs_root, &username);
     let labwc_dir = home_dir.join(".config/xfce4/labwc");
 
@@ -917,26 +986,8 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
     write_executable(
         &fs_root.join("usr/local/bin/startxfce4-localdesktop"),
         &format!(
-            r#"#!/bin/sh
-export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR}
-export PULSE_SERVER={PULSE_GUEST_SERVER}
-# A private runtime directory per user, like logind would provide, so sockets, locks and dconf
-# state that another user's session left in the shared /tmp don't get in the way.
-if [ -z "${{XDG_RUNTIME_DIR:-}}" ] || [ "$XDG_RUNTIME_DIR" = /tmp ]; then
-    XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)
-fi
-mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-export XDG_RUNTIME_DIR
-# Local Desktop's own compositor socket stays in /tmp.
-case "${{WAYLAND_DISPLAY:=wayland-0}}" in
-    /*) ;;
-    *) WAYLAND_DISPLAY=/tmp/$WAYLAND_DISPLAY ;;
-esac
-export WAYLAND_DISPLAY
-# Electron adds --no-sandbox when this is set; Android has no user namespaces for it to use.
-export ELECTRON_DISABLE_SANDBOX=1
-exec startxfce4 --wayland "$@"
-"#
+            "#!/bin/sh\n{}exec startxfce4 --wayland \"$@\"\n",
+            session_environment()
         ),
     );
 
@@ -959,43 +1010,7 @@ xfconf-query -c xsettings -p /Xft/DPI -t int -s {xft_dpi}
         ),
     );
 
-    let desktop_dir = home_dir.join("Desktop");
-    let _ = fs::create_dir_all(&desktop_dir);
-
-    // Desktop items are seeded create-if-missing (the run-once mechanism described
-    // on `StageOutput`): write only when absent, so we never clobber the user's
-    // edits or re-create on every launch. Deleting an item re-seeds it next launch,
-    // same as the rest of the managed environment.
-    let online_docs = desktop_dir.join("localdesktop-online-docs.desktop");
-    if !online_docs.exists() {
-        let _ = fs::write(
-            &online_docs,
-            format!(
-                r#"[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Local Desktop - Online Docs
-Comment=Open the Local Desktop documentation website
-Exec=firefox {DOCS_HOME_URL}
-Icon=firefox
-Terminal=false
-StartupNotify=true
-"#
-            ),
-        );
-    }
-    // Remove the launcher's former name so existing installs pick up the rename.
-    let _ = fs::remove_file(desktop_dir.join("localdesktop-documentation.desktop"));
-
-    // Open PDFs (e.g. the manual below) in Evince instead of Firefox. Create-if-missing
-    // so we don't stomp a user's own default-app choices.
-    let mimeapps = home_dir.join(".config/mimeapps.list");
-    if !mimeapps.exists() {
-        let _ = fs::write(
-            &mimeapps,
-            "[Default Applications]\napplication/pdf=org.gnome.Evince.desktop\n",
-        );
-    }
+    seed_desktop_items(&home_dir, "org.gnome.Evince.desktop");
 
     let autostart_dir = home_dir.join(".config/autostart");
     let _ = fs::create_dir_all(&autostart_dir);
@@ -1136,6 +1151,110 @@ done
 
     None
 }
+
+/// Local Desktop's defaults for Plasma. The launcher puts this directory first in
+/// `XDG_CONFIG_DIRS`, so KDE reads it after the user's own settings and before the packages'
+/// `/etc/xdg`: whatever the user changes in System Settings still wins.
+const PLASMA_XDG_DIR: &str = "etc/localdesktop/plasma";
+
+const PLASMA_DEFAULTS: &[(&str, &str)] = &[
+    (
+        "kwinrc",
+        "[Wayland]\n# Plasma's on-screen keyboard, for touch-only use.\nInputMethod=/usr/share/applications/org.kde.plasma.keyboard.desktop\n",
+    ),
+    (
+        "kdeglobals",
+        "[KDE]\n# KWin composites on the CPU here, so animations cost more than they add.\nAnimationDurationFactor=0\n",
+    ),
+    ("ksplashrc", "[KSplash]\nEngine=none\nTheme=None\n"),
+    (
+        "ksmserverrc",
+        "[General]\n# Don't reopen the last session's apps; startup is slow enough already.\nloginMode=emptySession\n",
+    ),
+    (
+        "kscreenlockerrc",
+        "[Daemon]\n# Android already locks the phone.\nAutolock=false\nLockOnResume=false\n",
+    ),
+    (
+        "kwalletrc",
+        "[Wallet]\n# Without a PAM login nothing opens the wallet, so every app storing a secret would ask for its password.\nEnabled=false\nFirst Use=false\n",
+    ),
+    (
+        "baloofilerc",
+        "[Basic Settings]\n# File indexing costs CPU and battery in the background.\nIndexing-Enabled=false\n",
+    ),
+    (
+        "kded6rc",
+        "# Background services for hardware, disks and network services that proot doesn't have.\n\
+         [Module-baloosearchmodule]\nautoload=false\n\n\
+         [Module-device_automounter]\nautoload=false\n\n\
+         [Module-devicenotifications]\nautoload=false\n\n\
+         [Module-donationmessage]\nautoload=false\n\n\
+         [Module-freespacenotifier]\nautoload=false\n\n\
+         [Module-geotimezoned]\nautoload=false\n\n\
+         [Module-kded_touchpad]\nautoload=false\n\n\
+         [Module-oom_notifier]\nautoload=false\n\n\
+         [Module-remotenotifier]\nautoload=false\n\n\
+         [Module-smbwatcher]\nautoload=false\n\n\
+         [Module-wpad_detector]\nautoload=false\n",
+    ),
+];
+
+/// Autostart entries hidden by an entry of the same name in `PLASMA_XDG_DIR/autostart`.
+const PLASMA_HIDDEN_AUTOSTART: &[&str] = &[
+    // Indexing is off anyway.
+    "baloo_file.desktop",
+    // Global menus for GTK apps, which the default panel doesn't show.
+    "gmenudbusmenuproxy.desktop",
+    "kaccess.desktop",
+    // The wallet is off.
+    "pam_kwallet_init.desktop",
+    // There is no system bus, so nothing can ask polkit for authorization.
+    "polkit-kde-authentication-agent-1.desktop",
+    // Android manages power, and PowerDevil's display power-off leaves a blank screen.
+    "powerdevil.desktop",
+];
+
+fn setup_plasma(_: &SetupOptions) -> StageOutput {
+    let local_config = get_application_context().local_config;
+    if local_config.desktop.preset() != DesktopPreset::Plasma {
+        return None;
+    }
+    let fs_root = Path::new(ARCH_FS_ROOT);
+
+    write_executable(
+        &fs_root.join("usr/local/bin/startplasma-localdesktop"),
+        &format!(
+            r#"#!/bin/sh
+{env}export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE
+export XDG_CONFIG_DIRS=/{PLASMA_XDG_DIR}:${{XDG_CONFIG_DIRS:-/etc/xdg}}
+# KWin only takes shared-memory buffers here (there's no GPU render node), so Vulkan apps have
+# to present through them.
+export MESA_VK_WSI_DEBUG=sw
+/usr/local/bin/localdesktop-no-sandbox-entries
+exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
+"#,
+            env = session_environment()
+        ),
+    );
+
+    let xdg_dir = fs_root.join(PLASMA_XDG_DIR);
+    let autostart_dir = xdg_dir.join("autostart");
+    fs::create_dir_all(&autostart_dir).expect("Failed to create the Plasma defaults directory");
+    for (name, contents) in PLASMA_DEFAULTS {
+        fs::write(xdg_dir.join(name), contents).expect("Failed to write a Plasma default");
+    }
+    for name in PLASMA_HIDDEN_AUTOSTART {
+        fs::write(autostart_dir.join(name), "[Desktop Entry]\nHidden=true\n")
+            .expect("Failed to hide a Plasma autostart entry");
+    }
+
+    let home_dir = chroot_home_dir(fs_root, &local_config.user.username);
+    seed_desktop_items(&home_dir, "org.kde.okular.desktop");
+
+    None
+}
+
 fn fix_xkb_symlink(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     let xkb_path = fs_root.join("usr/share/X11/xkb");
@@ -1234,8 +1353,9 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_chromium_no_sandbox), // Step 8. Make Chromium/Electron apps launchable without a terminal
         Box::new(setup_onboard_signal_fix), // Step 9. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
         Box::new(setup_xfce_wayland),       // Step 10. Setup Xfce Wayland launch and HiDPI scaling
-        Box::new(fix_xkb_symlink),          // Step 11. Fix xkb symlink
-        Box::new(migrate_hard_links),       // Step 12. Move old hard link data into the shared store (once)
+        Box::new(setup_plasma),             // Step 11. Setup the Plasma launcher and defaults
+        Box::new(fix_xkb_symlink),          // Step 12. Fix xkb symlink
+        Box::new(migrate_hard_links),       // Step 13. Move old hard link data into the shared store (once)
     ];
 
     let handle_stage_error = |e: Box<dyn std::any::Any + Send>, sender: &Sender<SetupMessage>| {
