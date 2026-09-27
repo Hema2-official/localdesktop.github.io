@@ -51,3 +51,19 @@ Some important notes:
 - It is not required for the `try_` config to be inside the same group as the normal config. But it is strongly recommended to do so, and to put the `try_` variant right under its normal variant.
 - If a normal config appears multiple times, the **first** entry is applied. If a `try_` config appears multiple times, the **last** entry is applied. This behavior is not guaranteed, and is subject to change. But in general, it is **invalid** to have duplicate config keys inside a TOML file.
 - `try_x` and `x` are not duplicate keys. `try_x` always has higher priority than `x`.
+
+## SSH
+
+Local Desktop can run an SSH server, so you can reach the Linux system from another computer, even when the desktop itself doesn't start. Add your public key:
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[ssh]
+authorized_keys = "ssh-ed25519 AAAA... you@computer"
+```
+
+The next start installs OpenSSH if needed, adds the key to the user's `~/.ssh/authorized_keys` and starts the server. Then connect with `ssh -p 8022 <username>@<phone's IP address>`.
+
+- The server only runs when someone can log in: a key in `authorized_keys` (separate several keys with `\n`), a key already in the user's `~/.ssh/authorized_keys`, or `password_login = true`.
+- `port` defaults to `8022`; Android apps can't use ports below 1024.
+- `password_login` defaults to `false`. If you turn it on, set a password first with `passwd`.
+- `enabled = false` turns the server off without removing your keys.

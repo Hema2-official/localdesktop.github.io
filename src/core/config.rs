@@ -56,6 +56,9 @@ pub struct LocalConfig {
     #[serde(default)]
     pub desktop: DesktopConfig,
 
+    #[serde(default)]
+    pub ssh: SshConfig,
+
     /// What happens if we don't assign this `#[serde(default)]` attribute?
     /// The answer: If the user omits the `[command]` group, the WHOLE config fails to parse
     /// => The default `[user]` group is applied (with `username=root`) even if the `[user]` settings are completely valid.
@@ -97,6 +100,53 @@ impl DesktopConfig {
             "plasma" => DesktopPreset::Plasma,
             _ => DesktopPreset::Xfce,
         }
+    }
+}
+
+/// An OpenSSH server for the session user, in its own proot so it outlives a broken desktop.
+/// It only starts when someone can log in: a key here or in the user's `~/.ssh/authorized_keys`,
+/// or `password_login`.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct SshConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Android apps can't listen below 1024.
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub password_login: bool,
+    /// Public keys to add to the user's `~/.ssh/authorized_keys`, separated by `\n`.
+    #[serde(default)]
+    pub authorized_keys: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_ssh_port() -> u16 {
+    8022
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_ssh_port(),
+            password_login: false,
+            authorized_keys: String::new(),
+        }
+    }
+}
+
+impl SshConfig {
+    /// The configured public keys, one per entry.
+    pub fn keys(&self) -> Vec<&str> {
+        self.authorized_keys
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect()
     }
 }
 
@@ -373,6 +423,26 @@ mod tests {
                 let config = parse_config(full_config_path);
                 assert_eq!(config.user.username, "alice");
                 assert_eq!(config.desktop.preset(), DesktopPreset::Xfce);
+            },
+        );
+    }
+
+    #[test]
+    fn should_read_ssh_settings() {
+        with_config_file(
+            r#"
+                [ssh]
+                authorized_keys = "ssh-rsa AAAA== one\n\nssh-ed25519 BBBB two"
+            "#,
+            |full_config_path| {
+                let config = parse_config(full_config_path);
+                assert!(config.ssh.enabled);
+                assert_eq!(config.ssh.port, 8022);
+                assert!(!config.ssh.password_login);
+                assert_eq!(
+                    config.ssh.keys(),
+                    vec!["ssh-rsa AAAA== one", "ssh-ed25519 BBBB two"]
+                );
             },
         );
     }

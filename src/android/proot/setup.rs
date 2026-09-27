@@ -63,7 +63,7 @@ type SetupStage = Box<dyn Fn(&SetupOptions) -> StageOutput + Send>;
 /// For coding agents: READ THIS BEFORE ADDING WORK HERE.
 /// - Heavy/long work belongs inside the spawned thread of a returned `Some(JoinHandle)`, so it runs once at install and surfaces as setup progress.
 /// - Simple/light tasks or important settings that must be run every launch (e.g. the Firefox config) can be done inline on the `None` path.
-type StageOutput = Option<JoinHandle<()>>;
+pub type StageOutput = Option<JoinHandle<()>>;
 
 const PIPEWIRE_GUEST_LOCK_PACKAGES: &[&str] = &[
     "libpipewire",
@@ -1453,8 +1453,9 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_onboard_signal_fix), // Step 10. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
         Box::new(setup_xfce_wayland),       // Step 11. Setup Xfce Wayland launch and HiDPI scaling
         Box::new(setup_plasma),             // Step 12. Setup the Plasma launcher and defaults
-        Box::new(fix_xkb_symlink),          // Step 13. Fix xkb symlink
-        Box::new(migrate_hard_links),       // Step 14. Move old hard link data into the shared store (once)
+        Box::new(super::ssh::setup_ssh),    // Step 13. Install and configure sshd when [ssh] wants it
+        Box::new(fix_xkb_symlink),          // Step 14. Fix xkb symlink
+        Box::new(migrate_hard_links),       // Step 15. Move old hard link data into the shared store (once)
     ];
 
     let handle_stage_error = |e: Box<dyn std::any::Any + Send>, sender: &Sender<SetupMessage>| {

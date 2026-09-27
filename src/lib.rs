@@ -21,6 +21,7 @@ pub mod android {
         pub mod launch;
         pub mod process;
         pub mod setup;
+        pub mod ssh;
     }
     pub mod utils {
         pub mod application_context;

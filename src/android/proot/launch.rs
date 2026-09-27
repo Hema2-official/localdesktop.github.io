@@ -36,6 +36,7 @@ pub fn launch() {
         .run();
 
         let local_config = get_application_context().local_config;
+        super::ssh::start(&local_config);
         let username = local_config.user.username;
 
         ArchProcess {
