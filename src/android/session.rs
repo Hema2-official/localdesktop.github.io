@@ -9,8 +9,12 @@ use jni::errors::Result as JniResult;
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::_jobject;
 use jni::{JNIEnv, NativeMethod};
+use std::sync::OnceLock;
 use std::thread;
 use winit::platform::android::activity::AndroidApp;
+
+/// For calls from threads that don't have the app at hand.
+static APP: OnceLock<AndroidApp> = OnceLock::new();
 
 /// Load one of the app's own classes. `FindClass` on a native thread only sees the system's.
 fn app_class<'local>(
@@ -59,6 +63,7 @@ fn with_activity(android_app: &AndroidApp, what: &str, call: impl FnOnce(&mut JN
 /// Make `Native.onAction` reach `on_action`. NativeActivity loads this library without
 /// `System.loadLibrary`, so the JVM can't find it by symbol name.
 pub fn register_natives(android_app: &AndroidApp) {
+    let _ = APP.set(android_app.clone());
     with_activity(android_app, "register native methods", |env, activity| {
         let class = app_class(env, activity, "app.polarbear.Native")?;
         env.register_native_methods(
@@ -84,6 +89,18 @@ extern "system" fn on_action(mut env: JNIEnv, _class: JClass, action: JString) {
         }
         "quit" => launch::quit(),
         _ => log::warn!("Unknown session action {action}"),
+    }
+}
+
+/// The desktop session ended by itself: say so in the notification, and if it didn't even
+/// start, open the terminal to look into it.
+pub fn desktop_stopped(failed_start: bool) {
+    let Some(android_app) = APP.get() else {
+        return;
+    };
+    start_service(android_app);
+    if failed_start {
+        terminal::open(android_app, Some("desktop-failed"));
     }
 }
 
@@ -144,6 +161,16 @@ pub fn start_service(android_app: &AndroidApp) {
         };
         if let Some(url) = &terminal_url {
             put_string(env, "terminal_url", url)?;
+        }
+        if launch::stopped() {
+            let key = env.new_string("desktop_stopped")?;
+            env.call_method(
+                &intent,
+                "putExtra",
+                "(Ljava/lang/String;Z)Landroid/content/Intent;",
+                &[(&key).into(), JValue::Bool(1)],
+            )?;
+            put_string(env, "session_log", launch::SESSION_LOG)?;
         }
         if let Some((user, port)) = &login {
             put_string(env, "ssh_user", user)?;

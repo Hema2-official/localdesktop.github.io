@@ -129,7 +129,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 session::request_notification_permission(android_app);
                 session::start_service(android_app);
                 if ndk::take_open_request(android_app).as_deref() == Some("terminal") {
-                    terminal::open(android_app);
+                    terminal::open(android_app, None);
                 }
                 // Start the standalone-client PipeWire/AAudio backend.
                 pipewire_standalone_aaudio::spawn_after_ready(self.frontend.android_app.clone());

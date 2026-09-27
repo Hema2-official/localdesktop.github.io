@@ -25,6 +25,9 @@ public class SessionService extends Service {
     static final String EXTRA_TERMINAL_URL = "terminal_url";
     static final String EXTRA_SSH_USER = "ssh_user";
     static final String EXTRA_SSH_PORT = "ssh_port";
+    /** The desktop session ended by itself; its output is in EXTRA_SESSION_LOG. */
+    static final String EXTRA_DESKTOP_STOPPED = "desktop_stopped";
+    static final String EXTRA_SESSION_LOG = "session_log";
     private static final String ACTION_RESTART = "app.polarbear.action.RESTART_DESKTOP";
     private static final String ACTION_QUIT = "app.polarbear.action.QUIT";
     private static final String CHANNEL_ID = "session";
@@ -47,6 +50,7 @@ public class SessionService extends Service {
             // notification shade, which invites pressing again and again.
             if (!restarting && details != null) {
                 restarting = true;
+                details.removeExtra(EXTRA_DESKTOP_STOPPED);
                 showNotification();
                 handler.postDelayed(new Runnable() {
                     @Override
@@ -105,9 +109,18 @@ public class SessionService extends Service {
 
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
         Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        boolean stopped = !restarting && intent.getBooleanExtra(EXTRA_DESKTOP_STOPPED, false);
+        String text;
+        if (restarting) {
+            text = "Restarting the desktop…";
+        } else if (stopped) {
+            text = "Its output is in " + intent.getStringExtra(EXTRA_SESSION_LOG);
+        } else {
+            text = details(intent);
+        }
         builder.setSmallIcon(getApplicationInfo().icon)
-                .setContentTitle("Local Desktop is running")
-                .setContentText(restarting ? "Restarting the desktop…" : details(intent))
+                .setContentTitle(stopped ? "The desktop stopped" : "Local Desktop is running")
+                .setContentText(text)
                 .setOngoing(true)
                 .setContentIntent(PendingIntent.getActivity(this, 0, open, flags));
         if (restarting) {

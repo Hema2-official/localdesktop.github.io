@@ -79,6 +79,26 @@
       const fit = new FitAddon.FitAddon();
       term.loadAddon(fit);
       term.open(document.getElementById("terminal"));
+      fit.fit();
+      // Word-wrapped to the terminal's width; xterm.js would break words anywhere.
+      const say = (text, style = "") => {
+        let line = "";
+        for (const word of text.split(" ")) {
+          if (line && line.length + 1 + word.length > term.cols) {
+            term.write(style + line + "\x1b[0m\r\n");
+            line = word;
+          } else {
+            line = line ? line + " " + word : word;
+          }
+        }
+        term.write(style + line + "\x1b[0m\r\n");
+      };
+      if (params.get("reason") === "desktop-failed") {
+        say("The desktop stopped right after it started.", "\x1b[1;33m");
+        say("Its output is in /var/log/localdesktop-session.log (the one before it ends in .old).");
+        say("When it's fixed, tap Restart desktop in the notification.");
+        term.write("\r\n");
+      }
 
       // The token proves this page came from the app: the socket is reachable by every app.
       const ws = new WebSocket(`ws://127.0.0.1:${params.get("port")}`, params.get("token"));

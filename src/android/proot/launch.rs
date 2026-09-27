@@ -1,6 +1,10 @@
 use super::process::ArchProcess;
-use crate::android::utils::application_context::get_application_context;
-use std::io::{BufRead, BufReader};
+use crate::android::session;
+use crate::android::utils::application_context::{get_application_context, reload_local_config};
+use crate::core::config::ARCH_FS_ROOT;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::thread;
@@ -9,6 +13,27 @@ use std::time::{Duration, Instant};
 static LAUNCH_RUNNING: AtomicBool = AtomicBool::new(false);
 /// The proot running the desktop session, 0 when there is none.
 static DESKTOP_PID: AtomicU32 = AtomicU32::new(0);
+/// Set while the app ends the session on purpose (restart, quit), which isn't worth reporting.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+/// The session ended by itself and hasn't been started again.
+static STOPPED: AtomicBool = AtomicBool::new(false);
+/// A session that ends this soon failed to start.
+const FAILED_START: Duration = Duration::from_secs(30);
+/// The session's output, inside the rootfs so the terminal can show it. The previous session's
+/// is kept next to it with `.old` appended.
+pub const SESSION_LOG: &str = "/var/log/localdesktop-session.log";
+
+/// Whether the desktop session ended by itself.
+pub fn stopped() -> bool {
+    STOPPED.load(Ordering::Acquire)
+}
+
+fn open_session_log() -> Option<File> {
+    let path = Path::new(ARCH_FS_ROOT).join(SESSION_LOG.trim_start_matches('/'));
+    let _ = fs::create_dir_all(path.parent()?);
+    let _ = fs::rename(&path, path.with_extension("log.old"));
+    File::create(&path).ok()
+}
 
 struct LaunchRunningGuard;
 
@@ -49,6 +74,9 @@ pub fn launch() {
             user: Some(username),
             log: None,
         };
+        STOPPED.store(false, Ordering::Release);
+        let mut session_log = open_session_log();
+        let started = Instant::now();
         let spawned = desktop
             .command()
             .stdout(Stdio::piped())
@@ -67,11 +95,18 @@ pub fn launch() {
         let output = child.stdout.take().unwrap();
         thread::spawn(move || {
             for line in BufReader::new(output).lines().map_while(Result::ok) {
+                if let Some(file) = session_log.as_mut() {
+                    let _ = writeln!(file, "{line}");
+                }
                 log::trace!("{}", line);
             }
         });
         let status = child.wait();
         log::info!("Desktop session ended: {status:?}");
+        if !STOPPING.swap(false, Ordering::AcqRel) {
+            STOPPED.store(true, Ordering::Release);
+            session::desktop_stopped(started.elapsed() < FAILED_START);
+        }
     });
 }
 
@@ -90,12 +125,15 @@ pub fn restart() {
     }
     let pid = DESKTOP_PID.load(Ordering::Acquire);
     if pid != 0 {
+        STOPPING.store(true, Ordering::Release);
         stop_proot(pid);
         let deadline = Instant::now() + Duration::from_secs(10);
         while LAUNCH_RUNNING.load(Ordering::Acquire) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(100));
         }
     }
+    // Pick up whatever was fixed in the config meanwhile.
+    reload_local_config();
     launch();
     RESTARTING.store(false, Ordering::Release);
 }
@@ -132,6 +170,7 @@ pub fn kill_children() {
 /// Stop everything and leave.
 pub fn quit() -> ! {
     log::info!("Quitting");
+    STOPPING.store(true, Ordering::Release);
     kill_children();
     std::process::exit(0);
 }

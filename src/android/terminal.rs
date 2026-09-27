@@ -36,10 +36,16 @@ pub fn url() -> io::Result<String> {
     ))
 }
 
-/// Show the terminal over the desktop.
-pub fn open(android_app: &AndroidApp) {
+/// Show the terminal over the desktop, with a note on why it opened (see `terminal.html`).
+pub fn open(android_app: &AndroidApp, reason: Option<&str>) {
     match url() {
-        Ok(url) => session::open_page(android_app, &url),
+        Ok(url) => {
+            let url = match reason {
+                Some(reason) => format!("{url}&reason={reason}"),
+                None => url,
+            };
+            session::open_page(android_app, &url)
+        }
         Err(error) => log::error!("Failed to start the terminal: {error}"),
     }
 }
