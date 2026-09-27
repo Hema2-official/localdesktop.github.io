@@ -62,23 +62,30 @@ pub fn launch() {
             }
         };
         DESKTOP_PID.store(child.id(), Ordering::Release);
-        for line in BufReader::new(child.stdout.take().unwrap()).lines() {
-            match line {
-                Ok(line) => log::trace!("{}", line),
-                Err(_) => break,
+        // Log the output on a thread of its own: processes left behind can keep the pipe open
+        // after the session has ended.
+        let output = child.stdout.take().unwrap();
+        thread::spawn(move || {
+            for line in BufReader::new(output).lines().map_while(Result::ok) {
+                log::trace!("{}", line);
             }
-        }
+        });
         let status = child.wait();
         log::info!("Desktop session ended: {status:?}");
     });
 }
 
-/// End the desktop session and start it again, e.g. when it hangs. proot's --kill-on-exit takes
-/// everything the session started down with it.
+/// Make a proot end everything running in it, then exit. It can't catch SIGKILL, which would
+/// leave its processes running untraced.
+pub fn stop_proot(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGQUIT) };
+}
+
+/// End the desktop session and start it again, e.g. when it hangs.
 pub fn restart() {
     let pid = DESKTOP_PID.load(Ordering::Acquire);
     if pid != 0 {
-        unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+        stop_proot(pid);
         let deadline = Instant::now() + Duration::from_secs(10);
         while LAUNCH_RUNNING.load(Ordering::Acquire) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(100));

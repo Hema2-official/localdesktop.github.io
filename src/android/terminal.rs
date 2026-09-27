@@ -6,7 +6,7 @@
 //! as this app, so the server has a random token that only the page's URL carries; the page
 //! offers it as its WebSocket subprotocol.
 
-use crate::android::proot::process::ArchProcess;
+use crate::android::proot::{launch, process::ArchProcess};
 use crate::android::utils::application_context::get_application_context;
 use crate::android::session;
 use std::fs::File;
@@ -116,9 +116,8 @@ fn serve(client: Client<TcpStream>) -> io::Result<()> {
         }
     }
 
-    // The page went away: end the shell. proot's --kill-on-exit takes everything it started
-    // along with it.
-    let _ = child.kill();
+    // The page went away: end the shell and whatever it started.
+    launch::stop_proot(child.id());
     let _ = child.wait();
     Ok(())
 }
