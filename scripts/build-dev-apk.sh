@@ -42,9 +42,10 @@ export AR_aarch64_linux_android=llvm-ar
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
 
 # Same manifest under another package name and label, targeting the release builds' API level.
+# Debuggable, so `adb shell run-as` can reach the app's files and rootfs (scripts/dev-shell.sh).
 manifest="$CARGO_TARGET_DIR/manifest.dev.yaml"
 sed -e "s/^\(    package:\) app\.polarbear\$/\1 $PACKAGE/" \
-    -e "s/^\(      label:\) \"Local Desktop\"\$/\1 \"$LABEL\"/" \
+    -e "s/^\(      label:\) \"Local Desktop\"\$/\1 \"$LABEL\"\n      debuggable: true/" \
     -e 's/target_sdk_version: 33/target_sdk_version: 35/' \
     manifest.yaml > "$manifest"
 if ! grep -q "^    package: $PACKAGE\$" "$manifest"; then
