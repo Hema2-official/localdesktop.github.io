@@ -1,4 +1,5 @@
 #include <sys/socket.h>  /* SOL_SOCKET,SO_PEERCRED */
+#include <unistd.h>      /* getuid */
 
 #include "tracee/reg.h"
 #include "tracee/mem.h"
@@ -33,6 +34,11 @@ int handle_getsockopt_exit_end(Tracee *tracee) {
 		int status = read_data(tracee, &cred, cred_addr, sizeof(struct ucred));
 		if (status) return 0;
 		Config *peer_config = get_fake_id_for_pid(cred.pid);
+		/* A peer from another PRoot of the same app (same real uid) runs as a user this
+		 * PRoot can't know: take it to be the caller's own, so that e.g. a D-Bus session
+		 * bus accepts its user's clients from another PRoot, as it would on Linux.  */
+		if (peer_config == NULL && cred.uid == getuid())
+			peer_config = get_fake_id_for_pid(tracee->pid);
 		if (peer_config == NULL) return 0;
 		cred.uid = peer_config->euid;
 		cred.gid = peer_config->egid;
