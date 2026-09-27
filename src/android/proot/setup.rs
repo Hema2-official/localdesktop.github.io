@@ -1314,6 +1314,9 @@ export XDG_CONFIG_DIRS=/{PLASMA_XDG_DIR}:${{XDG_CONFIG_DIRS:-/etc/xdg}}
 # KWin only takes shared-memory buffers here (there's no GPU render node), so Vulkan apps have
 # to present through them.
 export MESA_VK_WSI_DEBUG=sw
+# Qt sends its warnings to the journal, which nothing reads here, unless told otherwise; this
+# way they land in the session log.
+export QT_FORCE_STDERR_LOGGING=1
 /usr/local/bin/localdesktop-no-sandbox-entries
 exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
 "#,
