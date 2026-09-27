@@ -920,8 +920,19 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
             r#"#!/bin/sh
 export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR}
 export PULSE_SERVER={PULSE_GUEST_SERVER}
-: "${{XDG_RUNTIME_DIR:={PIPEWIRE_GUEST_RUNTIME_DIR}}}"
+# A private runtime directory per user, like logind would provide, so sockets, locks and dconf
+# state that another user's session left in the shared /tmp don't get in the way.
+if [ -z "${{XDG_RUNTIME_DIR:-}}" ] || [ "$XDG_RUNTIME_DIR" = /tmp ]; then
+    XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)
+fi
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 export XDG_RUNTIME_DIR
+# Local Desktop's own compositor socket stays in /tmp.
+case "${{WAYLAND_DISPLAY:=wayland-0}}" in
+    /*) ;;
+    *) WAYLAND_DISPLAY=/tmp/$WAYLAND_DISPLAY ;;
+esac
+export WAYLAND_DISPLAY
 # Electron adds --no-sandbox when this is set; Android has no user namespaces for it to use.
 export ELECTRON_DISABLE_SANDBOX=1
 exec startxfce4 --wayland "$@"
@@ -1031,7 +1042,7 @@ OnlyShowIn=XFCE;
             r#"#!/bin/sh
 # Keep labwc's wlroots output aligned with the Android host window.
 state_file="/tmp/localdesktop-output"
-lock_file="/tmp/localdesktop-wlroots-output.pid"
+lock_file="${{XDG_RUNTIME_DIR:-/tmp}}/localdesktop-wlroots-output.pid"
 fallback_scale="{ui_scale}"
 
 if [ -r "$lock_file" ]; then
@@ -1108,7 +1119,7 @@ done
     write_executable(
         &labwc_dir.join("autostart"),
         r#"#!/bin/sh
-/usr/local/bin/localdesktop-wlroots-output >/tmp/localdesktop-wlroots-output.log 2>&1 &
+/usr/local/bin/localdesktop-wlroots-output >"${XDG_RUNTIME_DIR:-/tmp}/localdesktop-wlroots-output.log" 2>&1 &
 "#,
     );
 

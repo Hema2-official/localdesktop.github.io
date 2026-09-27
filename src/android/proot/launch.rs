@@ -26,15 +26,10 @@ pub fn launch() {
     thread::spawn(move || {
         let _guard = LaunchRunningGuard;
 
-        // Clean up potential leftover files for display :1
+        // Clean up potential leftover files for display :1, and keep the X11 socket directory
+        // open to every user: Xwayland creates its socket there as the session's user.
         ArchProcess {
-            command: "rm -f /tmp/.X1-lock".into(),
-            user: None,
-            log: None,
-        }
-        .run();
-        ArchProcess {
-            command: "rm -f /tmp/.X11-unix/X1".into(),
+            command: "rm -f /tmp/.X1-lock /tmp/.X11-unix/X1; mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix".into(),
             user: None,
             log: None,
         }
