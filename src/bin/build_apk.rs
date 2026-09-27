@@ -2542,6 +2542,18 @@ pub mod apk {
                         Ok((self.start_chunk, end_chunk))
                     }
                 }
+                /// A UTF-8 string pool length: one byte below 0x80, otherwise two bytes, big-endian,
+                /// with the high bit of the first set.
+                fn write_utf8_pool_length(w: &mut impl Write, len: usize) -> Result<()> {
+                    if len > 0x7fff {
+                        anyhow::bail!("string of {len} units is too long for a resource string pool");
+                    }
+                    if len > 0x7f {
+                        w.write_u8(0x80 | (len >> 8) as u8)?;
+                    }
+                    w.write_u8(len as u8)?;
+                    Ok(())
+                }
                 match self {
                     Chunk::Null => {}
                     Chunk::StringPool(strings, styles) => {
@@ -2556,10 +2568,9 @@ pub mod apk {
                         let strings_start = w.stream_position()?;
                         for string in strings {
                             indices.push(w.stream_position()? - strings_start);
-                            assert!(string.len() < 0x7f);
-                            let chars = string.chars().count();
-                            w.write_u8(chars as u8)?;
-                            w.write_u8(string.len() as u8)?;
+                            // UTF-8 pool entries start with the length in UTF-16 units, then in bytes.
+                            write_utf8_pool_length(w, string.encode_utf16().count())?;
+                            write_utf8_pool_length(w, string.len())?;
                             w.write_all(string.as_bytes())?;
                             w.write_u8(0)?;
                         }
