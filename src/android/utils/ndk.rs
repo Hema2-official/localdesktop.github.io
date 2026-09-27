@@ -1,4 +1,4 @@
-use jni::objects::{JObject, JValue};
+use jni::objects::{JObject, JString, JValue};
 use jni::sys::{JNIInvokeInterface_, _jobject};
 use jni::{JNIEnv, JavaVM};
 use winit::platform::android::activity::AndroidApp;
@@ -61,6 +61,48 @@ pub fn density_dpi(android_app: &AndroidApp) -> i32 {
         android_app.clone(),
     )
     .unwrap_or(BASELINE_DPI as i32)
+}
+
+/// What the Intent that started the activity asks to open, e.g. `terminal` from
+/// `am start … --es app.polarbear.OPEN terminal`. Removed from the Intent, so a later resume
+/// doesn't open it again.
+pub fn take_open_request(android_app: &AndroidApp) -> Option<String> {
+    run_in_jvm(
+        |env, app| {
+            let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
+            let request = (|| {
+                let intent = env
+                    .call_method(activity, "getIntent", "()Landroid/content/Intent;", &[])
+                    .and_then(|it| it.l())
+                    .ok()
+                    .filter(|it| !it.is_null())?;
+                let key = env.new_string("app.polarbear.OPEN").ok()?;
+                let value = env
+                    .call_method(
+                        &intent,
+                        "getStringExtra",
+                        "(Ljava/lang/String;)Ljava/lang/String;",
+                        &[(&key).into()],
+                    )
+                    .and_then(|it| it.l())
+                    .ok()
+                    .filter(|it| !it.is_null())?;
+                let value: String = env.get_string(&JString::from(value)).ok()?.into();
+                let _ = env.call_method(
+                    &intent,
+                    "removeExtra",
+                    "(Ljava/lang/String;)V",
+                    &[(&key).into()],
+                );
+                Some(value)
+            })();
+            if env.exception_check().unwrap_or(false) {
+                let _ = env.exception_clear();
+            }
+            request
+        },
+        android_app.clone(),
+    )
 }
 
 /// Guest UI scale factor derived from the device density, never below 1x.

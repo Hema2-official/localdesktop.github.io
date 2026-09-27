@@ -2358,6 +2358,7 @@ dependencies = [
  "image 0.24.9",
  "jni",
  "khronos-egl",
+ "libc",
  "libloading",
  "log 0.4.27",
  "mockall",

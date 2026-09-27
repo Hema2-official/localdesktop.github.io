@@ -5,8 +5,9 @@ use jni::sys::_jobject;
 use jni::JNIEnv;
 use winit::platform::android::activity::AndroidApp;
 
-/// A function that can be passed into `run_in_jvm` to show a WebView popup.
-pub fn show_webview_popup(env: &mut JNIEnv, android_app: &AndroidApp, url: &str) {
+/// A function that can be passed into `run_in_jvm` to show a WebView popup. A `focusable` popup
+/// takes keyboard input and resizes for the on-screen keyboard.
+pub fn show_webview_popup(env: &mut JNIEnv, android_app: &AndroidApp, url: &str, focusable: bool) {
     // Convert URL to JNI String
     let jurl = env.new_string(url).expect("Failed to create JNI string");
 
@@ -84,6 +85,16 @@ pub fn show_webview_popup(env: &mut JNIEnv, android_app: &AndroidApp, url: &str)
             ],
         )
         .unwrap();
+
+    if focusable {
+        env.call_method(&popup, "setFocusable", "(Z)V", &[JValue::Bool(1)])
+            .unwrap();
+        // INPUT_METHOD_NEEDED, SOFT_INPUT_ADJUST_RESIZE
+        env.call_method(&popup, "setInputMethodMode", "(I)V", &[JValue::Int(1)])
+            .unwrap();
+        env.call_method(&popup, "setSoftInputMode", "(I)V", &[JValue::Int(16)])
+            .unwrap();
+    }
 
     // 3. Show PopupWindow
     env.call_method(

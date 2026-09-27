@@ -2,6 +2,8 @@ icon: assets/icon.png
 android:
   assets:
     - assets/setup-progress.html
+    - assets/terminal.html
+    - assets/xterm
     - assets/unsupported.html
     - assets/ld-linux-aarch64.so.1
     - assets/wireplumber-share.tar

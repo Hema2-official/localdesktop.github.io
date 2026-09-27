@@ -131,6 +131,30 @@ impl ArchProcess {
     }
 
     pub fn run(self) -> Output {
+        let mut process = self.command();
+        if let Some(log) = self.log {
+            let mut child = process
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("Failed to run command");
+
+            let reader = BufReader::new(child.stdout.take().unwrap());
+            for line in reader.lines() {
+                let line = line.unwrap();
+                log(line);
+            }
+
+            child
+                .wait_with_output()
+                .expect("Failed to wait for command")
+        } else {
+            process.output().expect("Failed to run command")
+        }
+    }
+
+    /// The proot command line for `command`, for callers that set up stdio themselves.
+    pub fn command(&self) -> Command {
         let context = get_application_context();
         let user = self.user.as_deref().unwrap_or("root");
 
@@ -224,25 +248,6 @@ impl ArchProcess {
         }
 
         process.arg("-c").arg(&self.command);
-
-        if let Some(log) = self.log {
-            let mut child = process
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()
-                .expect("Failed to run command");
-
-            let reader = BufReader::new(child.stdout.take().unwrap());
-            for line in reader.lines() {
-                let line = line.unwrap();
-                log(line);
-            }
-
-            child
-                .wait_with_output()
-                .expect("Failed to wait for command")
-        } else {
-            process.output().expect("Failed to run command")
-        }
+        process
     }
 }

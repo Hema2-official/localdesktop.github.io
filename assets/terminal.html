@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, interactive-widget=resizes-content"
+    />
+    <title>Local Desktop Terminal</title>
+    <link rel="stylesheet" href="xterm/xterm.css" />
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background-color: #1c1c1c;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      #terminal {
+        flex: 1;
+        min-height: 0;
+        padding: 4px;
+      }
+      #keys {
+        display: flex;
+        flex: none;
+        overflow-x: auto;
+        background-color: #2b2b2b;
+      }
+      #keys button {
+        flex: 1 0 auto;
+        min-width: 44px;
+        height: 44px;
+        border: none;
+        background: none;
+        color: #ddd;
+        font: 15px monospace;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #keys button.on {
+        background-color: #9cdcfe;
+        color: #1c1c1c;
+      }
+      #ended {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background-color: rgba(0, 0, 0, 0.6);
+        color: white;
+        font: 16px sans-serif;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="terminal"></div>
+    <div id="keys"></div>
+    <div id="ended">Session ended. Tap to start a new one.</div>
+
+    <script src="xterm/xterm.js"></script>
+    <script src="xterm/addon-fit.js"></script>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const term = new Terminal({
+        fontFamily: "monospace",
+        fontSize: 14,
+        cursorBlink: true,
+        scrollback: 5000,
+        theme: { background: "#1c1c1c" },
+      });
+      const fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      term.open(document.getElementById("terminal"));
+
+      // The token proves this page came from the app: the socket is reachable by every app.
+      const ws = new WebSocket(`ws://127.0.0.1:${params.get("port")}`, params.get("token"));
+      ws.binaryType = "arraybuffer";
+      const encoder = new TextEncoder();
+      const send = (data) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data));
+      };
+      const resize = () => {
+        fit.fit();
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      };
+      ws.onopen = () => {
+        resize();
+        term.focus();
+      };
+      ws.onmessage = (event) => term.write(new Uint8Array(event.data));
+      ws.onclose = () => {
+        document.getElementById("ended").style.display = "flex";
+      };
+      document.getElementById("ended").onclick = () => location.reload();
+      new ResizeObserver(resize).observe(document.getElementById("terminal"));
+
+      // Ctrl and Alt from the key bar apply to the next key typed.
+      const modifiers = { ctrl: false, alt: false };
+      const buttons = {};
+      const setModifier = (name, on) => {
+        modifiers[name] = on;
+        buttons[name].classList.toggle("on", on);
+      };
+      term.onData((data) => {
+        if (modifiers.ctrl && data.length === 1) {
+          const code = data.toUpperCase().charCodeAt(0);
+          if (code >= 64 && code <= 95) data = String.fromCharCode(code - 64);
+        }
+        if (modifiers.alt) data = "\x1b" + data;
+        setModifier("ctrl", false);
+        setModifier("alt", false);
+        send(data);
+      });
+
+      // Arrow keys depend on the cursor key mode programs like less and vim switch on.
+      const arrow = (letter) => () =>
+        (term.modes.applicationCursorKeysMode ? "\x1bO" : "\x1b[") + letter;
+      const keys = [
+        ["ESC", () => "\x1b"],
+        ["TAB", () => "\t"],
+        ["CTRL", "ctrl"],
+        ["ALT", "alt"],
+        ["←", arrow("D")],
+        ["↓", arrow("B")],
+        ["↑", arrow("A")],
+        ["→", arrow("C")],
+        ["HOME", () => "\x1b[H"],
+        ["END", () => "\x1b[F"],
+        ["PGUP", () => "\x1b[5~"],
+        ["PGDN", () => "\x1b[6~"],
+        ["|", () => "|"],
+        ["/", () => "/"],
+        ["-", () => "-"],
+        ["~", () => "~"],
+      ];
+      for (const [label, action] of keys) {
+        const button = document.createElement("button");
+        button.textContent = label;
+        button.tabIndex = -1;
+        // Keep the focus (and the keyboard) on the terminal.
+        button.addEventListener("pointerdown", (event) => event.preventDefault());
+        button.addEventListener("click", () => {
+          if (typeof action === "string") {
+            setModifier(action, !modifiers[action]);
+          } else {
+            send(action());
+          }
+          term.focus();
+        });
+        if (typeof action === "string") buttons[action] = button;
+        document.getElementById("keys").appendChild(button);
+      }
+    </script>
+  </body>
+</html>
