@@ -59,6 +59,7 @@ android:
       - name: android.permission.POST_NOTIFICATIONS
       - name: android.permission.FOREGROUND_SERVICE
       - name: android.permission.FOREGROUND_SERVICE_SPECIAL_USE
+      - name: android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
       - name: android.permission.MANAGE_EXTERNAL_STORAGE
       - name: android.permission.READ_EXTERNAL_STORAGE
       - name: android.permission.WRITE_EXTERNAL_STORAGE

@@ -104,31 +104,17 @@ pub fn desktop_stopped(failed_start: bool) {
     }
 }
 
-/// Android 13+ only shows the notification with the user's permission; ask once.
-pub fn request_notification_permission(android_app: &AndroidApp) {
-    with_activity(android_app, "request the notification permission", |env, activity| {
-        if sdk_version(env) < 33 {
-            return Ok(());
-        }
-        let permission = env.new_string("android.permission.POST_NOTIFICATIONS")?;
-        let granted = env
-            .call_method(
-                activity,
-                "checkSelfPermission",
-                "(Ljava/lang/String;)I",
-                &[(&permission).into()],
-            )?
-            .i()?
-            == 0;
-        if !granted {
-            let permissions = env.new_object_array(1, "java/lang/String", &permission)?;
-            env.call_method(
-                activity,
-                "requestPermissions",
-                "([Ljava/lang/String;I)V",
-                &[(&permissions).into(), JValue::Int(1)],
-            )?;
-        }
+/// Ask for the next thing the app needs from the user (showing the notification, running in the
+/// background), one system dialog per start (`Permissions.java`).
+pub fn ask_permissions(android_app: &AndroidApp) {
+    with_activity(android_app, "ask for permissions", |env, activity| {
+        let class = app_class(env, activity, "app.polarbear.Permissions")?;
+        env.call_static_method(
+            &class,
+            "askNext",
+            "(Landroid/app/Activity;)V",
+            &[activity.into()],
+        )?;
         Ok(())
     });
 }

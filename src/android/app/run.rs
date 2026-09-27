@@ -126,7 +126,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 handle(CentralizedEvent::Redraw, backend, event_loop);
                 launch();
                 let android_app = &self.frontend.android_app;
-                session::request_notification_permission(android_app);
+                session::ask_permissions(android_app);
                 session::start_service(android_app);
                 if ndk::take_open_request(android_app).as_deref() == Some("terminal") {
                     terminal::open(android_app, None);
