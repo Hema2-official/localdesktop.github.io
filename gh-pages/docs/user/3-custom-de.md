@@ -2,19 +2,32 @@
 title: Using other Desktop Environments
 ---
 
+## Desktop presets
+
+Local Desktop can install and start one of two desktops for you:
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[desktop]
+preset = "plasma" # or "xfce", the default
+```
+
+Switching presets installs the other desktop's packages the next time Local Desktop starts. Use `try_preset` to try one once.
+
+The `plasma` preset runs KDE Plasma with KWin directly on Local Desktop's compositor, at your phone's display scale, with Plasma's on-screen keyboard. Its defaults suit a phone: no lock screen, splash screen, file indexing, wallet or animations. They live in `/etc/localdesktop/plasma`, so anything you change in System Settings still takes precedence.
+
+## The `[command]` configs
+
 :::warning
 This is an advanced topic. Proceed with your own risk.
 :::
 
-## The `[command]` configs
-
-Local Desktop uses 3 commands to set up your desktop environment:
+A preset fills in 3 commands that set up your desktop environment. Any of them you set yourself takes precedence. For the default `xfce` preset they are:
 
 ```toml title="/etc/localdesktop/localdesktop.toml"
 [command]
-check="pacman -Q noto-fonts && pacman -Q xfce4-session && pacman -Q xfce4-panel && pacman -Q xfce4-settings && pacman -Q xfce4-terminal && pacman -Q thunar && pacman -Q xfdesktop && pacman -Q xfconf && pacman -Q labwc && pacman -Q wlr-randr && pacman -Q xorg-xwayland && pacman -Q xdg-desktop-portal && pacman -Q xdg-desktop-portal-gtk && pacman -Q onboard"
-install="stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar noto-fonts xfce4 labwc wlr-randr xorg-xwayland xdg-desktop-portal xdg-desktop-portal-gtk onboard"
-launch="XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=XFCE /usr/local/bin/startxfce4-localdesktop 2>&1"
+check="pacman -Q noto-fonts && pacman -Q xfce4-session && pacman -Q xfce4-panel && pacman -Q xfce4-settings && pacman -Q xfce4-terminal && pacman -Q thunar && pacman -Q xfdesktop && pacman -Q xfconf && pacman -Q labwc && pacman -Q wlr-randr && pacman -Q xorg-xwayland && pacman -Q xdg-desktop-portal && pacman -Q xdg-desktop-portal-gtk && pacman -Q onboard && pacman -Q firefox && pacman -Q evince && pacman -Q pipewire && pacman -Q pipewire-audio && pacman -Q pipewire-alsa"
+install="stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar noto-fonts xfce4 labwc wlr-randr xorg-xwayland xdg-desktop-portal xdg-desktop-portal-gtk onboard firefox evince pipewire pipewire-audio pipewire-alsa"
+launch="export PIPEWIRE_RUNTIME_DIR=/tmp PULSE_SERVER=unix:/tmp/pulse/native; WAYLAND_DISPLAY=/tmp/wayland-0 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=XFCE /usr/local/bin/startxfce4-localdesktop 2>&1"
 ```
 
 You can change these 3 commands to install and launch your custom desktop environment. Please share your successful setups with us and we can put them here to help others.
@@ -65,14 +78,14 @@ For a legacy **X11 session via Xwayland**, start Xwayland first and point the de
 
 ### KDE Plasma
 
+Use the `plasma` [preset](#desktop-presets). For an X11 session via Xwayland instead:
+
 ```toml title="/etc/localdesktop/localdesktop.toml"
+[desktop]
+preset = "plasma"
+
 [command]
-try_check = "pacman -Qg plasma"
-try_install = "stdbuf -oL pacman -Syu plasma --noconfirm --noprogressbar"
-# X11 session via Xwayland
 try_launch = "XDG_RUNTIME_DIR=/tmp Xwayland -hidpi :1 2>&1 & while [ ! -e /tmp/.X11-unix/X1 ]; do sleep 0.1; done; XDG_SESSION_TYPE=x11 DISPLAY=:1 dbus-launch startplasma-x11 2>&1"
-# Wayland session
-try_launch = "XDG_RUNTIME_DIR=/tmp WAYLAND_DISPLAY=wayland-0 /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland 2>&1"
 ```
 
 ![KDE Plasma on Local Desktop](/img/kde.webp)
