@@ -338,10 +338,9 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
                     emit_pointer_release(&mut backend.compositor, BTN_LEFT, event.time_msec());
                     backend.pointer_pressed = false;
                 }
-                // Scroll distances are in the focused surface's units, like pointer positions.
-                let scale = get_surface(&backend.compositor.state)
-                    .map(|surface| backend.compositor.state.surface_scale(surface.wl_surface()))
-                    .unwrap_or(1.0);
+                // Scroll distances are in the desktop's logical pixels: KWin gets them at its own
+                // scale, and a nested labwc passes them unchanged to clients at that scale.
+                let scale = backend.guest_scale_factor.round().max(1.0);
                 let horizontal_amount = event.amount(Axis::Horizontal).map_or_else(
                     || event.amount_v120(Axis::Horizontal).unwrap_or(0.0) / 120.,
                     |amount| amount / scale,
