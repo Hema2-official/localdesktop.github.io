@@ -206,8 +206,9 @@ mod android {
 
     use std::ffi::{c_char, c_void, CStr};
     use std::io::Cursor;
+    use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
 
     use libloading::Library;
     use pipewire as pw;
@@ -557,28 +558,185 @@ mod android {
 
     // -- Stream events -------------------------------------------------------
 
-    /// The node's per-channel volumes stay empty until a format is first negotiated, which the
-    /// PulseAudio server reports as muted at 0%. Fill them in whenever they show up empty.
-    /// (WirePlumber saves this sink's volume but doesn't restore it, so it starts at 100%.)
+    /// The volume the sink keeps between runs, because WirePlumber saves a client's sink volume
+    /// but never restores it.
+    #[derive(Default)]
+    struct SavedVolume {
+        volumes: Vec<f32>,
+        mute: bool,
+    }
+
+    struct VolumeState {
+        saved: SavedVolume,
+        /// Whether the saved value went out yet; changes are only saved after that, so the
+        /// defaults the stream starts with don't overwrite the file.
+        volumes_restored: bool,
+        mute_restored: bool,
+    }
+
+    static VOLUME: Mutex<VolumeState> = Mutex::new(VolumeState {
+        saved: SavedVolume {
+            volumes: Vec::new(),
+            mute: false,
+        },
+        volumes_restored: false,
+        mute_restored: false,
+    });
+
+    fn volume_path() -> Option<PathBuf> {
+        let state = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
+        Some(state.join("localdesktop/aaudio-sink-volume"))
+    }
+
+    /// `volumes <linear per channel...>` and `mute <0|1>` lines.
+    fn load_volume() -> SavedVolume {
+        let mut saved = SavedVolume::default();
+        let Some(text) = volume_path().and_then(|path| std::fs::read_to_string(path).ok()) else {
+            return saved;
+        };
+        for line in text.lines() {
+            let mut words = line.split_whitespace();
+            match words.next() {
+                Some("volumes") => {
+                    saved.volumes = words
+                        .filter_map(|it| it.parse::<f32>().ok())
+                        .filter(|it| it.is_finite() && *it >= 0.0)
+                        .collect()
+                }
+                Some("mute") => saved.mute = words.next() == Some("1"),
+                _ => {}
+            }
+        }
+        saved
+    }
+
+    fn save_volume(saved: &SavedVolume) {
+        let Some(path) = volume_path() else { return };
+        let volumes: Vec<String> = saved.volumes.iter().map(|it| it.to_string()).collect();
+        let text = format!("volumes {}\nmute {}\n", volumes.join(" "), saved.mute as u8);
+        let temp = path.with_extension("new");
+        let result = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&temp, text))
+            .and_then(|()| std::fs::rename(&temp, &path));
+        if let Err(e) = result {
+            note!("failed to save the volume: {e}");
+        }
+    }
+
+    /// `pw_stream_set_control` is variadic and reads (id, count, values) until an id of 0, which
+    /// the pipewire crate's `set_control` doesn't pass: PipeWire then read leftover registers as
+    /// further controls ("unknown control with id 1065353216", i.e. 1.0f).
+    fn set_control(stream: &pw::stream::Stream, id: u32, values: &[f32]) -> Result<(), String> {
+        let result = unsafe {
+            pw::sys::pw_stream_set_control(
+                stream.as_raw_ptr(),
+                id,
+                values.len() as u32,
+                values.as_ptr() as *mut f32,
+                0u32,
+            )
+        };
+        if result < 0 {
+            Err(std::io::Error::from_raw_os_error(-result).to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// A volume change made while the sink is idle only shows up here. PipeWire's converter keeps
+    /// it, but without a format it doesn't announce it (`set_volume` returns early), so the
+    /// controls, pactl and Plasma go on showing the old volume until playback starts. Save it
+    /// anyway; the next start restores and announces it.
+    fn save_props(sink: &Sink, param: &spa::pod::Pod) {
+        use spa::pod::{deserialize::PodDeserializer, Value, ValueArray};
+        let Ok((_, Value::Object(object))) = PodDeserializer::deserialize_any_from(param.as_bytes())
+        else {
+            return;
+        };
+        let mut state = VOLUME.lock().unwrap_or_else(|it| it.into_inner());
+        let mut changed = false;
+        for property in object.properties {
+            match (property.key, property.value) {
+                (spa::sys::SPA_PROP_channelVolumes, Value::ValueArray(ValueArray::Float(volumes)))
+                    if volumes.len() == sink.channels && volumes != state.saved.volumes =>
+                {
+                    state.saved.volumes = volumes;
+                    changed = true;
+                }
+                (spa::sys::SPA_PROP_mute, Value::Bool(mute)) if mute != state.saved.mute => {
+                    state.saved.mute = mute;
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            save_volume(&state.saved);
+        }
+    }
+
+    /// Restores the saved volume and mute state at the first report of each, then saves every
+    /// change. The node's per-channel volumes stay empty until a format is first negotiated, which
+    /// the PulseAudio server reports as muted at 0%, so empty volumes are filled in as well.
     fn on_control_info(
         stream: &pw::stream::Stream,
         sink: &mut &'static Sink,
         id: u32,
         control: *const pw::sys::pw_stream_control,
     ) {
-        if id != spa::sys::SPA_PROP_channelVolumes {
-            return;
-        }
         let Some(control) = (unsafe { control.as_ref() }) else {
             return;
         };
-        if control.n_values != 0 {
-            return;
-        }
-        let volumes = vec![1.0; sink.channels];
-        match stream.set_control(id, &volumes) {
-            Ok(()) => note!("filled in empty channel volumes"),
-            Err(e) => note!("failed to fill in channel volumes: {e}"),
+        let values: &[f32] = if control.values.is_null() || control.n_values == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(control.values, control.n_values as usize) }
+        };
+        let mut state = VOLUME.lock().unwrap_or_else(|it| it.into_inner());
+
+        if id == spa::sys::SPA_PROP_channelVolumes {
+            let have_saved = state.saved.volumes.len() == sink.channels;
+            let wanted = if have_saved && (!state.volumes_restored || values.is_empty()) {
+                Some(state.saved.volumes.clone())
+            } else if values.is_empty() {
+                Some(vec![1.0; sink.channels])
+            } else {
+                None
+            };
+            state.volumes_restored = true;
+            match wanted {
+                Some(volumes) if volumes.as_slice() != values => {
+                    match set_control(stream, id, &volumes) {
+                        Ok(()) => note!("set channel volumes to {volumes:?}"),
+                        Err(e) => note!("failed to set channel volumes: {e}"),
+                    }
+                }
+                _ if state.saved.volumes.as_slice() != values => {
+                    state.saved.volumes = values.to_vec();
+                    save_volume(&state.saved);
+                }
+                _ => {}
+            }
+        } else if id == spa::sys::SPA_PROP_mute {
+            let Some(&value) = values.first() else { return };
+            let muted = value >= 0.5;
+            if !state.mute_restored {
+                state.mute_restored = true;
+                if muted != state.saved.mute {
+                    let value = if state.saved.mute { 1.0 } else { 0.0 };
+                    match set_control(stream, id, &[value]) {
+                        Ok(()) => note!("set mute to {}", state.saved.mute),
+                        Err(e) => note!("failed to set mute: {e}"),
+                    }
+                }
+            } else if muted != state.saved.mute {
+                state.saved.mute = muted;
+                save_volume(&state.saved);
+            }
         }
     }
 
@@ -607,6 +765,10 @@ mod android {
         param: Option<&spa::pod::Pod>,
     ) {
         let Some(param) = param else { return };
+        if id == spa::param::ParamType::Props.as_raw() {
+            save_props(sink, param);
+            return;
+        }
         if id != spa::param::ParamType::Format.as_raw() {
             return;
         }
@@ -683,6 +845,11 @@ mod android {
     // -- Entry point ---------------------------------------------------------
 
     fn run_pipewire(sink: &'static Sink, node_name: &str) -> Result<(), String> {
+        {
+            let mut state = VOLUME.lock().unwrap_or_else(|it| it.into_inner());
+            state.saved = load_volume();
+            note!("saved volume {:?}, mute {}", state.saved.volumes, state.saved.mute);
+        }
         let mainloop = pw::main_loop::MainLoopRc::new(None)
             .map_err(|e| format!("failed to create PipeWire main loop: {e}"))?;
 
@@ -709,6 +876,13 @@ mod android {
             *pw::keys::NODE_DESCRIPTION => "Local Desktop AAudio Output",
             *pw::keys::NODE_DRIVER => "true",
             *pw::keys::NODE_SUSPEND_ON_IDLE => "false",
+            // WirePlumber would suspend the sink 5 s after playback, which drops its format;
+            // without one, volume changes aren't announced (see `save_props`).
+            "session.suspend-timeout-seconds" => "0",
+            // The sink keeps its own volume (see `load_volume`). WirePlumber's copy would be
+            // applied at startup while the sink is still suspended, silently, and then win once
+            // playback starts.
+            "state.restore-props" => "false",
             *pw::keys::AUDIO_RATE => sink.rate.to_string(),
             *pw::keys::AUDIO_CHANNELS => sink.channels.to_string(),
         };
