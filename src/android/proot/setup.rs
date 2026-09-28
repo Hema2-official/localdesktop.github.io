@@ -20,7 +20,7 @@ use crate::{
 use pathdiff::diff_paths;
 use smithay::utils::Clock;
 use std::{
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{ErrorKind, Read, Write},
     os::unix::fs::{symlink, PermissionsExt},
     path::{Path, PathBuf},
@@ -30,7 +30,7 @@ use std::{
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tar::Archive;
 use winit::platform::android::activity::AndroidApp;
@@ -98,44 +98,7 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
                             "Downloading Arch Linux FS...".to_string(),
                         ))
                         .expect("Failed to send log message");
-
-                    let response = reqwest::blocking::get(ARCH_FS_ARCHIVE)
-                        .expect("Failed to download Arch Linux FS");
-
-                    let total_size = response.content_length().unwrap_or(0);
-                    let mut file = File::create(&temp_file)
-                        .expect("Failed to create temp file for Arch Linux FS");
-
-                    let mut downloaded = 0u64;
-                    let mut buffer = [0u8; 8192];
-                    let mut reader = response;
-                    let mut last_percent = 0;
-
-                    loop {
-                        let n = reader
-                            .read(&mut buffer)
-                            .expect("Failed to read from response");
-                        if n == 0 {
-                            break;
-                        }
-                        file.write_all(&buffer[..n])
-                            .expect("Failed to write to file");
-                        downloaded += n as u64;
-                        if total_size > 0 {
-                            let percent = (downloaded * 100 / total_size).min(100) as u8;
-                            if percent != last_percent {
-                                let downloaded_mb = downloaded as f64 / 1024.0 / 1024.0;
-                                let total_mb = total_size as f64 / 1024.0 / 1024.0;
-                                mpsc_sender
-                                    .send(SetupMessage::Progress(format!(
-                                        "Downloading Arch Linux FS... {}% ({:.2} MB / {:.2} MB)",
-                                        percent, downloaded_mb, total_mb
-                                    )))
-                                    .unwrap_or(());
-                                last_percent = percent;
-                            }
-                        }
-                    }
+                    download(ARCH_FS_ARCHIVE, &temp_file, &mpsc_sender);
                 }
 
                 mpsc_sender
@@ -183,6 +146,87 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
         }));
     }
     None
+}
+
+/// Download `url` to `path`, resuming after network errors (the phone dozing, Wi-Fi dropping)
+/// instead of failing the setup. `path` only appears once the download is complete.
+fn download(url: &str, path: &Path, sender: &Sender<SetupMessage>) {
+    let part = PathBuf::from(format!("{}.part", path.display()));
+    let client = reqwest::blocking::Client::new();
+    for failures in 1u64.. {
+        match download_attempt(&client, url, &part, sender) {
+            Ok(()) => {
+                fs::rename(&part, path).expect("Failed to move the finished download into place");
+                return;
+            }
+            Err(error) => {
+                let wait = (5 * failures).min(60);
+                log::warn!("Download of {url} failed: {error}");
+                sender
+                    .send(SetupMessage::Progress(format!(
+                        "Download interrupted ({error}), retrying in {wait} s..."
+                    )))
+                    .unwrap_or(());
+                thread::sleep(Duration::from_secs(wait));
+            }
+        }
+    }
+}
+
+/// One try, continuing from what `part` already holds when the server allows ranges.
+fn download_attempt(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    part: &Path,
+    sender: &Sender<SetupMessage>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let have = fs::metadata(part).map(|it| it.len()).unwrap_or(0);
+    let mut request = client.get(url);
+    if have > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
+    }
+    let mut response = request.send()?;
+    let status = response.status();
+    let (mut file, mut downloaded, total) = if status == reqwest::StatusCode::PARTIAL_CONTENT {
+        let total = response.content_length().map(|it| it + have);
+        (OpenOptions::new().append(true).open(part)?, have, total)
+    } else if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+        // Nothing left to fetch; a broken file fails extraction and gets downloaded again.
+        return Ok(());
+    } else if status.is_success() {
+        (File::create(part)?, 0, response.content_length())
+    } else {
+        return Err(format!("HTTP {status}").into());
+    };
+
+    let mut buffer = [0u8; 65536];
+    let mut last_percent = None;
+    loop {
+        let n = response.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        file.write_all(&buffer[..n])?;
+        downloaded += n as u64;
+        if let Some(total) = total.filter(|it| *it > 0) {
+            let percent = (downloaded * 100 / total).min(100);
+            if last_percent != Some(percent) {
+                sender
+                    .send(SetupMessage::Progress(format!(
+                        "Downloading Arch Linux FS... {}% ({:.2} MB / {:.2} MB)",
+                        percent,
+                        downloaded as f64 / 1024.0 / 1024.0,
+                        total as f64 / 1024.0 / 1024.0
+                    )))
+                    .unwrap_or(());
+                last_percent = Some(percent);
+            }
+        }
+    }
+    match total {
+        Some(total) if downloaded < total => Err("the connection closed early".into()),
+        _ => Ok(()),
+    }
 }
 
 /// The empty directory proot binds over `/sys/fs/selinux`. The rootfs ships `/sys` read-only
@@ -421,14 +465,20 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
                 download_user_manual();
                 return;
             }
-            mpsc_sender
-                .send(SetupMessage::Progress(format!(
-                    "Retrying installation... (attempt {}/{})",
-                    attempt, MAX_INSTALL_ATTEMPTS
-                )))
-                .expect("Failed to send dependency install progress");
-
-            if attempt == MAX_INSTALL_ATTEMPTS {
+            if attempt < MAX_INSTALL_ATTEMPTS {
+                // Wait a little longer each time, so a network outage doesn't use up every
+                // attempt.
+                let wait = (10 * attempt as u64).min(60);
+                mpsc_sender
+                    .send(SetupMessage::Progress(format!(
+                        "Retrying installation in {} s... (attempt {}/{})",
+                        wait,
+                        attempt + 1,
+                        MAX_INSTALL_ATTEMPTS
+                    )))
+                    .expect("Failed to send dependency install progress");
+                thread::sleep(Duration::from_secs(wait));
+            } else {
                 let error_message = format!(
                     "Failed to install desktop dependencies after {} attempts. Please check your net connection and try restarting the app.",
                     MAX_INSTALL_ATTEMPTS
