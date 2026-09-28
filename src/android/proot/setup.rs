@@ -1805,15 +1805,18 @@ fn setup_plasma(_: &SetupOptions) -> StageOutput {
             r#"#!/bin/sh
 {env}export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE
 export XDG_CONFIG_DIRS=/{PLASMA_XDG_DIR}:${{XDG_CONFIG_DIRS:-/etc/xdg}}
-# KWin only takes shared-memory buffers here (there's no GPU render node), so Vulkan apps have
-# to present through them.
-export MESA_VK_WSI_DEBUG=sw
 # Qt sends its warnings to the journal, which nothing reads here, unless told otherwise; this
 # way they land in the session log.
 export QT_FORCE_STDERR_LOGGING=1
-# Without a GPU, Qt Quick's OpenGL renders through llvmpipe: scrolling a Plasma menu took two
-# cores. Its own 2D renderer only repaints what changed and needs a tenth of that.
-export QT_QUICK_BACKEND=software
+# Qt Quick draws with Vulkan on the GPU when the Adreno driver works (see `setup_adreno_mesa`),
+# and with its own 2D renderer otherwise: without a GPU its OpenGL goes through llvmpipe, which
+# took two cores to scroll a Plasma menu. The check costs about 0.2 s; without it a broken driver
+# would leave Plasma without a panel.
+if vulkaninfo --summary 2>/dev/null | grep -q 'driverName *= turnip'; then
+    export QSG_RHI_BACKEND=vulkan
+else
+    export QT_QUICK_BACKEND=software
+fi
 /usr/local/bin/localdesktop-no-sandbox-entries
 exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
 "#,
