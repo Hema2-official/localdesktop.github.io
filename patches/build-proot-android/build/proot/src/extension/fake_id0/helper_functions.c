@@ -167,7 +167,7 @@ char * get_name(char path[PATH_MAX])
  * Anything this PRoot writes, deletes or moves among the records empties
  * it (write_meta_file(), unlink_meta(), rename_meta()), and entries expire
  * after a while for changes made by other processes.  */
-#define RECORD_CACHE_SIZE 512
+#define RECORD_CACHE_SIZE 2048
 #define RECORD_CACHE_LIFETIME_NS 2000000000ULL
 
 typedef struct {
@@ -210,8 +210,9 @@ static unsigned long long coarse_now(void)
 	return (unsigned long long) time.tv_sec * 1000000000ULL + time.tv_nsec;
 }
 
-/** Like load_meta_file(), through the cache.  */
-static int load_meta_file_cached(const char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group)
+/** Like load_meta_file(), through the cache: for the records looked up
+ *  over and over (directories on the way, stat(2) and statx(2)).  */
+int load_record(const char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group)
 {
 	uint64_t hash = 0xcbf29ce484222325ULL; /* FNV-1a */
 	CachedRecord *entry;
@@ -324,7 +325,7 @@ static int get_dir_permissions(char meta_path[PATH_MAX], Config *config)
 	uid_t owner;
 	gid_t group;
 
-	if (load_meta_file_cached(meta_path, &mode, &owner, &group) < 0) {
+	if (load_record(meta_path, &mode, &owner, &group) < 0) {
 		/* If the metafile doesn't exist, allow overly permissive behavior. */
 		owner = config->euid;
 		group = config->egid;

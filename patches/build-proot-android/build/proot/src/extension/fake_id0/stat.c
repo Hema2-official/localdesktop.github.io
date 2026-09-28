@@ -69,7 +69,7 @@ static int apply_meta_file(Tracee *tracee, const char path[PATH_MAX], word_t add
 	int status;
 
 	status = get_meta_path((char *) path, meta_path);
-	if (status < 0 || load_meta_file(meta_path, &mode, &uid, &gid) < 0)
+	if (status < 0 || load_record(meta_path, &mode, &uid, &gid) < 0)
 		return 0;
 
 	/** Get the file type and sticky/set-id bits of the original
@@ -78,7 +78,7 @@ static int apply_meta_file(Tracee *tracee, const char path[PATH_MAX], word_t add
 	status = read_data(tracee, &my_stat, address, sizeof(struct stat));
 	if (status < 0)
 		return status;
-	my_stat.st_mode = (mode | ((my_stat.st_mode & S_IFMT) | (my_stat.st_mode & 07000)));
+	my_stat.st_mode = (mode & 07777) | (my_stat.st_mode & (S_IFMT | 07000));
 	my_stat.st_uid = uid;
 	my_stat.st_gid = gid;
 	status = write_data(tracee, address, &my_stat, sizeof(struct stat));
@@ -200,9 +200,41 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 #endif /* ifdef USERLAND */
 
 int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t statx_state_raw) {
-	(void) tracee;
-	// TODO: USERLAND
 	struct statx_syscall_state *state = (struct statx_syscall_state *) statx_state_raw;
+#ifdef USERLAND
+	/* Like stat(2): the ownership record, if there's one. statx(2) used
+	 * to show only the real mode, which Android's umask for apps (077)
+	 * leaves owner-only: `ls -l` and file managers showed /usr/bin/bash
+	 * as -rwx------ and every file as owned by whoever looked.  */
+	const char *path = state->host_path;
+	size_t length = strlen(path);
+	const char *deleted = " (deleted)";
+	size_t deleted_length = strlen(deleted);
+
+	if (path[0] == '/'
+	    && !(length >= deleted_length && strcmp(path + length - deleted_length, deleted) == 0)
+	    && belongs_to_guestfs(tracee, path)) {
+		char meta_path[PATH_MAX];
+		mode_t mode;
+		uid_t uid;
+		gid_t gid;
+
+		if (get_meta_path((char *) path, meta_path) == 0
+		    && load_record(meta_path, &mode, &uid, &gid) == 0) {
+			if (state->statx_buf.stx_mask & STATX_MODE)
+				state->statx_buf.stx_mode = (mode & 07777)
+					| (state->statx_buf.stx_mode & (S_IFMT | 07000));
+			if (state->statx_buf.stx_mask & STATX_UID)
+				state->statx_buf.stx_uid = uid;
+			if (state->statx_buf.stx_mask & STATX_GID)
+				state->statx_buf.stx_gid = gid;
+			state->updated_stats = true;
+			return 0;
+		}
+	}
+#else
+	(void) tracee;
+#endif
 	if (state->statx_buf.stx_mask & STATX_UID) {
 		if (state->statx_buf.stx_uid == getuid()) {
 			state->statx_buf.stx_uid = config->suid;
@@ -210,7 +242,7 @@ int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t stat
 		}
 	}
 	if (state->statx_buf.stx_mask & STATX_GID) {
-		if (state->statx_buf.stx_gid == getuid()) {
+		if (state->statx_buf.stx_gid == getgid()) {
 			state->statx_buf.stx_gid = config->sgid;
 			state->updated_stats = true;
 		}

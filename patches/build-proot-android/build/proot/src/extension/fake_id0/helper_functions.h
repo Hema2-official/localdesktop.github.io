@@ -26,6 +26,7 @@ int read_meta_file(char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group
 
 int load_meta_file(const char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group);
 
+int load_record(const char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group);
 void invalidate_record_cache(void);
 int unlink_meta(const char *path);
 int rename_meta(const char *old_path, const char *new_path);
