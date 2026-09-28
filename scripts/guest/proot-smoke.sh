@@ -34,6 +34,20 @@ mkdir a b && echo linked > a/f && ln a/f b/f 2>/dev/null && rm -rf a
 [ "$(cat b/f 2>/dev/null)" = linked ] && pass "hard link survives removing the original's directory" \
     || fail "hard link survives removing the original's directory"
 
+# The link count of a hard link, by name (stat, statx) and by descriptor (fstat): tar, rsync and
+# backup tools decide from it whether to look for the file's other names.
+if command -v python3 > /dev/null; then
+    echo counted > counted && ln counted counted2 2>/dev/null
+    counts=$(python3 -c '
+import os
+fd = os.open("counted2", os.O_RDONLY)
+print(os.stat("counted2").st_nlink, os.fstat(fd).st_nlink, end="")
+' 2>&1)
+    statx_count=$(stat -c %h counted2 2>&1)
+    [ "$counts $statx_count" = "2 2 2" ] && pass "stat, fstat and statx count both names of a hard link" \
+        || fail "stat, fstat and statx count both names of a hard link" "stat/fstat/statx: $counts $statx_count"
+fi
+
 # rm -rf of a tree containing hard links succeeds in one pass.
 mkdir -p tree/x tree/y && echo data > tree/x/f && ln tree/x/f tree/y/f 2>/dev/null
 rm -rf tree 2>/dev/null
@@ -68,6 +82,14 @@ PY
         || fail "fstat() works on sockets and eventfds" "$bad"
 else
     info "fstat() on sockets" "python3 not installed, skipped"
+fi
+
+# The emulated ids, through every call that reports them.
+if command -v python3 > /dev/null; then
+    ids=$(python3 -c 'import os; print(os.getuid(), os.geteuid(), *os.getresuid(), os.getgid(), os.getegid(), *os.getresgid())' 2>&1)
+    want="$(id -u) $(id -u) $(id -u) $(id -u) $(id -u) $(id -g) $(id -g) $(id -g) $(id -g) $(id -g)"
+    [ "$ids" = "$want" ] && pass "get*id and getres*id agree with id" \
+        || fail "get*id and getres*id agree with id" "got $ids, want $want"
 fi
 
 # The ownership record must show through stat by descriptor (fstat) and by name (fstatat) alike:

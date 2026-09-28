@@ -322,14 +322,6 @@ static int handle_sysexit_end(Tracee *tracee)
 
 	sysnum = get_sysnum(tracee, ORIGINAL);
 
-	#ifdef USERLAND
-		if ((get_sysnum(tracee, CURRENT) == PR_fstat) || (get_sysnum(tracee, CURRENT) == PR_fstat64))
-			return 0;
-
-		if (((sysnum == PR_fstat) || (sysnum == PR_fstat64)) && (get_sysnum(tracee, CURRENT) == PR_readlinkat))
-			return 0;
-	#endif
-
 	switch (sysnum) {
 
 	case PR_fstatat64:                 //int fstatat(int dirfd, const char *pathname, struct stat *buf, int flags);
@@ -358,23 +350,14 @@ static int handle_sysexit_end(Tracee *tracee)
 			return 0;
 
 		if (sysnum == PR_fstat64 || sysnum == PR_fstat) {
-			#ifndef USERLAND
-				status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, MODIFIED, SYSARG_1), original);
-				if (status < 0) {
-					VERBOSE(tracee, 3, "link2symlink: readlink_proc_pid_fd failed, status=%d", status);
-					return 0; // Don't alter syscall result
-				}
-				if (strlen(original) > strlen(DELETED_SUFFIX) &&
-						strcmp(original + strlen(original) - strlen(DELETED_SUFFIX), DELETED_SUFFIX) == 0)
-					original[strlen(original) - strlen(DELETED_SUFFIX)] = '\0';
-			#endif
-			#ifdef USERLAND
-				size = read_string(tracee, original, peek_reg(tracee, CURRENT, SYSARG_2), PATH_MAX);
-				if (size < 0)
-					return size;
-				if (size >= PATH_MAX)
-					return -ENAMETOOLONG;
-			#endif
+			status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, MODIFIED, SYSARG_1), original);
+			if (status < 0) {
+				VERBOSE(tracee, 3, "link2symlink: readlink_proc_pid_fd failed, status=%d", status);
+				return 0; // Don't alter syscall result
+			}
+			if (strlen(original) > strlen(DELETED_SUFFIX) &&
+					strcmp(original + strlen(original) - strlen(DELETED_SUFFIX), DELETED_SUFFIX) == 0)
+				original[strlen(original) - strlen(DELETED_SUFFIX)] = '\0';
 		} else {
 			if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
 				sysarg_path = SYSARG_2;
@@ -485,6 +468,23 @@ static void link2symlink_handle_statx(struct statx_syscall_state *state)
 	state->statx_buf.stx_nlink = atoi(&path_ending[ending_len - 4]);
 }
 
+/* The last host path the translation of a guest path ended with, and
+ * whether the lstat(2) it made found a symlink there (HOST_PATH).  */
+static char last_final_path[PATH_MAX];
+static bool last_final_is_symlink;
+static bool last_final_is_known = false;
+
+static void remember_final_path(const char *host_path, const HostPath *info)
+{
+	if (!info->is_final || strlen(host_path) >= PATH_MAX) {
+		return;
+	}
+	strcpy(last_final_path, host_path);
+	/* A path that doesn't exist can't be a link either.  */
+	last_final_is_symlink = info->stat != NULL && S_ISLNK(info->stat->st_mode);
+	last_final_is_known = true;
+}
+
 /**
  * When @translated_path is a faked hard-link, replace it with the
  * point it (internally) points to.
@@ -509,6 +509,12 @@ static void translated_path(Tracee *tracee, char translated_path[PATH_MAX])
 	}
 
 	if (should_skip_file_access_due_to_f2fs_bug(tracee, translated_path))
+		return;
+
+	/* Only a symlink can point to a hard link's data: don't readlink
+	 * a path the translation just found to be something else.  */
+	if (last_final_is_known && !last_final_is_symlink
+	    && strcmp(translated_path, last_final_path) == 0)
 		return;
 
 	status = my_readlink(translated_path, path);
@@ -802,8 +808,18 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		return handle_sysexit_end(TRACEE(extension));
 	}
 
+	case GUEST_PATH:
+		/* A new translation: forget the last one.  */
+		last_final_is_known = false;
+		return 0;
+
+	case HOST_PATH:
+		remember_final_path((const char *) data1, (const HostPath *) data2);
+		return 0;
+
 	case TRANSLATED_PATH:
 		translated_path(TRACEE(extension), (char *) data1);
+		last_final_is_known = false;
 		return 0;
 
 	case STATX_SYSCALL:
