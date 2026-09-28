@@ -65,6 +65,10 @@ pub struct LocalConfig {
     /// => So make sure that every config group has a `#[serde(default)]` attribute to avoid invalid sections breaking unrelated parts of the config.
     #[serde(default)]
     pub command: CommandConfig,
+
+    /// Mistakes found in the config file, for the user; the config itself makes the best of them.
+    #[serde(skip)]
+    pub problems: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -286,13 +290,88 @@ fn process_config_file(full_config_path: String) -> Vec<String> {
 }
 
 pub fn parse_config(full_config_path: String) -> LocalConfig {
+    let original = fs::read_to_string(&full_config_path).unwrap_or_default();
     let lines = process_config_file(full_config_path);
     let content = lines.join("\n");
-    if let Ok(config) = toml::from_str::<LocalConfig>(&content) {
-        return config.with_preset_commands();
+    // A mistake anywhere used to replace the whole config with the defaults (say, the Xfce
+    // preset on a Plasma install). Now it only costs its own section, and gets reported.
+    let mut config = toml::from_str::<LocalConfig>(&content).unwrap_or_else(|_| lenient(&content));
+    config.problems = check(&original);
+    config.with_preset_commands()
+}
+
+/// The keys each section takes. Anything else is most likely a typo, which serde would
+/// silently ignore.
+const KNOWN_KEYS: &[(&str, &[&str])] = &[
+    ("user", &["username"]),
+    ("desktop", &["preset"]),
+    ("ssh", &["enabled", "port", "password_login", "authorized_keys"]),
+    ("command", &["check", "install", "launch"]),
+];
+
+/// Each section on its own, so that a bad value costs only its own section.
+fn lenient(content: &str) -> LocalConfig {
+    fn section<T: serde::de::DeserializeOwned + Default>(table: &toml::Table, name: &str) -> T {
+        table
+            .get(name)
+            .cloned()
+            .and_then(|value| value.try_into().ok())
+            .unwrap_or_default()
     }
-    // Config malformed, use the default config and the user can modify it again
-    LocalConfig::default().with_preset_commands()
+    let Ok(table) = content.parse::<toml::Table>() else {
+        return LocalConfig::default();
+    };
+    LocalConfig {
+        user: section(&table, "user"),
+        desktop: section(&table, "desktop"),
+        ssh: section(&table, "ssh"),
+        command: section(&table, "command"),
+        problems: Vec::new(),
+    }
+}
+
+/// What's wrong with the config file as the user wrote it, with its line numbers.
+fn check(original: &str) -> Vec<String> {
+    let table = match original.parse::<toml::Table>() {
+        Ok(table) => table,
+        Err(error) => return vec![describe(original, &error)],
+    };
+    let mut problems = Vec::new();
+    if let Err(error) = toml::from_str::<LocalConfig>(original) {
+        problems.push(describe(original, &error));
+    }
+    for (name, value) in &table {
+        let Some((_, keys)) = KNOWN_KEYS.iter().find(|(section, _)| section == name) else {
+            problems.push(format!("Unknown section or key `{name}`"));
+            continue;
+        };
+        let Some(section) = value.as_table() else {
+            continue;
+        };
+        for key in section.keys() {
+            if !keys.contains(&key.strip_prefix("try_").unwrap_or(key)) {
+                problems.push(format!("Unknown key `{key}` in [{name}]"));
+            }
+        }
+    }
+    let preset = table.get("desktop").and_then(|it| it.get("preset"));
+    if let Some(preset) = preset.and_then(|it| it.as_str()) {
+        if !matches!(preset.trim(), "" | "xfce" | "plasma") {
+            problems.push(format!("Unknown desktop preset \"{preset}\", using xfce"));
+        }
+    }
+    problems
+}
+
+fn describe(text: &str, error: &toml::de::Error) -> String {
+    let message = error.message().trim();
+    match error.span() {
+        Some(span) => {
+            let line = text[..span.start.min(text.len())].matches('\n').count() + 1;
+            format!("Line {line}: {message}")
+        }
+        None => message.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -445,6 +524,47 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn should_keep_other_sections_when_one_is_wrong() {
+        with_config_file(
+            "[user]\nusername = \"alice\"\n\n[ssh]\nport = \"8022\"\n",
+            |full_config_path| {
+                let config = parse_config(full_config_path);
+                assert_eq!(config.user.username, "alice");
+                assert_eq!(config.ssh.port, 8022);
+                assert!(
+                    config.problems.iter().any(|it| it.starts_with("Line 5:")),
+                    "{:?}",
+                    config.problems
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn should_report_syntax_errors_and_typos() {
+        with_config_file("[user]\nusername = alice\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert!(config.problems[0].starts_with("Line 2:"), "{:?}", config.problems);
+        });
+        with_config_file(
+            "[user]\nusername = \"alice\"\nusrname = \"bob\"\n[desktop]\npreset = \"gnome\"\n",
+            |full_config_path| {
+                let config = parse_config(full_config_path);
+                assert_eq!(
+                    config.problems,
+                    vec![
+                        "Unknown key `usrname` in [user]".to_string(),
+                        "Unknown desktop preset \"gnome\", using xfce".to_string()
+                    ]
+                );
+            },
+        );
+        with_config_file("[user]\nusername = \"alice\"\ntry_username = \"bob\"\n", |path| {
+            assert!(parse_config(path).problems.is_empty());
+        });
     }
 
     #[test]

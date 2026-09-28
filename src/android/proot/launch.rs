@@ -134,6 +134,7 @@ pub fn restart() {
     }
     // Pick up whatever was fixed in the config meanwhile.
     reload_local_config();
+    session::refresh();
     launch();
     RESTARTING.store(false, Ordering::Release);
 }

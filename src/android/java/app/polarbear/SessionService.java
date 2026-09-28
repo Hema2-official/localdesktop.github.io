@@ -28,6 +28,10 @@ public class SessionService extends Service {
     /** The desktop session ended by itself; its output is in EXTRA_SESSION_LOG. */
     static final String EXTRA_DESKTOP_STOPPED = "desktop_stopped";
     static final String EXTRA_SESSION_LOG = "session_log";
+    /** What's wrong with localdesktop.toml, one problem per line. */
+    static final String EXTRA_CONFIG_PROBLEMS = "config_problems";
+    private static final String PROBLEMS_CHANNEL_ID = "problems";
+    private static final int PROBLEMS_NOTIFICATION_ID = 3;
     private static final String ACTION_RESTART = "app.polarbear.action.RESTART_DESKTOP";
     private static final String ACTION_QUIT = "app.polarbear.action.QUIT";
     private static final String CHANNEL_ID = "session";
@@ -84,7 +88,41 @@ public class SessionService extends Service {
             startForeground(NOTIFICATION_ID, notification);
         }
         PhantomProcessKiller.check(this);
+        showConfigProblems();
         return START_NOT_STICKY;
+    }
+
+    private void showConfigProblems() {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        String problems = details.getStringExtra(EXTRA_CONFIG_PROBLEMS);
+        if (problems == null) {
+            manager.cancel(PROBLEMS_NOTIFICATION_ID);
+            return;
+        }
+        Notification.Builder builder;
+        if (Build.VERSION.SDK_INT >= 26) {
+            manager.createNotificationChannel(new NotificationChannel(
+                    PROBLEMS_CHANNEL_ID, "Problems", NotificationManager.IMPORTANCE_DEFAULT));
+            builder = new Notification.Builder(this, PROBLEMS_CHANNEL_ID);
+        } else {
+            builder = new Notification.Builder(this);
+        }
+        builder.setSmallIcon(getApplicationInfo().icon)
+                .setContentTitle("Problem in localdesktop.toml")
+                .setContentText(problems.split("\n")[0])
+                .setStyle(new Notification.BigTextStyle().bigText(problems
+                        + "\n\nThe rest of the config still applies. The file is "
+                        + "/etc/localdesktop/localdesktop.toml; Local Desktop reads it when it "
+                        + "starts and when the desktop restarts."));
+        String terminalUrl = details.getStringExtra(EXTRA_TERMINAL_URL);
+        if (terminalUrl != null) {
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+            Intent terminal = new Intent(this, WebPageActivity.class)
+                    .putExtra(WebPageActivity.EXTRA_URL, terminalUrl)
+                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            builder.addAction(0, "Terminal", PendingIntent.getActivity(this, 4, terminal, flags));
+        }
+        manager.notify(PROBLEMS_NOTIFICATION_ID, builder.build());
     }
 
     private void callApp(String action) {

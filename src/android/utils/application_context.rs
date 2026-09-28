@@ -33,7 +33,7 @@ impl ApplicationContext {
         let data_dir = Self::get_path(&mut env, &activity, "getFilesDir");
         let native_library_dir = Self::get_native_library_dir(&mut env, &activity);
         let full_config_path = format!("{}{}", ARCH_FS_ROOT, CONFIG_FILE);
-        let local_config = parse_config(full_config_path);
+        let local_config = read_local_config(full_config_path);
         let permission_all_files_access = Self::is_all_files_access_granted(android_app);
 
         {
@@ -116,9 +116,18 @@ impl ApplicationContext {
 
 static APPLICATION_CONTEXT: RwLock<Option<ApplicationContext>> = RwLock::new(None);
 
-/// Read the config file again, for when setup has just written it.
+/// Parse the config file and log what's wrong with it (the notification shows it too).
+fn read_local_config(full_config_path: String) -> LocalConfig {
+    let local_config = parse_config(full_config_path);
+    for problem in &local_config.problems {
+        log::warn!("Problem in {CONFIG_FILE}: {problem}");
+    }
+    local_config
+}
+
+/// Read the config file again, e.g. after setup wrote it or before restarting the desktop.
 pub fn reload_local_config() {
-    let local_config = parse_config(format!("{}{}", ARCH_FS_ROOT, CONFIG_FILE));
+    let local_config = read_local_config(format!("{}{}", ARCH_FS_ROOT, CONFIG_FILE));
     if let Some(context) = APPLICATION_CONTEXT
         .write()
         .expect("Failed to write application context")

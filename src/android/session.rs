@@ -92,6 +92,13 @@ extern "system" fn on_action(mut env: JNIEnv, _class: JClass, action: JString) {
     }
 }
 
+/// Bring the notifications up to date, e.g. after the config was read again.
+pub fn refresh() {
+    if let Some(android_app) = APP.get() {
+        start_service(android_app);
+    }
+}
+
 /// The desktop session ended by itself: say so in the notification, and if it didn't even
 /// start, open the terminal to look into it.
 pub fn desktop_stopped(failed_start: bool) {
@@ -147,6 +154,9 @@ pub fn start_service(android_app: &AndroidApp) {
         };
         if let Some(url) = &terminal_url {
             put_string(env, "terminal_url", url)?;
+        }
+        if !local_config.problems.is_empty() {
+            put_string(env, "config_problems", &local_config.problems.join("\n"))?;
         }
         if launch::stopped() {
             let key = env.new_string("desktop_stopped")?;
