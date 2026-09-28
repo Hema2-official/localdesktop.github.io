@@ -62,6 +62,9 @@ pub struct LocalConfig {
     #[serde(default)]
     pub graphics: GraphicsConfig,
 
+    #[serde(default)]
+    pub performance: PerformanceConfig,
+
     /// What happens if we don't assign this `#[serde(default)]` attribute?
     /// The answer: If the user omits the `[command]` group, the WHOLE config fails to parse
     /// => The default `[user]` group is applied (with `username=root`) even if the `[user]` settings are completely valid.
@@ -146,6 +149,41 @@ impl Default for GraphicsConfig {
     fn default() -> Self {
         Self {
             adreno_drivers: true,
+        }
+    }
+}
+
+/// How Android schedules the Linux programs. Under proot a program spends much of its time
+/// stopped while proot handles its system calls, so the scheduler sees it as less busy than it is
+/// and runs it on slower cores at a lower clock, where every system call costs more. A floor on
+/// its utilization corrects that; it only costs energy while programs are running.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct PerformanceConfig {
+    /// `off`, `balanced` (the default) or `max`. Kept as a string so that an unknown value falls
+    /// back to `balanced` instead of invalidating the section.
+    #[serde(default = "default_cpu_boost")]
+    pub cpu_boost: String,
+}
+
+fn default_cpu_boost() -> String {
+    "balanced".to_string()
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            cpu_boost: default_cpu_boost(),
+        }
+    }
+}
+
+impl PerformanceConfig {
+    /// The minimum utilization (out of 1024) the scheduler assumes for the Linux programs.
+    pub fn utilization_floor(&self) -> u32 {
+        match self.cpu_boost.trim() {
+            "off" => 0,
+            "max" => 1024,
+            _ => 512,
         }
     }
 }
@@ -329,6 +367,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("desktop", &["preset"]),
     ("ssh", &["enabled", "port", "password_login", "authorized_keys"]),
     ("graphics", &["adreno_drivers"]),
+    ("performance", &["cpu_boost"]),
     ("command", &["check", "install", "launch"]),
 ];
 
@@ -349,6 +388,7 @@ fn lenient(content: &str) -> LocalConfig {
         desktop: section(&table, "desktop"),
         ssh: section(&table, "ssh"),
         graphics: section(&table, "graphics"),
+        performance: section(&table, "performance"),
         command: section(&table, "command"),
         problems: Vec::new(),
     }
@@ -576,6 +616,24 @@ mod tests {
             let config = parse_config(full_config_path);
             assert!(!config.graphics.adreno_drivers);
             assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+    }
+
+    #[test]
+    fn should_boost_the_cpu_moderately_unless_told_otherwise() {
+        with_config_file("[user]\nusername = \"alice\"\n", |full_config_path| {
+            assert_eq!(parse_config(full_config_path).performance.utilization_floor(), 512);
+        });
+        with_config_file("[performance]\ncpu_boost = \"max\"\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert_eq!(config.performance.utilization_floor(), 1024);
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+        with_config_file("[performance]\ncpu_boost = \"off\"\n", |full_config_path| {
+            assert_eq!(parse_config(full_config_path).performance.utilization_floor(), 0);
+        });
+        with_config_file("[performance]\ncpu_boost = \"turbo\"\n", |full_config_path| {
+            assert_eq!(parse_config(full_config_path).performance.utilization_floor(), 512);
         });
     }
 

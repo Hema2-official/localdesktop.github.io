@@ -80,3 +80,20 @@ To use Arch's own Mesa instead:
 [graphics]
 adreno_drivers = false
 ```
+
+## Performance
+
+Programs in Local Desktop run under proot, which steps in on many of their system calls. While it does, the program waits, so Android sees it as less busy than it is and gives it slower cores at a lower clock, where each of those system calls costs more. Local Desktop tells Android to count the Linux programs as busier than they look. It only makes a difference while programs are running, not when the desktop is idle.
+
+| `cpu_boost` | |
+|---|---|
+| `balanced` (default) | Starting programs takes about a quarter to a third less time than with `off`. |
+| `max` | About 40 % less than `off`, at the cost of more battery while programs run. |
+| `off` | Leaves the choice of cores to Android. |
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[performance]
+cpu_boost = "max"
+```
+
+It takes effect the next time Local Desktop starts.

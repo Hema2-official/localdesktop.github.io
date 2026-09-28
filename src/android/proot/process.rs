@@ -12,6 +12,44 @@ use winit::platform::android::activity::AndroidApp;
 
 pub type Log = Arc<dyn Fn(String) + Send + Sync>;
 
+/// Ask the scheduler to treat this process, and every process it starts, as needing at least
+/// `floor` (out of 1024) of a core's capacity when it runs: see `PerformanceConfig`. On an S21 FE,
+/// `dolphin --version` took 555 ms without it, 388 ms with `balanced` and 318 ms with `max`. The
+/// kernel ignores it where it doesn't support clamping.
+fn set_utilization_floor(floor: u32) {
+    #[repr(C)]
+    struct SchedAttr {
+        size: u32,
+        policy: u32,
+        flags: u64,
+        nice: i32,
+        priority: u32,
+        runtime: u64,
+        deadline: u64,
+        period: u64,
+        util_min: u32,
+        util_max: u32,
+    }
+    const SCHED_FLAG_KEEP_POLICY: u64 = 0x08;
+    const SCHED_FLAG_KEEP_PARAMS: u64 = 0x10;
+    const SCHED_FLAG_UTIL_CLAMP_MIN: u64 = 0x20;
+    let attr = SchedAttr {
+        size: std::mem::size_of::<SchedAttr>() as u32,
+        policy: 0,
+        flags: SCHED_FLAG_KEEP_POLICY | SCHED_FLAG_KEEP_PARAMS | SCHED_FLAG_UTIL_CLAMP_MIN,
+        nice: 0,
+        priority: 0,
+        runtime: 0,
+        deadline: 0,
+        period: 0,
+        util_min: floor.min(1024),
+        util_max: 1024,
+    };
+    unsafe {
+        libc::syscall(libc::SYS_sched_setattr, 0, &attr as *const SchedAttr, 0);
+    }
+}
+
 const SUPPORT_CHECK_BINARY: &str = "ld-linux-aarch64.so.1";
 
 /// Runs a shell command inside the Arch Linux PRoot environment.
@@ -166,11 +204,12 @@ impl ArchProcess {
         let _ = fs::create_dir_all(&l2s_dir);
 
         let mut process = Command::new(context.native_library_dir.join("libproot.so"));
+        let utilization_floor = context.local_config.performance.utilization_floor();
         // Start from a clean signal state, like any process on Linux. The app's threads block
         // SIGQUIT, SIGUSR1 and SIGPIPE for Android's runtime, and children inherit that: proot
         // never saw the SIGQUIT that makes it end its processes, and Ctrl+\ did nothing.
         unsafe {
-            process.pre_exec(|| {
+            process.pre_exec(move || {
                 let mut signals: libc::sigset_t = std::mem::zeroed();
                 libc::sigemptyset(&mut signals);
                 libc::pthread_sigmask(libc::SIG_SETMASK, &signals, std::ptr::null_mut());
@@ -178,6 +217,9 @@ impl ArchProcess {
                     if signal != libc::SIGKILL && signal != libc::SIGSTOP {
                         libc::signal(signal, libc::SIG_DFL);
                     }
+                }
+                if utilization_floor > 0 {
+                    set_utilization_floor(utilization_floor);
                 }
                 Ok(())
             });
