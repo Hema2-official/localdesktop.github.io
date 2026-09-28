@@ -219,6 +219,32 @@ mod android {
     /// Channel count of the opened AAudio stream, published before the stream
     /// starts so the data callback can emit silence until `SINK` exists.
     static AAUDIO_CHANNELS: AtomicUsize = AtomicUsize::new(0);
+    /// The open AAudio stream. It only runs while PipeWire is streaming to the sink: in
+    /// low-latency mode its callback fires every few milliseconds, which cost about 3 % of a core
+    /// just to play silence.
+    static AAUDIO_STREAM: AtomicPtr<aaudio::Stream> = AtomicPtr::new(std::ptr::null_mut());
+
+    fn set_aaudio_running(running: bool) {
+        let stream = AAUDIO_STREAM.load(Ordering::Acquire);
+        let Some(api) = AAUDIO.get().filter(|_| !stream.is_null()) else {
+            return;
+        };
+        let result = unsafe {
+            if running {
+                (api.request_start)(stream)
+            } else {
+                (api.request_pause)(stream)
+            }
+        };
+        if result != aaudio::OK {
+            let text = unsafe { CStr::from_ptr((api.result_text)(result)) };
+            note!(
+                "failed to {} AAudio: {}",
+                if running { "start" } else { "pause" },
+                text.to_string_lossy()
+            );
+        }
+    }
 
     impl Sink {
         /// Ask the graph for another quantum once the ring runs low. Called
@@ -285,6 +311,7 @@ mod android {
             pub channel_count: unsafe extern "C" fn(*mut Stream) -> i32,
             pub buffer_size_in_frames: unsafe extern "C" fn(*mut Stream) -> i32,
             pub request_start: unsafe extern "C" fn(*mut Stream) -> Res,
+            pub request_pause: unsafe extern "C" fn(*mut Stream) -> Res,
             pub request_stop: unsafe extern "C" fn(*mut Stream) -> Res,
             pub close: unsafe extern "C" fn(*mut Stream) -> Res,
         }
@@ -323,6 +350,7 @@ mod android {
                         channel_count: sym(&lib, b"AAudioStream_getChannelCount\0")?,
                         buffer_size_in_frames: sym(&lib, b"AAudioStream_getBufferSizeInFrames\0")?,
                         request_start: sym(&lib, b"AAudioStream_requestStart\0")?,
+                        request_pause: sym(&lib, b"AAudioStream_requestPause\0")?,
                         request_stop: sym(&lib, b"AAudioStream_requestStop\0")?,
                         close: sym(&lib, b"AAudioStream_close\0")?,
                         _lib: lib,
@@ -368,8 +396,9 @@ mod android {
         note!("AAudio error: {text}");
     }
 
-    /// Open and start an AAudio output stream, returning it together with the
-    /// rate and channel count it actually negotiated.
+    /// Open an AAudio output stream, returning it together with the rate and
+    /// channel count it actually negotiated. It starts once PipeWire streams to
+    /// the sink.
     fn open_aaudio(rate: u32, channels: u32) -> Result<(*mut aaudio::Stream, u32, u32), String> {
         let api = match AAUDIO.get() {
             Some(api) => api,
@@ -409,11 +438,6 @@ mod android {
                 "opened AAudio stream: rate={rate} channels={channels} buffer_frames={}",
                 (api.buffer_size_in_frames)(stream)
             );
-
-            if (api.request_start)(stream) != aaudio::OK {
-                (api.close)(stream);
-                return Err("AAudioStream_requestStart failed".into());
-            }
 
             Ok((stream, rate, channels))
         }
@@ -750,10 +774,14 @@ mod android {
             sink.clear();
             sink.process_pending.store(false, Ordering::Release);
             sink.drive_enabled.store(true, Ordering::Release);
-            sink.maybe_trigger_process();
+            // Its callbacks drive the graph from here on.
+            set_aaudio_running(true);
         } else {
             sink.drive_enabled.store(false, Ordering::Release);
             sink.process_pending.store(false, Ordering::Release);
+            if old == pw::stream::StreamState::Streaming {
+                set_aaudio_running(false);
+            }
         }
         note!("stream state {old:?} -> {new:?}");
     }
@@ -931,6 +959,7 @@ mod android {
 
         let result = (|| {
             let (aaudio_stream, rate, channels) = open_aaudio(args.rate, args.channels)?;
+            AAUDIO_STREAM.store(aaudio_stream, Ordering::Release);
             let sink = match SINK.get() {
                 Some(sink) => sink,
                 None => {
@@ -944,6 +973,7 @@ mod android {
             sink.drive_enabled.store(false, Ordering::Release);
             sink.process_pending.store(false, Ordering::Release);
             sink.stream.store(std::ptr::null_mut(), Ordering::Release);
+            AAUDIO_STREAM.store(std::ptr::null_mut(), Ordering::Release);
             close_aaudio(aaudio_stream);
 
             note!(
