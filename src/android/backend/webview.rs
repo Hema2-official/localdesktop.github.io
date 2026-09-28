@@ -1,4 +1,4 @@
-use crate::android::proot::setup::SetupMessage;
+use crate::android::{proot::setup::SetupMessage, session};
 use serde_json::json;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,15 +52,20 @@ impl WebviewBackend {
         thread::spawn(move || {
             for message in receiver {
                 let progress = *progress_clone.lock().unwrap();
+                let failed = matches!(message, SetupMessage::Failed(_));
                 let message = match message {
-                    SetupMessage::Progress(msg) => OwnedMessage::Text(
-                        json!({
-                            "progress": progress,
-                            "message": msg,
-                        })
-                        .to_string(),
-                    ),
-                    SetupMessage::Error(msg) => {
+                    SetupMessage::Progress(msg) => {
+                        session::setup_progress(progress, &msg, false);
+                        OwnedMessage::Text(
+                            json!({
+                                "progress": progress,
+                                "message": msg,
+                            })
+                            .to_string(),
+                        )
+                    }
+                    SetupMessage::Error(msg) | SetupMessage::Failed(msg) => {
+                        session::setup_progress(progress, &msg, failed);
                         log::info!("Setup error [{}%]: {}", progress, msg);
                         OwnedMessage::Text(
                             json!({

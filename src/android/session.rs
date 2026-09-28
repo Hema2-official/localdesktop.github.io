@@ -9,8 +9,9 @@ use jni::errors::Result as JniResult;
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::_jobject;
 use jni::{JNIEnv, NativeMethod};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 use winit::platform::android::activity::AndroidApp;
 
 /// For calls from threads that don't have the app at hand.
@@ -188,6 +189,77 @@ pub fn start_service(android_app: &AndroidApp) {
             start,
             "(Landroid/content/Intent;)Landroid/content/ComponentName;",
             &[(&intent).into()],
+        )?;
+        Ok(())
+    });
+}
+
+/// Start the service for the first setup, which keeps it going with the screen off.
+pub fn start_setup_service(android_app: &AndroidApp) {
+    with_activity(android_app, "start the setup service", |env, activity| {
+        let class = app_class(env, activity, "app.polarbear.SessionService")?;
+        let intent = env.new_object(
+            "android/content/Intent",
+            "(Landroid/content/Context;Ljava/lang/Class;)V",
+            &[activity.into(), (&class).into()],
+        )?;
+        let key = env.new_string("setup")?;
+        env.call_method(
+            &intent,
+            "putExtra",
+            "(Ljava/lang/String;Z)Landroid/content/Intent;",
+            &[(&key).into(), JValue::Bool(1)],
+        )?;
+        let start = if sdk_version(env) >= 26 {
+            "startForegroundService"
+        } else {
+            "startService"
+        };
+        env.call_method(
+            activity,
+            start,
+            "(Landroid/content/Intent;)Landroid/content/ComponentName;",
+            &[(&intent).into()],
+        )?;
+        Ok(())
+    });
+}
+
+/// Setup progress for the notification. Called for every progress message; passes on changes of
+/// `progress` and otherwise at most one message every two seconds.
+pub fn setup_progress(progress: u16, message: &str, failed: bool) {
+    static LAST: Mutex<Option<(Instant, u16)>> = Mutex::new(None);
+    let finished = progress >= 100 && !failed;
+    {
+        let mut last = LAST.lock().unwrap();
+        if let Some((at, last_progress)) = *last {
+            if !finished
+                && !failed
+                && last_progress == progress
+                && at.elapsed() < Duration::from_secs(2)
+            {
+                return;
+            }
+        }
+        *last = Some((Instant::now(), progress));
+    }
+    let Some(android_app) = APP.get() else {
+        return;
+    };
+    with_activity(android_app, "show setup progress", |env, activity| {
+        let class = app_class(env, activity, "app.polarbear.SessionService")?;
+        let message = env.new_string(message)?;
+        env.call_static_method(
+            &class,
+            "showSetup",
+            "(Landroid/content/Context;ILjava/lang/String;ZZ)V",
+            &[
+                activity.into(),
+                JValue::Int(progress as i32),
+                (&message).into(),
+                JValue::Bool(finished as u8),
+                JValue::Bool(failed as u8),
+            ],
         )?;
         Ok(())
     });

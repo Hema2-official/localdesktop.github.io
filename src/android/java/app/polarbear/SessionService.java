@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
+import android.content.Context;
 import android.content.Intent;
 import android.net.ConnectivityManager;
 import android.net.LinkAddress;
@@ -14,6 +15,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.PowerManager;
 import java.net.Inet4Address;
 
 /**
@@ -40,6 +42,12 @@ public class SessionService extends Service {
     private static final int FOREGROUND_SERVICE_TYPE_SPECIAL_USE = 1 << 30;
     /** About how long Plasma takes to come back: the restart button stays hidden that long. */
     private static final long RESTART_MILLIS = 30_000;
+    /** Starts the service for the first setup instead of a running desktop. */
+    static final String EXTRA_SETUP = "setup";
+    /** Longer than any setup should take, so a stuck one can't keep the phone awake forever. */
+    private static final long SETUP_LOCK_MILLIS = 2 * 60 * 60 * 1000;
+
+    private static PowerManager.WakeLock setupLock;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     /** The extras the app started the service with, to rebuild the notification from. */
@@ -79,17 +87,86 @@ public class SessionService extends Service {
             stopSelf();
             return START_NOT_STICKY;
         }
+        if (intent.getBooleanExtra(EXTRA_SETUP, false)) {
+            startSetup();
+            return START_NOT_STICKY;
+        }
 
         details = intent;
-        Notification notification = buildNotification();
+        startForeground(buildNotification());
+        PhantomProcessKiller.check(this);
+        showConfigProblems();
+        return START_NOT_STICKY;
+    }
+
+    private void startForeground(Notification notification) {
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(NOTIFICATION_ID, notification, FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
-        PhantomProcessKiller.check(this);
-        showConfigProblems();
-        return START_NOT_STICKY;
+    }
+
+    /**
+     * The first setup downloads and installs for a long while. Running in the foreground with
+     * the CPU awake keeps it going (and its network access, which a dozing phone cuts for
+     * background apps) when the screen turns off or the user switches apps.
+     */
+    private void startSetup() {
+        if (setupLock == null) {
+            setupLock = getSystemService(PowerManager.class)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LocalDesktop:setup");
+            setupLock.setReferenceCounted(false);
+        }
+        setupLock.acquire(SETUP_LOCK_MILLIS);
+        startForeground(setupNotification(this, 0, "Starting…", false, false));
+    }
+
+    /** Setup progress in the notification, called by the app's setup threads. */
+    static void showSetup(Context context, int progress, String message, boolean finished,
+            boolean failed) {
+        if ((finished || failed) && setupLock != null && setupLock.isHeld()) {
+            setupLock.release();
+        }
+        context.getSystemService(NotificationManager.class).notify(
+                NOTIFICATION_ID, setupNotification(context, progress, message, finished, failed));
+    }
+
+    private static Notification setupNotification(Context context, int progress, String message,
+            boolean finished, boolean failed) {
+        String title;
+        if (finished) {
+            title = "Local Desktop is installed";
+            message = "Open it again to start the desktop.";
+        } else if (failed) {
+            title = "Local Desktop's setup stopped";
+        } else {
+            title = "Setting up Local Desktop";
+        }
+        Intent open = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+        Notification.Builder builder = builder(context)
+                .setContentTitle(title)
+                .setContentText(message)
+                .setOngoing(!finished && !failed)
+                .setContentIntent(PendingIntent.getActivity(context, 0, open,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
+        if (!finished && !failed) {
+            builder.setProgress(100, progress, false);
+        }
+        return builder.build();
+    }
+
+    private static Notification.Builder builder(Context context) {
+        Notification.Builder builder;
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationManager manager = context.getSystemService(NotificationManager.class);
+            manager.createNotificationChannel(new NotificationChannel(
+                    CHANNEL_ID, "Desktop session", NotificationManager.IMPORTANCE_LOW));
+            builder = new Notification.Builder(context, CHANNEL_ID);
+        } else {
+            builder = new Notification.Builder(context);
+        }
+        return builder.setSmallIcon(context.getApplicationInfo().icon);
     }
 
     private void showConfigProblems() {
@@ -140,16 +217,7 @@ public class SessionService extends Service {
 
     private Notification buildNotification() {
         Intent intent = details;
-        Notification.Builder builder;
-        if (Build.VERSION.SDK_INT >= 26) {
-            NotificationManager manager = getSystemService(NotificationManager.class);
-            manager.createNotificationChannel(new NotificationChannel(
-                    CHANNEL_ID, "Desktop session", NotificationManager.IMPORTANCE_LOW));
-            builder = new Notification.Builder(this, CHANNEL_ID);
-        } else {
-            builder = new Notification.Builder(this);
-        }
-
+        Notification.Builder builder = builder(this);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
         Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
         boolean stopped = !restarting && intent.getBooleanExtra(EXTRA_DESKTOP_STOPPED, false);
@@ -161,8 +229,7 @@ public class SessionService extends Service {
         } else {
             text = details(intent);
         }
-        builder.setSmallIcon(getApplicationInfo().icon)
-                .setContentTitle(stopped ? "The desktop stopped" : "Local Desktop is running")
+        builder.setContentTitle(stopped ? "The desktop stopped" : "Local Desktop is running")
                 .setContentText(text)
                 .setOngoing(true)
                 .setContentIntent(PendingIntent.getActivity(this, 0, open, flags));

@@ -6,6 +6,7 @@ use crate::{
             wayland::{Compositor, TouchMode, WaylandBackend},
             webview::{ErrorVariant, WebviewBackend},
         },
+        session,
         utils::application_context::{get_application_context, reload_local_config},
         utils::ndk::{density_dpi, long_press_timeout_ms, scale_factor, time_zone, touch_slop_px},
     },
@@ -40,6 +41,8 @@ use xz2::read::XzDecoder;
 pub enum SetupMessage {
     Progress(String),
     Error(String),
+    /// A stage failed and setup has stopped; the app has to be restarted.
+    Failed(String),
     /// Ask the setup page which desktop preset to install; it answers through `desktop_choice`.
     ChooseDesktop,
 }
@@ -1558,7 +1561,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
             "Stage execution failed: Unknown error".to_string()
         };
         sender
-            .send(SetupMessage::Error(error_msg.clone()))
+            .send(SetupMessage::Failed(error_msg.clone()))
             .unwrap_or(());
     };
 
@@ -1633,6 +1636,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
             android_app,
         })
     } else {
+        session::start_setup_service(&android_app);
         PolarBearBackend::WebView(WebviewBackend::build(receiver, progress, choice_sender))
     }
 }
