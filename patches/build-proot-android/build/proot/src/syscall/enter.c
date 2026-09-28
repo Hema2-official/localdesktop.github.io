@@ -118,6 +118,32 @@ int translate_syscall_enter(Tracee *tracee)
 
 	/* Translate input arguments. */
 	syscall_number = get_sysnum(tracee, ORIGINAL);
+
+	/* What might turn a directory into something else, or make it
+	 * unsearchable, outdates the directories canonicalize() knows.  */
+	switch (syscall_number) {
+	case PR_rmdir:
+	case PR_rename:
+	case PR_renameat:
+	case PR_renameat2:
+	case PR_chmod:
+	case PR_fchmod:
+	case PR_fchmodat:
+	case PR_mount:
+	case PR_umount:
+	case PR_umount2:
+	case PR_pivot_root:
+	case PR_chroot:
+		invalidate_directory_cache();
+		break;
+	case PR_unlinkat:
+		if ((peek_reg(tracee, CURRENT, SYSARG_3) & AT_REMOVEDIR) != 0)
+			invalidate_directory_cache();
+		break;
+	default:
+		break;
+	}
+
 	switch (syscall_number) {
 	default:
 		/* Nothing to do. */

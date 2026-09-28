@@ -84,6 +84,14 @@ else
     info "fstat() on sockets" "python3 not installed, skipped"
 fi
 
+# proot remembers directories it has walked through; one replaced by a symlink to an absolute path
+# must be followed inside the rootfs right away, not on Android's side.
+mkdir -p swapped/sub && touch swapped/sub/f && ls swapped/sub/f > /dev/null
+mv swapped swapped.old && ln -s /etc swapped
+[ "$(cat swapped/hostname 2>&1)" = "$(cat /etc/hostname 2>&1)" ] && [ -e swapped/pacman.conf ] \
+    && pass "a directory replaced by a symlink is followed at once" \
+    || fail "a directory replaced by a symlink is followed at once" "$(ls swapped/ 2>&1 | head -3 | tr '\n' ' ')"
+
 # The emulated ids, through every call that reports them.
 if command -v python3 > /dev/null; then
     ids=$(python3 -c 'import os; print(os.getuid(), os.geteuid(), *os.getresuid(), os.getgid(), os.getegid(), *os.getresgid())' 2>&1)

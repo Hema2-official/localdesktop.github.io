@@ -38,6 +38,92 @@
 #include "path/f2fs-bug.h"
 #include "extension/extension.h"
 
+#include <stdint.h>    /* uint64_t, */
+#include <stdlib.h>    /* malloc(3), free(3), */
+#include <time.h>      /* clock_gettime(2), */
+
+/* Host directories canonicalize() found on the way to other paths, so
+ * that it doesn't lstat(2) /usr, /usr/share, ... again for every path
+ * below them: real directories (not symlinks) their owner can search,
+ * so the fake_id0 extension had nothing to open up either.  Anything
+ * this PRoot does that could turn a directory into something else
+ * empties the cache (see translate_syscall_enter()), and entries expire
+ * after a while for changes made by other processes.  Even a stale
+ * entry costs little: a directory removed meanwhile still makes the
+ * syscall fail as it should, only one replaced by a symlink to an
+ * absolute path would be followed on the host side.  */
+#define DIRECTORY_CACHE_SIZE 1024
+#define DIRECTORY_CACHE_LIFETIME_NS 2000000000ULL
+
+typedef struct {
+	char *path;
+	size_t length;
+	uint64_t hash;
+	unsigned long generation;
+	unsigned long long expires;
+} CachedDirectory;
+
+static CachedDirectory directory_cache[DIRECTORY_CACHE_SIZE];
+static unsigned long directory_cache_generation = 1;
+
+void invalidate_directory_cache(void)
+{
+	directory_cache_generation++;
+}
+
+static unsigned long long coarse_now(void)
+{
+	struct timespec time;
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &time);
+	return (unsigned long long) time.tv_sec * 1000000000ULL + time.tv_nsec;
+}
+
+static uint64_t hash_path(const char *path, size_t *length)
+{
+	uint64_t hash = 0xcbf29ce484222325ULL; /* FNV-1a */
+	const char *cursor;
+
+	for (cursor = path; *cursor != '\0'; cursor++) {
+		hash ^= (unsigned char) *cursor;
+		hash *= 0x100000001b3ULL;
+	}
+	*length = cursor - path;
+	return hash;
+}
+
+static bool is_cached_directory(const char *host_path)
+{
+	size_t length;
+	uint64_t hash = hash_path(host_path, &length);
+	const CachedDirectory *entry = &directory_cache[hash % DIRECTORY_CACHE_SIZE];
+
+	return entry->path != NULL
+		&& entry->generation == directory_cache_generation
+		&& entry->hash == hash
+		&& entry->length == length
+		&& memcmp(entry->path, host_path, length) == 0
+		&& coarse_now() < entry->expires;
+}
+
+static void cache_directory(const char *host_path)
+{
+	size_t length;
+	uint64_t hash = hash_path(host_path, &length);
+	CachedDirectory *entry = &directory_cache[hash % DIRECTORY_CACHE_SIZE];
+
+	if (entry->path == NULL || entry->length < length) {
+		free(entry->path);
+		entry->path = malloc(length + 1);
+		if (entry->path == NULL)
+			return;
+	}
+	memcpy(entry->path, host_path, length + 1);
+	entry->length = length;
+	entry->hash = hash;
+	entry->generation = directory_cache_generation;
+	entry->expires = coarse_now() + DIRECTORY_CACHE_LIFETIME_NS;
+}
+
 /**
  * Put an end-of-string ('\0') right before the last component of @path.
  */
@@ -144,6 +230,10 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	if (status < 0)
 		return status;
 
+	/* A directory on the way, known already.  */
+	if (!IS_FINAL(finality) && tracee->glue_type == 0 && is_cached_directory(host_path))
+		return 0;
+
 	statl.st_mode = 0;
 	if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
 		status = -ENOENT;
@@ -179,6 +269,10 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 		int notified = notify_extensions(tracee, HOST_PATH, (intptr_t)host_path, (intptr_t)&info);
 		if (notified < 0)
 			return notified;
+
+		if (!IS_FINAL(finality) && status == 0 && S_ISDIR(statl.st_mode)
+		    && (statl.st_mode & S_IRWXU) == S_IRWXU)
+			cache_directory(host_path);
 	}
 
 	/* Return an error if a non-final component isn't a
