@@ -19,6 +19,7 @@ use crate::{
     },
 };
 use pathdiff::diff_paths;
+use sha2::{Digest, Sha256};
 use smithay::utils::Clock;
 use std::{
     fs::{self, File, OpenOptions},
@@ -101,7 +102,7 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
                             "Downloading Arch Linux FS...".to_string(),
                         ))
                         .expect("Failed to send log message");
-                    download(ARCH_FS_ARCHIVE, &temp_file, &mpsc_sender);
+                    download(ARCH_FS_ARCHIVE, &temp_file, &mpsc_sender, "Downloading Arch Linux FS");
                 }
 
                 mpsc_sender
@@ -153,11 +154,11 @@ fn setup_arch_fs(options: &SetupOptions) -> StageOutput {
 
 /// Download `url` to `path`, resuming after network errors (the phone dozing, Wi-Fi dropping)
 /// instead of failing the setup. `path` only appears once the download is complete.
-fn download(url: &str, path: &Path, sender: &Sender<SetupMessage>) {
+fn download(url: &str, path: &Path, sender: &Sender<SetupMessage>, label: &str) {
     let part = PathBuf::from(format!("{}.part", path.display()));
     let client = reqwest::blocking::Client::new();
     for failures in 1u64.. {
-        match download_attempt(&client, url, &part, sender) {
+        match download_attempt(&client, url, &part, sender, label) {
             Ok(()) => {
                 fs::rename(&part, path).expect("Failed to move the finished download into place");
                 return;
@@ -182,6 +183,7 @@ fn download_attempt(
     url: &str,
     part: &Path,
     sender: &Sender<SetupMessage>,
+    label: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let have = fs::metadata(part).map(|it| it.len()).unwrap_or(0);
     let mut request = client.get(url);
@@ -216,7 +218,7 @@ fn download_attempt(
             if last_percent != Some(percent) {
                 sender
                     .send(SetupMessage::Progress(format!(
-                        "Downloading Arch Linux FS... {}% ({:.2} MB / {:.2} MB)",
+                        "{label}... {}% ({:.2} MB / {:.2} MB)",
                         percent,
                         downloaded as f64 / 1024.0 / 1024.0,
                         total as f64 / 1024.0 / 1024.0
@@ -636,6 +638,329 @@ fn setup_pipewire_package_lock(_: &SetupOptions) -> StageOutput {
     }
 
     None
+}
+
+/// Mesa that drives Adreno GPUs through KGSL, built by
+/// https://github.com/lfdevs/mesa-for-android-container. Arch's own Mesa only drives GPUs through
+/// `/dev/dri`, which Android doesn't give apps, so with it Turnip (Vulkan) and Freedreno (OpenGL)
+/// find no GPU.
+const ADRENO_MESA_RELEASES: &str =
+    "https://api.github.com/repos/lfdevs/mesa-for-android-container/releases?per_page=30";
+/// The packages its Arch release replaces (its `mesa-docs` isn't needed).
+const ADRENO_MESA_PACKAGES: &[&str] = &[
+    "mesa",
+    "vulkan-freedreno",
+    "vulkan-mesa-implicit-layers",
+    "vulkan-mesa-layers",
+];
+/// The installed drivers as `<size> <path>` lines and the libraries they link as `- <path>`, so
+/// that each launch can tell with a few `stat`s whether an update replaced the drivers or removed
+/// a library they need (an LLVM update removing their `libLLVM`, say). Updated libraries keep
+/// their name and work on.
+const ADRENO_MESA_STATE: &str = "var/lib/localdesktop/adreno-mesa";
+/// When an install last failed; it isn't tried again for a day, since every try brings up the
+/// setup page (and without network it can't succeed).
+const ADRENO_MESA_FAILED: &str = "var/lib/localdesktop/adreno-mesa.failed";
+const ADRENO_MESA_RETRY_SECS: u64 = 24 * 60 * 60;
+/// `gpu <program>` runs an OpenGL program on the Adreno. Vulkan programs use it without help.
+const GPU_HELPER: &str = "usr/local/bin/gpu";
+const GPU_HELPER_SCRIPT: &str = r#"#!/bin/sh
+# Run an OpenGL program on the Adreno GPU: through Zink on Turnip, under X11 (Xwayland), because
+# the compositors here only take shared-memory buffers and OpenGL through Wayland can't use them.
+# Vulkan programs use the GPU without this.
+[ $# -gt 0 ] || { echo "Usage: gpu <program> [arguments]" >&2; exit 2; }
+export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1
+export DISPLAY="${DISPLAY:-:0}"
+unset WAYLAND_DISPLAY
+export QT_QPA_PLATFORM=xcb GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 MOZ_ENABLE_WAYLAND=0
+exec "$@"
+"#;
+
+fn setup_adreno_mesa(options: &SetupOptions) -> StageOutput {
+    if !Path::new("/dev/kgsl-3d0").exists() {
+        return None;
+    }
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    let wanted = get_application_context().local_config.graphics.adreno_drivers;
+    let installed = fs_root.join(ADRENO_MESA_STATE).exists();
+    if wanted == installed && (!wanted || adreno_mesa_intact(fs_root)) {
+        let helper = fs_root.join(GPU_HELPER);
+        if wanted && fs::read_to_string(&helper).ok().as_deref() != Some(GPU_HELPER_SCRIPT) {
+            write_executable(&helper, GPU_HELPER_SCRIPT);
+        }
+        return None;
+    }
+    let failed_at = fs::read_to_string(fs_root.join(ADRENO_MESA_FAILED))
+        .ok()
+        .and_then(|it| it.trim().parse::<u64>().ok());
+    if failed_at.is_some_and(|it| unix_time().saturating_sub(it) < ADRENO_MESA_RETRY_SECS) {
+        return None;
+    }
+
+    let sender = options.mpsc_sender.clone();
+    Some(thread::spawn(move || {
+        let result = if wanted {
+            install_adreno_mesa(&sender)
+        } else {
+            restore_arch_mesa(&sender)
+        };
+        let failed = fs_root.join(ADRENO_MESA_FAILED);
+        match result {
+            Ok(()) => {
+                let _ = fs::remove_file(failed);
+            }
+            // Not worth failing the setup over: the desktop works without the GPU.
+            Err(error) => {
+                log::warn!("GPU drivers: {error}");
+                sender
+                    .send(SetupMessage::Error(format!(
+                        "GPU drivers: {error}. Trying again tomorrow; the desktop works without them."
+                    )))
+                    .unwrap_or(());
+                let _ = fs::create_dir_all(fs_root.join("var/lib/localdesktop"));
+                let _ = fs::write(failed, unix_time().to_string());
+            }
+        }
+    }))
+}
+
+fn unix_time() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |it| it.as_secs())
+}
+
+/// Whether the drivers recorded at install time are still there with the same size, and the
+/// libraries they link are still there.
+fn adreno_mesa_intact(fs_root: &Path) -> bool {
+    let Ok(state) = fs::read_to_string(fs_root.join(ADRENO_MESA_STATE)) else {
+        return false;
+    };
+    let mut files = 0;
+    for line in state.lines() {
+        let Some((size, path)) = line.split_once(' ') else {
+            continue;
+        };
+        let host_path = fs_root.join(path.trim_start_matches('/'));
+        let found = fs::metadata(&host_path).map(|it| it.len().to_string()).ok();
+        if found.is_none() || (size != "-" && found.as_deref() != Some(size)) {
+            log::info!("GPU drivers changed or broke: {path}");
+            return false;
+        }
+        files += 1;
+    }
+    files > 0
+}
+
+fn install_adreno_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    sender
+        .send(SetupMessage::Progress(
+            "Installing GPU drivers for the Adreno (Mesa for Android containers)...".into(),
+        ))
+        .unwrap_or(());
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Local Desktop")
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let releases: serde_json::Value = client
+        .get(ADRENO_MESA_RELEASES)
+        .send()
+        .and_then(|it| it.error_for_status())
+        .and_then(|it| it.text())
+        .map_err(|error| format!("couldn't list the releases: {error}"))
+        .and_then(|it| serde_json::from_str(&it).map_err(|error| error.to_string()))?;
+    // The newest regular release; the `turnip-` ones only carry the Vulkan driver.
+    let (tag, name, url, sha256) = releases
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|release| release["draft"] == false && release["prerelease"] == false)
+        .filter(|release| {
+            release["tag_name"]
+                .as_str()
+                .is_some_and(|tag| tag.starts_with("mesa-"))
+        })
+        .find_map(|release| {
+            let asset = release["assets"].as_array()?.iter().find(|asset| {
+                asset["name"]
+                    .as_str()
+                    .is_some_and(|name| name.ends_with("_archlinux_arm64.tar"))
+            })?;
+            let name = asset["name"].as_str()?.to_string();
+            // GitHub's own digest, or the checksum list in the release notes.
+            let sha256 = asset["digest"]
+                .as_str()
+                .and_then(|it| it.strip_prefix("sha256:"))
+                .map(str::to_string)
+                .or_else(|| {
+                    release["body"].as_str()?.lines().find_map(|line| {
+                        let (hash, file) = line.trim().split_once(char::is_whitespace)?;
+                        (file.trim() == name).then(|| hash.to_string())
+                    })
+                })?;
+            Some((
+                release["tag_name"].as_str()?.to_string(),
+                name,
+                asset["browser_download_url"].as_str()?.to_string(),
+                sha256.to_lowercase(),
+            ))
+        })
+        .ok_or("no release for Arch Linux found")?;
+    log::info!("Installing Mesa for Adreno from release {tag}");
+
+    let dir = fs_root.join("tmp/localdesktop-adreno-mesa");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let archive = dir.join(&name);
+    download(&url, &archive, sender, "Downloading GPU drivers");
+
+    let mut hasher = Sha256::new();
+    let mut file = File::open(&archive).map_err(|error| error.to_string())?;
+    std::io::copy(&mut file, &mut hasher).map_err(|error| error.to_string())?;
+    if format!("{:x}", hasher.finalize()) != sha256 {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(format!("{name} doesn't match its checksum"));
+    }
+
+    // The archive holds one makepkg package per Mesa package.
+    let mut packages = Vec::new();
+    let mut tar = Archive::new(File::open(&archive).map_err(|error| error.to_string())?);
+    for entry in tar.entries().map_err(|error| error.to_string())? {
+        let mut entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path().map_err(|error| error.to_string())?.into_owned();
+        let Some(file_name) = path.file_name().and_then(|it| it.to_str()).map(str::to_string)
+        else {
+            continue;
+        };
+        // "<name>-<version>...", where versions start with a digit (so mesa-docs isn't mesa).
+        let wanted = ADRENO_MESA_PACKAGES.iter().any(|package| {
+            file_name
+                .strip_prefix(package)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        });
+        if wanted && file_name.contains(".pkg.tar") {
+            entry
+                .unpack(dir.join(&file_name))
+                .map_err(|error| error.to_string())?;
+            packages.push(format!("'{file_name}'"));
+        }
+    }
+    if packages.len() != ADRENO_MESA_PACKAGES.len() {
+        let _ = fs::remove_dir_all(&dir);
+        return Err(format!("{name} lacks some of {ADRENO_MESA_PACKAGES:?}"));
+    }
+
+    let log_sender = sender.clone();
+    let installed = ArchProcess {
+        command: format!(
+            "rm -f /var/lib/pacman/db.lck && cd /tmp/localdesktop-adreno-mesa && pacman -U --noconfirm {} \
+             && {{ pacman -S --needed --noconfirm vulkan-tools || pacman -Sy --needed --noconfirm vulkan-tools; }}",
+            packages.join(" ")
+        ),
+        user: None,
+        log: Some(Arc::new(move |it| {
+            log_sender.send(SetupMessage::Progress(it)).unwrap_or(());
+        })),
+    }
+    .run()
+    .status
+    .success();
+    let _ = fs::remove_dir_all(&dir);
+    if !installed {
+        return Err("pacman couldn't install them".into());
+    }
+
+    // Everything the drivers load has to resolve, and Turnip has to find the GPU.
+    let check = ArchProcess {
+        command: "for f in /usr/lib/libvulkan_freedreno.so /usr/lib/libgallium-*.so; do \
+                      echo \"$f => $f (\"; ldd \"$f\"; done; \
+                  vulkaninfo --summary 2>/dev/null | grep -q 'driverName *= turnip' && echo TURNIP_OK"
+            .into(),
+        user: None,
+        log: None,
+    }
+    .run();
+    let output = String::from_utf8_lossy(&check.stdout);
+    let broken = output.contains("not found") || !output.contains("TURNIP_OK");
+    if broken {
+        log::warn!("Mesa for Adreno doesn't work here:\n{output}");
+        restore_arch_mesa(sender)?;
+        return Err(format!(
+            "the {tag} build doesn't work with this system's libraries, so Arch's Mesa is back"
+        ));
+    }
+    let mut state = String::new();
+    let mut paths: Vec<&str> = output
+        .lines()
+        .filter_map(|line| line.split_once("=> ")?.1.split(" (").next())
+        .filter(|path| path.starts_with('/'))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    for path in paths {
+        let driver =
+            path == "/usr/lib/libvulkan_freedreno.so" || path.starts_with("/usr/lib/libgallium-");
+        match fs::metadata(fs_root.join(path.trim_start_matches('/'))) {
+            Ok(metadata) if driver => state.push_str(&format!("{} {path}\n", metadata.len())),
+            Ok(_) => state.push_str(&format!("- {path}\n")),
+            Err(_) => {}
+        }
+    }
+    fs::create_dir_all(fs_root.join("var/lib/localdesktop")).map_err(|error| error.to_string())?;
+    fs::write(fs_root.join(ADRENO_MESA_STATE), state).map_err(|error| error.to_string())?;
+
+    write_executable(&fs_root.join(GPU_HELPER), GPU_HELPER_SCRIPT);
+
+    // Keep `pacman -Syu` from putting Arch's Mesa back.
+    let pacman_conf = fs_root.join("etc/pacman.conf");
+    if let Ok(content) = fs::read_to_string(&pacman_conf) {
+        let updated = ensure_pacman_ignore_pkg(&content, ADRENO_MESA_PACKAGES);
+        if updated != content {
+            fs::write(&pacman_conf, updated).map_err(|error| error.to_string())?;
+        }
+    }
+    sender
+        .send(SetupMessage::Progress(format!(
+            "GPU drivers installed ({tag})"
+        )))
+        .unwrap_or(());
+    Ok(())
+}
+
+/// Put Arch's own Mesa back, and let `pacman -Syu` update it again.
+fn restore_arch_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    let pacman_conf = fs_root.join("etc/pacman.conf");
+    if let Ok(content) = fs::read_to_string(&pacman_conf) {
+        let updated = remove_pacman_ignore_pkg(&content, ADRENO_MESA_PACKAGES);
+        if updated != content {
+            fs::write(&pacman_conf, updated).map_err(|error| error.to_string())?;
+        }
+    }
+    let log_sender = sender.clone();
+    let restored = ArchProcess {
+        command: format!(
+            "rm -f /var/lib/pacman/db.lck && pacman -Sy --noconfirm {}",
+            ADRENO_MESA_PACKAGES.join(" ")
+        ),
+        user: None,
+        log: Some(Arc::new(move |it| {
+            log_sender.send(SetupMessage::Progress(it)).unwrap_or(());
+        })),
+    }
+    .run()
+    .status
+    .success();
+    if !restored {
+        return Err("pacman couldn't reinstall Arch's Mesa".into());
+    }
+    let _ = fs::remove_file(fs_root.join(ADRENO_MESA_STATE));
+    let _ = fs::remove_file(fs_root.join(GPU_HELPER));
+    Ok(())
 }
 
 fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
@@ -1090,6 +1415,9 @@ esac
 export WAYLAND_DISPLAY
 # Electron adds --no-sandbox when this is set; Android has no user namespaces for it to use.
 export ELECTRON_DISABLE_SANDBOX=1
+# The compositors here only take shared-memory buffers (there's no GPU render node), so Vulkan
+# apps have to present through them.
+export MESA_VK_WSI_DEBUG=sw
 {TZ_FROM_LOCALTIME}"#
     )
 }
@@ -1631,6 +1959,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_machine_id),             // Step 5. Seed /etc/machine-id for D-Bus clients
         Box::new(setup_time_zone),              // Step 6. Follow Android's time zone
         Box::new(setup_pipewire_package_lock), // Step 7. Hold guest PipeWire packages for the Android-side PipeWire POC
+        Box::new(setup_adreno_mesa), // Step 7b. Mesa that drives the Adreno GPU through KGSL
         Box::new(setup_firefox_config),        // Step 8. Setup Firefox config
         Box::new(setup_fake_bwrap), // Step 9. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
         Box::new(setup_chromium_no_sandbox), // Step 10. Make Chromium/Electron apps launchable without a terminal

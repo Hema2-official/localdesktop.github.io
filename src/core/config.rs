@@ -59,6 +59,9 @@ pub struct LocalConfig {
     #[serde(default)]
     pub ssh: SshConfig,
 
+    #[serde(default)]
+    pub graphics: GraphicsConfig,
+
     /// What happens if we don't assign this `#[serde(default)]` attribute?
     /// The answer: If the user omits the `[command]` group, the WHOLE config fails to parse
     /// => The default `[user]` group is applied (with `username=root`) even if the `[user]` settings are completely valid.
@@ -126,6 +129,25 @@ pub struct SshConfig {
 
 fn default_true() -> bool {
     true
+}
+
+/// GPU drivers. Arch's Mesa only drives GPUs through `/dev/dri`, which Android apps don't get;
+/// on Qualcomm phones (with `/dev/kgsl-3d0`) Local Desktop installs a Mesa build that talks to
+/// the Adreno through KGSL instead.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct GraphicsConfig {
+    /// Install and keep Mesa for Adreno (https://github.com/lfdevs/mesa-for-android-container).
+    /// `false` puts Arch's own Mesa back.
+    #[serde(default = "default_true")]
+    pub adreno_drivers: bool,
+}
+
+impl Default for GraphicsConfig {
+    fn default() -> Self {
+        Self {
+            adreno_drivers: true,
+        }
+    }
 }
 
 fn default_ssh_port() -> u16 {
@@ -306,6 +328,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("user", &["username"]),
     ("desktop", &["preset"]),
     ("ssh", &["enabled", "port", "password_login", "authorized_keys"]),
+    ("graphics", &["adreno_drivers"]),
     ("command", &["check", "install", "launch"]),
 ];
 
@@ -325,6 +348,7 @@ fn lenient(content: &str) -> LocalConfig {
         user: section(&table, "user"),
         desktop: section(&table, "desktop"),
         ssh: section(&table, "ssh"),
+        graphics: section(&table, "graphics"),
         command: section(&table, "command"),
         problems: Vec::new(),
     }
@@ -541,6 +565,18 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn should_install_adreno_drivers_unless_turned_off() {
+        with_config_file("[user]\nusername = \"alice\"\n", |full_config_path| {
+            assert!(parse_config(full_config_path).graphics.adreno_drivers);
+        });
+        with_config_file("[graphics]\nadreno_drivers = false\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert!(!config.graphics.adreno_drivers);
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
     }
 
     #[test]
