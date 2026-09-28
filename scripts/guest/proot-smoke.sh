@@ -84,6 +84,12 @@ else
     info "fstat() on sockets" "python3 not installed, skipped"
 fi
 
+# A directory created with a trailing slash (git does mkdir(".git/hooks/")) must be removable,
+# along with its parent.
+mkdir slashed && mkdir slashed/sub/ && rmdir slashed/sub && rmdir slashed 2> /dev/null \
+    && pass "directories made with a trailing slash can be removed" \
+    || fail "directories made with a trailing slash can be removed" "$(rmdir slashed 2>&1)"
+
 # proot remembers directories it has walked through; one replaced by a symlink to an absolute path
 # must be followed inside the rootfs right away, not on Android's side.
 mkdir -p swapped/sub && touch swapped/sub/f && ls swapped/sub/f > /dev/null

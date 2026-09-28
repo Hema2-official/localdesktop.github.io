@@ -31,18 +31,22 @@ static void remove_orphaned_meta_files(const char path[PATH_MAX])
 		size_t length = strlen(entry->d_name);
 		int status;
 
-		if(length <= tag_length + suffix_length
+		if(length < tag_length + suffix_length
 			|| strncmp(entry->d_name, META_TAG, tag_length) != 0
 			|| strcmp(entry->d_name + length - suffix_length, META_SUFFIX) != 0)
 			continue;
 
-		/* META_TAG "<name>" META_SUFFIX belongs to "<name>". */
-		status = snprintf(file_path, PATH_MAX, "%s/%.*s", path,
-			(int) (length - tag_length - suffix_length), entry->d_name + tag_length);
-		if(status < 0 || status >= PATH_MAX)
-			continue;
-		if(lstat(file_path, &statl) == 0 || errno != ENOENT)
-			continue;
+		/* META_TAG "<name>" META_SUFFIX belongs to "<name>"; one for
+		 * an empty name (from paths with a trailing slash, see
+		 * get_meta_path()) belongs to nothing.  */
+		if(length > tag_length + suffix_length) {
+			status = snprintf(file_path, PATH_MAX, "%s/%.*s", path,
+				(int) (length - tag_length - suffix_length), entry->d_name + tag_length);
+			if(status < 0 || status >= PATH_MAX)
+				continue;
+			if(lstat(file_path, &statl) == 0 || errno != ENOENT)
+				continue;
+		}
 
 		status = snprintf(meta_path, PATH_MAX, "%s/%s", path, entry->d_name);
 		if(status < 0 || status >= PATH_MAX)

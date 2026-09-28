@@ -410,9 +410,23 @@ int get_dir_path(char path[PATH_MAX], char dir_path[PATH_MAX])
 /** Stores in meta_path the contents of orig_path with the addition of META_TAG
  *  to the final component.
  */
-int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX]) 
+int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX])
 {
+	char trimmed[PATH_MAX];
 	char *filename;
+	size_t length;
+
+	/* "dir/" is "dir": the translation keeps the trailing slash of
+	 * mkdir("dir/") and the like, which made a record for an empty
+	 * name in the parent that nothing ever removed, so the parent
+	 * couldn't be removed either (git does mkdir(".git/hooks/")).  */
+	length = strlen(orig_path);
+	if (length >= PATH_MAX)
+		return -ENAMETOOLONG;
+	strcpy(trimmed, orig_path);
+	while (length > 1 && trimmed[length - 1] == '/')
+		trimmed[--length] = '\0';
+	orig_path = trimmed;
 
 	/*Separate the final component from the path. */
 	get_dir_path(orig_path, meta_path);
