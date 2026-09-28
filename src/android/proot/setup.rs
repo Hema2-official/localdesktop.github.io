@@ -464,11 +464,19 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
                     )))
                     .unwrap_or(());
                 // Forget the broken entries, then install the packages again over whatever
-                // files they left.
+                // files they left. Packages the repositories don't have (built from the AUR,
+                // say) can't be reinstalled here; they stay unregistered rather than failing
+                // the setup on every attempt.
                 let sender = mpsc_sender.clone();
                 let repaired = ArchProcess {
                     command: format!(
-                        "cd /var/lib/pacman/local && rm -rf {} && pacman -Sy --noconfirm --overwrite '*' {}",
+                        "cd /var/lib/pacman/local && rm -rf {} && pacman -Sy --noconfirm || exit 1
+                        set --
+                        for p in {}; do
+                            if pacman -Si \"$p\" >/dev/null 2>&1; then set -- \"$@\" \"$p\"
+                            else echo \"$p isn't in the repositories; reinstall it yourself\"; fi
+                        done
+                        [ $# -eq 0 ] || pacman -S --noconfirm --overwrite '*' \"$@\"",
                         dirs.join(" "),
                         names.join(" ")
                     ),
