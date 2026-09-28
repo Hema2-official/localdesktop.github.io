@@ -319,11 +319,27 @@ fn setup_machine_id(_: &SetupOptions) -> StageOutput {
 
 /// Follow Android's time zone, so Linux clocks show the phone's time. A relative link, like the
 /// xkb one below, so it also resolves outside proot.
+/// Sets `TZ` from the `/etc/localtime` link. Without it glibc stats `/etc/localtime` on every
+/// `localtime()` call and Qt looks for `/etc/timezone` and `/etc/TZ`, and under proot each of those
+/// is a traced syscall: Plasma's clock alone made about 15 a second, `ls -l` one per file.
+const TZ_FROM_LOCALTIME: &str = r#"if [ -z "${TZ:-}" ] && zone=$(readlink /etc/localtime 2>/dev/null); then
+    case "$zone" in */zoneinfo/*) export TZ="${zone#*/zoneinfo/}" ;; esac
+fi
+"#;
+
 fn setup_time_zone(options: &SetupOptions) -> StageOutput {
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    // For login shells (the terminal, SSH); the desktop sessions get it from `session_environment`.
+    let profile = fs_root.join("etc/profile.d/localdesktop-tz.sh");
+    if fs::read_to_string(&profile).ok().as_deref() != Some(TZ_FROM_LOCALTIME) {
+        if let Err(error) = fs::write(&profile, TZ_FROM_LOCALTIME) {
+            log::warn!("Failed to write {}: {error}", profile.display());
+        }
+    }
+
     let Some(zone) = time_zone(&options.android_app) else {
         return None;
     };
-    let fs_root = Path::new(ARCH_FS_ROOT);
     if zone.split('/').any(|part| part.is_empty() || part == "..")
         || !fs_root.join("usr/share/zoneinfo").join(&zone).is_file()
     {
@@ -1064,7 +1080,7 @@ esac
 export WAYLAND_DISPLAY
 # Electron adds --no-sandbox when this is set; Android has no user namespaces for it to use.
 export ELECTRON_DISABLE_SANDBOX=1
-"#
+{TZ_FROM_LOCALTIME}"#
     )
 }
 
