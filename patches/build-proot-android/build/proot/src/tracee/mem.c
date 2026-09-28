@@ -41,6 +41,28 @@
 #include "build.h"           /* HAVE_PROCESS_VM,  */
 #include "cli/note.h"
 
+#if defined(HAVE_PROCESS_VM) && defined(__ANDROID__) && __ANDROID_API__ < 23
+/* Bionic declares these from API 23 only, but the kernel has them since
+ * Linux 3.2.  Without them, every access to the tracee's memory took one
+ * ptrace(2) call per word: a 4 KiB write cost 512 calls.  */
+#include <sys/syscall.h> /* syscall(2), SYS_*, */
+
+static ssize_t proot_process_vm_readv(pid_t pid, const struct iovec *local, unsigned long nb_local,
+				const struct iovec *remote, unsigned long nb_remote, unsigned long flags)
+{
+	return syscall(SYS_process_vm_readv, pid, local, nb_local, remote, nb_remote, flags);
+}
+
+static ssize_t proot_process_vm_writev(pid_t pid, const struct iovec *local, unsigned long nb_local,
+				const struct iovec *remote, unsigned long nb_remote, unsigned long flags)
+{
+	return syscall(SYS_process_vm_writev, pid, local, nb_local, remote, nb_remote, flags);
+}
+
+#define process_vm_readv proot_process_vm_readv
+#define process_vm_writev proot_process_vm_writev
+#endif
+
 #ifdef HAS_POKEDATA_WORKAROUND
 
 #include "tracee/reg.h"
