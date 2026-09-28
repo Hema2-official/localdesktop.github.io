@@ -14,6 +14,10 @@ pacman -S firefox
 
 ## Compatibility note
 
+### Shared memory
+
+Firefox's main process can't reopen shared memory the way it does on other Linux systems (Android doesn't let apps do that), so it falls back to files in `/dev/shm`. Its tab processes still expected the other kind and crashed on every page. Local Desktop sets `MOZ_SHM_NO_SEALS=1` for the desktop session, which makes them accept it. If you start Firefox from somewhere else, such as an SSH session, set it yourself.
+
 ### Reduced security
 
 In order to fix issue [#139](https://github.com/termux/proot/issues/139), Local Desktop follows [@ZhymabekRoman](https://github.com/termux/proot/issues/139#issuecomment-751988264)'s solution by:
