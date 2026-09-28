@@ -63,3 +63,20 @@ The next start installs OpenSSH if needed, adds the key to the user's `~/.ssh/au
 - `port` defaults to `8022`; Android apps can't use ports below 1024.
 - `password_login` defaults to `false`. If you turn it on, set a password first with `passwd`.
 - `enabled = false` turns the server off without removing your keys.
+
+## GPU
+
+On phones with a Qualcomm Adreno GPU, Local Desktop installs [Mesa for Android containers](https://github.com/lfdevs/mesa-for-android-container) by lfdevs in place of Arch's Mesa. Arch's build can only reach GPUs through `/dev/dri`, which Android doesn't give apps; this one talks to the Adreno through Android's own driver interface (KGSL). It's downloaded from the project's latest release and checked against its published checksum.
+
+- **Vulkan** programs (games, Zed, `vkcube`) run on the GPU without anything else to do.
+- **OpenGL** programs run on the GPU when started through `gpu`, for example `gpu glxgears`. It uses Zink (OpenGL on top of Vulkan) under X11.
+- **Plasma** draws its panels and menus with Vulkan when the driver works, and with Qt's software renderer otherwise.
+
+`pacman -Syu` leaves these packages alone (they're in `IgnorePkg` in `/etc/pacman.conf`), so an update can't swap Arch's Mesa back in. If an update removes a library the drivers need, the next start installs the newest release again, or puts Arch's Mesa back if that doesn't help either.
+
+To use Arch's own Mesa instead:
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[graphics]
+adreno_drivers = false
+```
