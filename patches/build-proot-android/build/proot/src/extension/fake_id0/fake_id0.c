@@ -270,6 +270,15 @@ typedef struct {
 	mode_t mode;
 } ModifiedNode;
 
+/* Without ownership records, set/getgroups(2) reach the kernel and
+ * EPERM is turned into success at their exit; with them, they're
+ * emulated at entry.  */
+#ifdef USERLAND
+#define GROUPS_FLAGS 0
+#else
+#define GROUPS_FLAGS FILTER_SYSEXIT
+#endif
+
 /* List of syscalls handled by this extensions.  */
 static FilteredSysnum filtered_sysnums[] = {
 #ifdef USERLAND
@@ -315,8 +324,8 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_geteuid32,		0 },
 	{ PR_getgid,		0 },
 	{ PR_getgid32,		0 },
-	{ PR_getgroups,		0 },
-	{ PR_getgroups32,	0 },
+	{ PR_getgroups,		GROUPS_FLAGS },
+	{ PR_getgroups32,	GROUPS_FLAGS },
 	{ PR_getresgid,		0 },
 	{ PR_getresgid32,	0 },
 	{ PR_getresuid,		0 },
@@ -340,8 +349,8 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_setfsuid32,	0 },
 	{ PR_setgid,		0 },
 	{ PR_setgid32,		0 },
-	{ PR_setgroups,		0 },
-	{ PR_setgroups32,	0 },
+	{ PR_setgroups,		GROUPS_FLAGS },
+	{ PR_setgroups32,	GROUPS_FLAGS },
 	{ PR_setregid,		0 },
 	{ PR_setregid32,	0 },
 	{ PR_setreuid,		0 },
@@ -1005,7 +1014,7 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 
 		/* If the metafile exists and the original file does not, delete it. */
 		if(path_exists(meta_path) == 0) 
-			status = unlink(meta_path);
+			status = unlink_meta(meta_path);
 
 		return 0;
 	}	
@@ -1196,7 +1205,7 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		if(status < 0)
 			return status;
 
-		status = rename(old_meta, new_meta);
+		status = rename_meta(old_meta, new_meta);
 		if(status < 0)
 			return status;
 
@@ -1215,7 +1224,7 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		if(path_exists(meta_path) != 0)
 			return 0;
 
-		status = unlink(meta_path);
+		status = unlink_meta(meta_path);
 		if(status < 0) 
 			return status;
 

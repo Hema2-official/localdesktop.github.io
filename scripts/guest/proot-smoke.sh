@@ -92,6 +92,17 @@ mv swapped swapped.old && ln -s /etc swapped
     && pass "a directory replaced by a symlink is followed at once" \
     || fail "a directory replaced by a symlink is followed at once" "$(ls swapped/ 2>&1 | head -3 | tr '\n' ' ')"
 
+# proot also remembers directories' ownership records; a change must apply at once.
+if [ "$(id -u)" != 0 ]; then
+    mkdir -p locked && echo secret > locked/f && cat locked/f > /dev/null
+    chmod 000 locked
+    cat locked/f > /dev/null 2>&1 && denied=no || denied=yes
+    chmod 755 locked
+    cat locked/f > /dev/null 2>&1 && allowed=yes || allowed=no
+    [ "$denied $allowed" = "yes yes" ] && pass "a directory's new permissions apply at once" \
+        || fail "a directory's new permissions apply at once" "denied after chmod 000: $denied, allowed after chmod 755: $allowed"
+fi
+
 # The emulated ids, through every call that reports them.
 if command -v python3 > /dev/null; then
     ids=$(python3 -c 'import os; print(os.getuid(), os.geteuid(), *os.getresuid(), os.getgid(), os.getegid(), *os.getresgid())' 2>&1)

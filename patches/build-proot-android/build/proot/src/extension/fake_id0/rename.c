@@ -91,12 +91,12 @@ int handle_rename_enter_end(Tracee *tracee, Reg oldfd_sysarg, Reg oldpath_sysarg
 		if(old_has_meta)
 			write_meta_file(new_meta_path, mode, uid, gid, 0, config);
 		else if(new_has_meta)
-			unlink(new_meta_path);
+			unlink_meta(new_meta_path);
 
 		if(new_has_meta)
 			write_meta_file(meta_path, new_mode, new_uid, new_gid, 0, config);
 		else if(old_has_meta)
-			unlink(meta_path);
+			unlink_meta(meta_path);
 		return 0;
 	}
 
@@ -105,7 +105,7 @@ int handle_rename_enter_end(Tracee *tracee, Reg oldfd_sysarg, Reg oldpath_sysarg
 		return 0;
 
 	read_meta_file(meta_path, &mode, &uid, &gid, config);
-	unlink(meta_path);
+	unlink_meta(meta_path);
 
 	return write_meta_file(new_meta_path, mode, uid, gid, 0, config);
 }

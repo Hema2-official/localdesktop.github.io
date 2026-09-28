@@ -5,6 +5,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <time.h>
 
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -160,28 +162,119 @@ char * get_name(char path[PATH_MAX])
 	return name;
 }
 
-/** Returns the mode pertinent to the level of permissions the user has. Eg if
- *  uid 1000 tries to access a file it owns with mode 751, this returns 7.
+/* The records of directories check_dir_perms() read, so that it doesn't
+ * read those of /, /usr, /usr/share, ... again for every path below them.
+ * Anything this PRoot writes, deletes or moves among the records empties
+ * it (write_meta_file(), unlink_meta(), rename_meta()), and entries expire
+ * after a while for changes made by other processes.  */
+#define RECORD_CACHE_SIZE 512
+#define RECORD_CACHE_LIFETIME_NS 2000000000ULL
+
+typedef struct {
+	char *path;
+	size_t length;
+	uint64_t hash;
+	unsigned long generation;
+	unsigned long long expires;
+	bool found;
+	mode_t mode;
+	uid_t owner;
+	gid_t group;
+} CachedRecord;
+
+static CachedRecord record_cache[RECORD_CACHE_SIZE];
+static unsigned long record_cache_generation = 1;
+
+void invalidate_record_cache(void)
+{
+	record_cache_generation++;
+}
+
+/** unlink(2) and rename(2) for meta files, which also empty the cache.  */
+int unlink_meta(const char *path)
+{
+	invalidate_record_cache();
+	return unlink(path);
+}
+
+int rename_meta(const char *old_path, const char *new_path)
+{
+	invalidate_record_cache();
+	return rename(old_path, new_path);
+}
+
+static unsigned long long coarse_now(void)
+{
+	struct timespec time;
+	clock_gettime(CLOCK_MONOTONIC_COARSE, &time);
+	return (unsigned long long) time.tv_sec * 1000000000ULL + time.tv_nsec;
+}
+
+/** Like load_meta_file(), through the cache.  */
+static int load_meta_file_cached(const char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group)
+{
+	uint64_t hash = 0xcbf29ce484222325ULL; /* FNV-1a */
+	CachedRecord *entry;
+	size_t length;
+	int status;
+
+	for (length = 0; path[length] != '\0'; length++) {
+		hash ^= (unsigned char) path[length];
+		hash *= 0x100000001b3ULL;
+	}
+	entry = &record_cache[hash % RECORD_CACHE_SIZE];
+
+	if (entry->path != NULL
+	    && entry->generation == record_cache_generation
+	    && entry->hash == hash
+	    && entry->length == length
+	    && memcmp(entry->path, path, length) == 0
+	    && coarse_now() < entry->expires) {
+		*mode = entry->mode;
+		*owner = entry->owner;
+		*group = entry->group;
+		return entry->found ? 0 : -1;
+	}
+
+	status = load_meta_file(path, mode, owner, group);
+
+	if (entry->path == NULL || entry->length < length) {
+		free(entry->path);
+		entry->path = malloc(length + 1);
+		if (entry->path == NULL)
+			return status;
+	}
+	memcpy(entry->path, path, length + 1);
+	entry->length = length;
+	entry->hash = hash;
+	entry->generation = record_cache_generation;
+	entry->expires = coarse_now() + RECORD_CACHE_LIFETIME_NS;
+	entry->found = (status == 0);
+	entry->mode = *mode;
+	entry->owner = *owner;
+	entry->group = *group;
+	return status;
+}
+
+/** Returns the mode pertinent to the level of permissions the user has,
+ *  given the file's mode, owner and group. Eg if uid 1000 tries to access
+ *  a file it owns with mode 751, this returns 7.
  */
-int get_permissions(char meta_path[PATH_MAX], Config *config, bool uses_real)
+static int permissions_for(mode_t mode, uid_t owner, gid_t group, Config *config, bool uses_real)
 {
 	int perms;
 	int omode;
-	mode_t mode;
-	uid_t owner, emulated_uid;
-	gid_t group, emulated_gid;
-
-	int status = read_meta_file(meta_path, &mode, &owner, &group, config);
-	if(status < 0)
-		return status;
+	uid_t emulated_uid;
+	gid_t emulated_gid;
 
 	if(uses_real) {
 		emulated_uid = config->ruid;
 		emulated_gid = config->rgid;
 	}
-	else
+	else {
 		emulated_uid = config->euid;
 		emulated_gid = config->egid;
+	}
 
 	if (emulated_uid == owner || emulated_uid == 0)
 		perms = OWNER_PERMS;
@@ -208,6 +301,38 @@ int get_permissions(char meta_path[PATH_MAX], Config *config, bool uses_real)
 	return omode;
 }
 
+/** Returns the mode pertinent to the level of permissions the user has for
+ *  the file whose meta file is meta_path (see permissions_for()).
+ */
+int get_permissions(char meta_path[PATH_MAX], Config *config, bool uses_real)
+{
+	mode_t mode;
+	uid_t owner;
+	gid_t group;
+
+	int status = read_meta_file(meta_path, &mode, &owner, &group, config);
+	if(status < 0)
+		return status;
+
+	return permissions_for(mode, owner, group, config, uses_real);
+}
+
+/** get_permissions() for a directory on the way to a path, through the cache.  */
+static int get_dir_permissions(char meta_path[PATH_MAX], Config *config)
+{
+	mode_t mode;
+	uid_t owner;
+	gid_t group;
+
+	if (load_meta_file_cached(meta_path, &mode, &owner, &group) < 0) {
+		/* If the metafile doesn't exist, allow overly permissive behavior. */
+		owner = config->euid;
+		group = config->egid;
+		mode = otod(755);
+	}
+	return permissions_for(mode, owner, group, config, false);
+}
+
 /** Checks permissions on every component of path. Up to the location specifed
  *  by rel_path. If type is specified to be "read", it checks only execute 
  *  permissions. If type is specified to be "write", it makes sure that the 
@@ -232,7 +357,7 @@ int check_dir_perms(Tracee *tracee, char type, char path[PATH_MAX], char rel_pat
 	if(status < 0)
 		return status;
 
-	perms = get_permissions(meta_path, config, 0);
+	perms = get_dir_permissions(meta_path, config);
 
 	if(type == 'w' && (perms & w) != w) 
 		return -EACCES;
@@ -249,7 +374,7 @@ int check_dir_perms(Tracee *tracee, char type, char path[PATH_MAX], char rel_pat
 		if(status < 0)
 			return status;
 
-		perms = get_permissions(meta_path, config, 0);
+		perms = get_dir_permissions(meta_path, config);
 		if((perms & x) != x) 
 			return -EACCES;
 		
@@ -371,6 +496,7 @@ int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group,
 	bool is_creat, Config *config)
 {
 	FILE *fp;
+	invalidate_record_cache();
 	fp = fopen(path, "w");
 	if(!fp)
 		//Errno is set
