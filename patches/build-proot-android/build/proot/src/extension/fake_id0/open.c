@@ -24,20 +24,24 @@ int handle_open_enter_end(Tracee *tracee, Reg fd_sysarg, Reg path_sysarg,
 	word_t flags;
 	mode_t mode;
 
+	if(flags_sysarg != IGNORE_SYSARG)
+		flags = peek_reg(tracee, ORIGINAL, flags_sysarg);
+	else
+		flags = O_CREAT;
+
+	/* Root may open anything: only a file it creates needs work.  */
+	if (config->euid == 0 && (flags & O_CREAT) != O_CREAT)
+		return 0;
+
 	status = read_sysarg_path(tracee, orig_path, path_sysarg, CURRENT);
-	if(status < 0) 
+	if(status < 0)
 		return status;
-	if(status == 1) 
+	if(status == 1)
 		return 0;
 
 	status = get_meta_path(orig_path, meta_path);
-	if(status < 0) 
+	if(status < 0)
 		return status;
- 
-	if(flags_sysarg != IGNORE_SYSARG) 
-		flags = peek_reg(tracee, ORIGINAL, flags_sysarg);
-	else  
-		flags = O_CREAT;
 
 	/* If the metafile doesn't exist and we aren't creating a new file, get out. */
 	if(path_exists(meta_path) != 0 && (flags & O_CREAT) != O_CREAT) 
@@ -76,6 +80,8 @@ int handle_open_enter_end(Tracee *tracee, Reg fd_sysarg, Reg path_sysarg,
 	}
 
 check:
+	if (config->euid == 0)
+		return 0;
 
 	status = check_dir_perms(tracee, 'r', meta_path, rel_path, config);
 	if(status < 0) 

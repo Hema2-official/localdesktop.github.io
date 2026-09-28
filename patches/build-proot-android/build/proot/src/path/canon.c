@@ -144,14 +144,6 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	if (status < 0)
 		return status;
 
-	/* Don't notify extensions during the initialization of a binding.  */
-	if (tracee->glue_type == 0) {
-		status = notify_extensions(tracee, HOST_PATH, (intptr_t)host_path,
-					IS_FINAL(finality) && recursion_level == 0);
-		if (status < 0)
-			return status;
-	}
-
 	statl.st_mode = 0;
 	if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
 		status = -ENOENT;
@@ -174,6 +166,19 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 		statl.st_mode = build_glue(tracee, guest_path, host_path, finality);
 		if (statl.st_mode == 0)
 			status = -1;
+	}
+
+	/* Don't notify extensions during the initialization of a binding.
+	 * They get the lstat(2) above, so they don't stat the path again:
+	 * that doubled the cost of walking every path.  */
+	if (tracee->glue_type == 0) {
+		HostPath info = {
+			.is_final = IS_FINAL(finality) && recursion_level == 0,
+			.stat = status < 0 ? NULL : &statl,
+		};
+		int notified = notify_extensions(tracee, HOST_PATH, (intptr_t)host_path, (intptr_t)&info);
+		if (notified < 0)
+			return notified;
 	}
 
 	/* Return an error if a non-final component isn't a

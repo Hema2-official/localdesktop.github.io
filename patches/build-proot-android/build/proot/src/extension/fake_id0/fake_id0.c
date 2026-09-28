@@ -45,7 +45,6 @@
 #include "tracee/mem.h"
 #include "execve/auxv.h"
 #include "path/binding.h"
-#include "path/f2fs-bug.h"
 #include "arch.h"
 
 #include "extension/fake_id0/chown.h"
@@ -267,24 +266,27 @@ typedef struct {
 /* List of syscalls handled by this extensions.  */
 static FilteredSysnum filtered_sysnums[] = {
 #ifdef USERLAND
-	{ PR_access,		FILTER_SYSEXIT },
+	/* Their entry handlers do all the work (an error they return
+	 * is set at entry too), so they don't need an exit stop, which
+	 * costs the tracee another round trip through PRoot.  */
+	{ PR_access,		0 },
 	{ PR_creat,		FILTER_SYSEXIT },
-	{ PR_faccessat,		FILTER_SYSEXIT },
-	{ PR_faccessat2,	FILTER_SYSEXIT },
-	{ PR_link,		FILTER_SYSEXIT },
-	{ PR_linkat,		FILTER_SYSEXIT },
-	{ PR_mkdir,		FILTER_SYSEXIT },
-	{ PR_mkdirat,		FILTER_SYSEXIT },
-	{ PR_rename,		FILTER_SYSEXIT },
-	{ PR_renameat,		FILTER_SYSEXIT },
-	{ PR_renameat2,		FILTER_SYSEXIT },
-	{ PR_rmdir,		FILTER_SYSEXIT },
-	{ PR_symlink,		FILTER_SYSEXIT },
-	{ PR_symlinkat,		FILTER_SYSEXIT },
+	{ PR_faccessat,		0 },
+	{ PR_faccessat2,	0 },
+	{ PR_link,		0 },
+	{ PR_linkat,		0 },
+	{ PR_mkdir,		0 },
+	{ PR_mkdirat,		0 },
+	{ PR_rename,		0 },
+	{ PR_renameat,		0 },
+	{ PR_renameat2,		0 },
+	{ PR_rmdir,		0 },
+	{ PR_symlink,		0 },
+	{ PR_symlinkat,		0 },
 	{ PR_umask,		FILTER_SYSEXIT },
-	{ PR_unlink,		FILTER_SYSEXIT },
-	{ PR_unlinkat,		FILTER_SYSEXIT },
-	{ PR_utimensat,		FILTER_SYSEXIT },
+	{ PR_unlink,		0 },
+	{ PR_unlinkat,		0 },
+	{ PR_utimensat,		0 },
 #endif
 	{ PR_capset,		FILTER_SYSEXIT },
 	{ PR_chmod,		FILTER_SYSEXIT },
@@ -371,22 +373,22 @@ static int restore_mode(ModifiedNode *node)
  * Force permissions of @path to "rwx" during the path translation of
  * current @tracee's syscall, in order to simulate CAP_DAC_OVERRIDE.
  * The original permissions are restored through talloc destructors.
- * See canonicalize() for the meaning of @is_final.
+ * See canonicalize() for the meaning of @is_final and for the
+ * lstat(2) of @path it made (@lstat_result, NULL if that failed).
  */
-static void override_permissions(const Tracee *tracee, const char *path, bool is_final)
+static void override_permissions(const Tracee *tracee, const char *path, bool is_final,
+				const struct stat *lstat_result)
 {
 	ModifiedNode *node;
 	struct stat perms;
 	mode_t new_mode;
-	int status;
 
-	/* Get the meta-data */
-	if (should_skip_file_access_due_to_f2fs_bug(tracee, path)) 
+	/* Nothing to open up if it doesn't exist.  A symlink's own mode
+	 * doesn't matter: its target gets translated (and opened up) as
+	 * a path of its own when it is followed.  */
+	if (lstat_result == NULL || S_ISLNK(lstat_result->st_mode))
 		return;
-
-	status = stat(path, &perms);
-	if (status < 0)
-		return;
+	perms = *lstat_result;
 
 	/* Copy the current permissions */
 	new_mode = perms.st_mode & (S_IRWXU | S_IRWXG | S_IRWXO);
@@ -675,11 +677,6 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 	/* int symlinkat(const char *target, int newdirfd, const char *linkpath); */
 	case PR_symlinkat:
 		return handle_symlink_enter_end(tracee, SYSARG_1, SYSARG_2, SYSARG_3, config);
-
-	/* int fstat(int fd, struct stat *buf); */
-	case PR_fstat:
-	case PR_fstat64:
-		return handle_stat_enter_end(tracee, SYSARG_1);
 #endif
 	case PR_sendmsg:
 	case PR_socketcall:
@@ -751,94 +748,11 @@ static int handle_sysenter_end(Tracee *tracee, Config *config)
 static int handle_sysexit_end(Tracee *tracee, Config *config)
 {
 	word_t sysnum;
-#ifdef USERLAND
-	word_t result;
-#endif
 #ifndef USERLAND
 	Reg stat_sysarg = SYSARG_2;
 #endif
 
 	sysnum = get_sysnum(tracee, ORIGINAL);
-
-#ifdef USERLAND
-	if ((get_sysnum(tracee, CURRENT) == PR_fstat) || (get_sysnum(tracee, CURRENT) == PR_fstat64)) {
-		word_t address;
-		Reg sysarg;
-		uid_t uid;
-		gid_t gid;
-		
-		/* Override only if it succeed.  */
-		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-		if (result != 0)
-			return 0;
-		
-		/* Get the address of the 'stat' structure.  */
-		sysarg = SYSARG_2;
-		
-		address = peek_reg(tracee, ORIGINAL, sysarg);
-		
-		/* Sanity checks.  */
-		assert(__builtin_types_compatible_p(uid_t, uint32_t));
-		assert(__builtin_types_compatible_p(gid_t, uint32_t));
-		
-		/* Get the uid & gid values from the 'stat' structure.  */
-		uid = peek_uint32(tracee, address + offsetof_stat_uid(tracee));
-		if (errno != 0)
-			uid = 0; /* Not fatal.  */
-		
-		gid = peek_uint32(tracee, address + offsetof_stat_gid(tracee));
-		if (errno != 0)
-			gid = 0; /* Not fatal.  */
-		
-		/* Override only if the file is owned by the current user.
-		*		  * Errors are not fatal here.  */
-		if (uid == getuid())
-			poke_uint32(tracee, address + offsetof_stat_uid(tracee), config->suid);
-		
-		if (gid == getgid())
-			poke_uint32(tracee, address + offsetof_stat_gid(tracee), config->sgid);
-		
-		return 0;
-	}
-
-	if (((sysnum == PR_fstat) || (sysnum == PR_fstat64)) && (get_sysnum(tracee, CURRENT) == PR_readlinkat)) {
-		int status;
-		char path[PATH_MAX];
-		result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-		poke_reg(tracee, SYSARG_RESULT, 0);
-		if ((int)result <= 0)
-			return result;
-		if (result >= PATH_MAX)
-			return -ENAMETOOLONG;
-
-		/* readlink(2) doesn't terminate what it writes: read exactly that many bytes. Reading
-		 * it as a string ran on into whatever the tracee's stack held after it and failed with
-		 * ENAMETOOLONG when that had no zero byte, e.g. dlopen() failing to stat libraries.  */
-		status = read_data(tracee, path, peek_reg(tracee, MODIFIED, SYSARG_3), result);
-		if (status < 0)
-			return status;
-
-		path[result] = '\0';
-
-		/* Only paths can be stat'ed again by name: replay the original fstat for anything
-		 * else ("pipe:[…]", "socket:[…]", "anon_inode:[eventfd]", …) and for deleted files. */
-		size_t length = strlen(path);
-		size_t deleted_length = strlen(" (deleted)");
-		if (path[0] != '/'
-		    || (length >= deleted_length && strcmp(path + length - deleted_length, " (deleted)") == 0)) {
-			register_chained_syscall(tracee, sysnum, peek_reg(tracee, ORIGINAL, SYSARG_1), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0, 0);
-		} else {
-			write_data(tracee, peek_reg(tracee, MODIFIED, SYSARG_3), path, sizeof(path));
-#		   if defined(__x86_64__)
-				register_chained_syscall(tracee, PR_newfstatat, AT_FDCWD, peek_reg(tracee, MODIFIED, SYSARG_3), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0);
-#		   else
-				register_chained_syscall(tracee, PR_fstatat64, AT_FDCWD, peek_reg(tracee, MODIFIED, SYSARG_3), peek_reg(tracee, ORIGINAL, SYSARG_2), 0, 0, 0);
-#		   endif
-		}
-
-		return 0;
-	}
-#endif 
 
 	switch (sysnum) {
 
@@ -964,11 +878,13 @@ static int handle_sysexit_end(Tracee *tracee, Config *config)
 	case PR_newfstatat:
 	case PR_stat64:
 	case PR_lstat64:
-	case PR_fstat64:
 	case PR_stat:
 	case PR_lstat:
-	case PR_fstat: 
 		return handle_stat_exit_end(tracee, config, sysnum);
+
+	case PR_fstat64:
+	case PR_fstat:
+		return handle_fstat_exit_end(tracee, config);
 #endif /* ifdef USERLAND */
 
 	case PR_chroot: 
@@ -1169,11 +1085,12 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 	case HOST_PATH: {
 		Tracee *tracee = TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
+		const HostPath *info = (const HostPath *) data2;
 
 		/* Force permissions if the tracee was supposed to
 		 * have the capability.  */
 		if (config->euid == 0) /* TODO: || HAS_CAP(DAC_OVERRIDE) */
-			override_permissions(tracee, (char*) data1, (bool) data2);
+			override_permissions(tracee, (char*) data1, info->is_final, info->stat);
 		return 0;
 	}
 
@@ -1234,9 +1151,6 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		return handle_sysenter_end(tracee, config);
 	}
 
-#ifdef USERLAND
-	case SYSCALL_CHAINED_EXIT:
-#endif
 	case SYSCALL_EXIT_END: {
 		Tracee *tracee = TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);

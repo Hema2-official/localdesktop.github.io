@@ -30,6 +30,17 @@ int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 		}
 		status = readlink_proc_pid_fd(tracee->pid, dirfd, state.host_path);
 		do_fstat = true;
+	} else if (!from_sigsys) {
+		/* The entry stage already translated the path and put it in
+		 * the tracee's memory: read it back instead of translating
+		 * it again, which cost as much as the whole entry stage.  */
+		status = read_string(tracee, state.host_path, peek_reg(tracee, MODIFIED, SYSARG_2), PATH_MAX);
+		if (status >= PATH_MAX)
+			return -ENAMETOOLONG;
+		if (status > 0)
+			status = 0;
+		else if (status == 0)
+			status = -EFAULT;
 	} else {
 		if (status >= PATH_MAX) {
 			return -ENAMETOOLONG;

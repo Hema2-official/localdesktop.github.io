@@ -16,6 +16,11 @@ int handle_access_enter_end(Tracee *tracee, Reg path_sysarg,
 	char rel_path[PATH_MAX];
 	char meta_path[PATH_MAX];
 
+	// Root passes every check but X_OK, which needs an x bit.
+	mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
+	if (config->ruid == 0 && config->euid == 0 && (mode & X_OK) == 0)
+		return 0;
+
 	status = read_sysarg_path(tracee, path, path_sysarg, CURRENT);
 	if(status < 0)
 		return status;
@@ -27,12 +32,11 @@ int handle_access_enter_end(Tracee *tracee, Reg path_sysarg,
 		return status;
 
 	status = check_dir_perms(tracee, 'r', path, rel_path, config);
-	if(status < 0) 
+	if(status < 0)
 		return status;
 
-	// Only care about calls checking permissions.
-	mode = peek_reg(tracee, ORIGINAL, mode_sysarg);
-	if(mode & F_OK) 
+	// Only care about calls checking permissions (F_OK is 0).
+	if(mode == F_OK)
 		return 0;
 
 	status = get_meta_path(path, meta_path);

@@ -25,6 +25,8 @@
 
 #include <sys/queue.h> /* LIST_, */
 #include <stdint.h>    /* intptr_t, */
+#include <stdbool.h>   /* bool, */
+#include <sys/stat.h>  /* struct stat, */
 
 #include "tracee/tracee.h"
 #include "syscall/seccomp.h"
@@ -39,14 +41,14 @@ typedef enum {
 	 * reports this errno as-is.  */
 	GUEST_PATH,
 
-	/* A canonicalized host path is being accessed during the
+	/* A canonicalized host path was accessed during the
 	 * translation of a guest path: "(char *) data1" is the
-	 * canonicalized host path and "(bool) data2" is true if it is
-	 * the last iteration.  Note that several host paths are accessed
-	 * for a given guest path since PRoot has to walk along all
-	 * parent directories and symlinks in order to translate it.
-	 * If the extension returns < 0, then PRoot reports this errno
-	 * as-is.  */
+	 * canonicalized host path and "(HostPath *) data2" says whether
+	 * it is the last iteration and holds its lstat(2).  Note that
+	 * several host paths are accessed for a given guest path since
+	 * PRoot has to walk along all parent directories and symlinks in
+	 * order to translate it.  If the extension returns < 0, then
+	 * PRoot reports this errno as-is.  */
 	HOST_PATH,
 
 	/* The canonicalization succeed: "(char *) data1" is the
@@ -148,6 +150,15 @@ typedef enum {
 	 * */
 	STATX_SYSCALL,
 } ExtensionEvent;
+
+/* What HOST_PATH passes in "data2".  */
+typedef struct {
+	/* The last iteration of the translation.  */
+	bool is_final;
+
+	/* lstat(2) of the host path, or NULL if that failed.  */
+	const struct stat *stat;
+} HostPath;
 
 #define CLONE_RECONF ((word_t) -1)
 

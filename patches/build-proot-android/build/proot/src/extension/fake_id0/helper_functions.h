@@ -24,6 +24,8 @@ int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX]);
 
 int read_meta_file(char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group, Config *config);
 
+int load_meta_file(const char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group);
+
 int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group, bool is_creat, Config *config);
 
 char * get_name(char path[PATH_MAX]);

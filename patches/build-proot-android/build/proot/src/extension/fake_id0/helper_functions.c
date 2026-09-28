@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <stdlib.h>
 
 #include "tracee/tracee.h"
 #include "tracee/reg.h"
@@ -218,8 +219,13 @@ int check_dir_perms(Tracee *tracee, char type, char path[PATH_MAX], char rel_pat
 	int status, perms;
 	char meta_path[PATH_MAX];
 	char shorten_path[PATH_MAX];
-	int x = 1; 
+	int x = 1;
 	int w = 2;
+
+	/* Root passes these checks anyway (CAP_DAC_OVERRIDE): don't read
+	 * a meta file for every parent directory.  */
+	if (config->euid == 0)
+		return 0;
 
 	get_dir_path(path, shorten_path);
 	status = get_meta_path(shorten_path, meta_path); 
@@ -310,21 +316,49 @@ int get_meta_path(char orig_path[PATH_MAX], char meta_path[PATH_MAX])
 
 int read_meta_file(char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group, Config *config)
 {
-	FILE *fp;
-	int lcl_mode;
-	fp = fopen(path, "r");
-	if(!fp) {
+	if (load_meta_file(path, mode, owner, group) < 0) {
 		/* If the metafile doesn't exist, allow overly permissive behavior. */
 		*owner = config->euid;
 		*group = config->egid;
 		*mode = otod(755);
-		return 0;
-
 	}
-	fscanf(fp, "%d %d %d ", &lcl_mode, owner, group);
-	lcl_mode = otod(lcl_mode);
-	*mode = (mode_t)lcl_mode;
-	fclose(fp);
+	return 0;
+}
+
+/** Reads the meta file at path into mode, owner and group. Returns -1 if
+ *  there is none (or it can't be read), otherwise 0. One open(2), read(2)
+ *  and close(2): this runs for most paths the tracee uses, so it avoids
+ *  the separate existence check and stdio's extra work.
+ */
+int load_meta_file(const char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group)
+{
+	char buffer[64];
+	char *cursor, *end;
+	long values[3];
+	ssize_t size;
+	int fd, i;
+
+	fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	size = read(fd, buffer, sizeof(buffer) - 1);
+	close(fd);
+	if (size <= 0)
+		return -1;
+	buffer[size] = '\0';
+
+	/* "<mode as octal digits>\n<owner>\n<group>\n" */
+	cursor = buffer;
+	for (i = 0; i < 3; i++) {
+		values[i] = strtol(cursor, &end, 10);
+		if (end == cursor)
+			return -1;
+		cursor = end;
+	}
+
+	*mode = (mode_t) otod((int) values[0]);
+	*owner = (uid_t) values[1];
+	*group = (gid_t) values[2];
 	return 0;
 }
 

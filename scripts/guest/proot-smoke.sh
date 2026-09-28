@@ -70,6 +70,26 @@ else
     info "fstat() on sockets" "python3 not installed, skipped"
 fi
 
+# The ownership record must show through stat by descriptor (fstat) and by name (fstatat) alike:
+# ssh, git and sudo check owners that way. (statx, which coreutils and Qt use, ignores records.)
+if command -v python3 > /dev/null; then
+    touch owned && chmod 640 owned
+    [ "$(id -u)" = 0 ] && chown 1000:1000 owned
+    stats=$(python3 -c '
+import os
+fd = os.open("owned", os.O_RDONLY)
+for s in (os.fstat(fd), os.stat("owned")):
+    print("%d:%d:%o" % (s.st_uid, s.st_gid, s.st_mode & 0o7777), end=" ")
+' 2>&1)
+    expected="$(id -u):$(id -g):640"
+    [ "$(id -u)" = 0 ] && expected=1000:1000:640
+    [ "$stats" = "$expected $expected " ] \
+        && pass "fstat() and fstatat() report the recorded owner and mode" \
+        || fail "fstat() and fstatat() report the recorded owner and mode" "got $stats, want $expected"
+else
+    info "recorded owner through fstat()" "python3 not installed, skipped"
+fi
+
 # access() must agree with what actually happens on write (Xwayland trusted it for xkb). Probe a
 # root-owned directory that has an ownership record, i.e. one that pacman created.
 if [ "$(id -u)" != 0 ]; then

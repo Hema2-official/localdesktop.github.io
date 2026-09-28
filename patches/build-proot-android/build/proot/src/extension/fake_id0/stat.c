@@ -2,6 +2,9 @@
 #include <sys/types.h>   /* uid_t, gid_t, get*id(2), */
 #include <unistd.h>	  /* get*id(2),  */
 #include <assert.h>	  /* assert(3), */
+#include <errno.h>	  /* errno, */
+#include <stdio.h>	  /* snprintf(3), */
+#include <string.h>	  /* strcmp(3), */
 
 #include "tracee/mem.h"
 #include "syscall/syscall.h"
@@ -10,6 +13,7 @@
 #include "extension/fake_id0/stat.h"
 #include "extension/fake_id0/helper_functions.h"
 #include "tracee/statx.h"
+#include "path/path.h"
 
 #ifndef USERLAND
 int handle_stat_exit_end(Tracee *tracee, Config *config, Reg stat_sysarg) {
@@ -51,86 +55,43 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, Reg stat_sysarg) {
 #endif /* ifndef USERLAND */
 
 #ifdef USERLAND
-/** Convert fstat and fstat64 to readlink
- *  this is so we can get the path associated with /proc/pid#/fd/fd#
+/** If there is a meta file for the host path @path, apply it to the stat
+ *  structure at @address in the tracee: returns 1 if it did, 0 if there is
+ *  none, -errno on failure.
  */
-int handle_stat_enter_end(Tracee *tracee, Reg fd_sysarg) {
-	char path[PATH_MAX];
-	char link_path[64];
-	word_t link_address;
-	word_t path_address;
-
-	set_sysnum(tracee, PR_readlinkat);
-	snprintf(link_path, sizeof(link_path), "/proc/%d/fd/%d", tracee->pid, (int)peek_reg(tracee, CURRENT, fd_sysarg));
-	link_address = alloc_mem(tracee, sizeof(link_path));
-	path_address = alloc_mem(tracee, sizeof(path));
-	write_data(tracee, link_address, link_path, sizeof(link_path));
-	poke_reg(tracee, SYSARG_1, AT_FDCWD);	
-	poke_reg(tracee, SYSARG_2, link_address);	
-	poke_reg(tracee, SYSARG_3, path_address);	
-	poke_reg(tracee, SYSARG_4, sizeof(path));	
-	return 0;
-}
-
-int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
-	int status = 0;
-	word_t address;
-	Reg sysarg;
+static int apply_meta_file(Tracee *tracee, const char path[PATH_MAX], word_t address)
+{
+	char meta_path[PATH_MAX];
+	struct stat my_stat;
+	mode_t mode;
 	uid_t uid;
 	gid_t gid;
-	mode_t mode;
-	struct stat my_stat;
-	char path[PATH_MAX];
-	char meta_path[PATH_MAX];
-	word_t result;
+	int status;
 
-	/* Override only if it succeed.  */
-	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
-	if (result != 0) 
+	status = get_meta_path((char *) path, meta_path);
+	if (status < 0 || load_meta_file(meta_path, &mode, &uid, &gid) < 0)
 		return 0;
 
-	/* Get the pathname of the file to be 'stat'. */
-	if(sysnum == PR_fstat || sysnum == PR_fstat64) {
-		status = read_sysarg_path(tracee, path, SYSARG_2, CURRENT);
-	} else if(sysnum == PR_fstatat64 || sysnum == PR_newfstatat) 
-		status = read_sysarg_path(tracee, path, SYSARG_2, MODIFIED);
-	else 
-		status = read_sysarg_path(tracee, path, SYSARG_1, MODIFIED);
-
-	if(status < 0) 
-		return status;
-	if(status == 1) 
-		return 0;
-
-	/* Get the address of the 'stat' structure.  */
-	if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
-		sysarg = SYSARG_3;
-	else
-		sysarg = SYSARG_2;
-
-	/** If the meta file exists, read the data from it and replace it the
-	 *  relevant data in the stat structure.
+	/** Get the file type and sticky/set-id bits of the original
+	 *  file and add them to the mode found in the meta_file.
 	 */
-	
-	status = get_meta_path(path, meta_path);
-	if(status == 0) {
-		status = path_exists(meta_path);
-		if(status == 0) {
-			read_meta_file(meta_path, &mode, &uid, &gid, config);
+	status = read_data(tracee, &my_stat, address, sizeof(struct stat));
+	if (status < 0)
+		return status;
+	my_stat.st_mode = (mode | ((my_stat.st_mode & S_IFMT) | (my_stat.st_mode & 07000)));
+	my_stat.st_uid = uid;
+	my_stat.st_gid = gid;
+	status = write_data(tracee, address, &my_stat, sizeof(struct stat));
+	if (status < 0)
+		return status;
+	return 1;
+}
 
-			/** Get the file type and sticky/set-id bits of the original 
-			 *  file and add them to the mode found in the meta_file.
-			 */
-			read_data(tracee, &my_stat, peek_reg(tracee, ORIGINAL, sysarg), sizeof(struct stat));
-			my_stat.st_mode = (mode | ((my_stat.st_mode & S_IFMT) | (my_stat.st_mode & 07000)));
-			my_stat.st_uid = uid;
-			my_stat.st_gid = gid;
-			write_data(tracee, peek_reg(tracee, ORIGINAL, sysarg), &my_stat, sizeof(struct stat));
-			return 0;
-		}
-	}
-
-	address = peek_reg(tracee, ORIGINAL, sysarg);
+/** Report files owned by the real user as owned by the emulated one.  */
+static void fake_owner(Tracee *tracee, Config *config, word_t address)
+{
+	uid_t uid;
+	gid_t gid;
 
 	/* Sanity checks.  */
 	assert(__builtin_types_compatible_p(uid_t, uint32_t));
@@ -138,23 +99,104 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 
 	/* Get the uid & gid values from the 'stat' structure.  */
 	uid = peek_uint32(tracee, address + offsetof_stat_uid(tracee));
-	if (errno != 0) 
+	if (errno != 0)
 		uid = 0; /* Not fatal.  */
-	
+
 	gid = peek_uint32(tracee, address + offsetof_stat_gid(tracee));
-	if (errno != 0) 
+	if (errno != 0)
 		gid = 0; /* Not fatal.  */
-	
+
 	/* Override only if the file is owned by the current user.
 	 * Errors are not fatal here.  */
-	if (uid == getuid()) 
+	if (uid == getuid())
 		poke_uint32(tracee, address + offsetof_stat_uid(tracee), config->suid);
-	
-	if (gid == getgid()) 
+
+	if (gid == getgid())
 		poke_uint32(tracee, address + offsetof_stat_gid(tracee), config->sgid);
-	
+}
+
+/** fstat(2) runs as is; at its exit, find the file behind the descriptor
+ *  through /proc/<pid>/fd/<fd> and apply its meta file. This used to turn
+ *  fstat into a readlink(2) of that link plus a chained stat(2) of the
+ *  result: two more stops, a 4 KiB copy into the tracee, and a stat of the
+ *  wrong file for anything that isn't a path (sockets, pipes, eventfds).
+ */
+int handle_fstat_exit_end(Tracee *tracee, Config *config)
+{
+	char link[64];
+	char path[PATH_MAX];
+	word_t address;
+	ssize_t length;
+	int status;
+
+	/* Override only if it succeed.  */
+	if (peek_reg(tracee, CURRENT, SYSARG_RESULT) != 0)
+		return 0;
+
+	address = peek_reg(tracee, ORIGINAL, SYSARG_2);
+	snprintf(link, sizeof(link), "/proc/%d/fd/%d", tracee->pid, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
+	length = readlink(link, path, sizeof(path) - 1);
+	if (length > 0 && path[0] == '/') {
+		const char *deleted = " (deleted)";
+		size_t deleted_length = strlen(deleted);
+
+		path[length] = '\0';
+		if (!((size_t) length >= deleted_length && strcmp(path + length - deleted_length, deleted) == 0)) {
+			/* Like stat(2) by name: files outside the guest
+			 * (bindings) keep their real owner.  */
+			if (!belongs_to_guestfs(tracee, path))
+				return 0;
+			status = apply_meta_file(tracee, path, address);
+			if (status != 0)
+				return status < 0 ? status : 0;
+		}
+	}
+
+	fake_owner(tracee, config, address);
 	return 0;
 }
+
+int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
+	int status = 0;
+	word_t address;
+	Reg sysarg;
+	char path[PATH_MAX];
+	word_t result;
+
+	/* Override only if it succeed.  */
+	result = peek_reg(tracee, CURRENT, SYSARG_RESULT);
+	if (result != 0)
+		return 0;
+
+	/* Get the pathname of the file to be 'stat'. */
+	if(sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
+		status = read_sysarg_path(tracee, path, SYSARG_2, MODIFIED);
+	else
+		status = read_sysarg_path(tracee, path, SYSARG_1, MODIFIED);
+
+	if(status < 0)
+		return status;
+	if(status == 1)
+		return 0;
+
+	/* Get the address of the 'stat' structure.  */
+	if (sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
+		sysarg = SYSARG_3;
+	else
+		sysarg = SYSARG_2;
+	address = peek_reg(tracee, ORIGINAL, sysarg);
+
+	/** If the meta file exists, read the data from it and replace it the
+	 *  relevant data in the stat structure.
+	 */
+	status = apply_meta_file(tracee, path, address);
+	if (status != 0)
+		return status < 0 ? status : 0;
+
+	fake_owner(tracee, config, address);
+	return 0;
+}
+
 #endif /* ifdef USERLAND */
 
 int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t statx_state_raw) {
