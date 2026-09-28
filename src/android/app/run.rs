@@ -93,6 +93,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                     }
                 };
                 let android_app = self.frontend.android_app.clone();
+                if matches!(backend.error, ErrorVariant::None) {
+                    // The setup notification shows the progress while the phone is doing other
+                    // things, but only with the permission.
+                    session::ask_permissions(&android_app);
+                }
                 thread::spawn(move || {
                     run_in_jvm(
                         move |env, app| {
