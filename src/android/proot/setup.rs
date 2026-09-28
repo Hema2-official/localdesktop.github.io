@@ -955,6 +955,16 @@ fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
 target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 mkdir -p "$target_dir" || exit 0
 
+# The scan starts several processes per entry, which took seconds of every session start
+# under proot, so it only runs when something in the application directories changed.
+stamp="$target_dir/.localdesktop-no-sandbox-scanned"
+if [ -e "$stamp" ] && [ -z "$(find /usr/share/applications /usr/local/share/applications \
+        -maxdepth 1 -newer "$stamp" 2>/dev/null | head -n1)" ]; then
+    exit 0
+fi
+# Before scanning, so entries installed meanwhile get seen next time.
+touch "$stamp"
+
 for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
     [ -f "$src" ] || continue
 
