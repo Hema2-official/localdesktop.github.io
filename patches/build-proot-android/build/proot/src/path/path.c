@@ -39,6 +39,7 @@
 #include "path/proc.h"
 #include "extension/extension.h"
 #include "cli/note.h"
+#include "tracee/profile.h"
 #include "build.h"
 
 #include "compat.h"
@@ -320,6 +321,9 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 {
 	char guest_path[PATH_MAX];
 	int status;
+
+	if (profile_paths_enabled)
+		profile_path(tracee, user_path);
 
 	/* Use "/" as the base if it is an absolute guest path. */
 	if (user_path[0] == '/') {

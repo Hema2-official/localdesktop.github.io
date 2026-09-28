@@ -38,6 +38,7 @@
 #include "tracee/event.h"
 #include "tracee/seccomp.h"
 #include "tracee/mem.h"
+#include "tracee/profile.h"
 #include "cli/note.h"
 #include "path/path.h"
 #include "path/binding.h"
@@ -320,9 +321,13 @@ int event_loop()
 			note(NULL, WARNING, SYSTEM, "sigaction(%d)", signum);
 	}
 
+	/* After the loop above, which ignores SIGPROF.  */
+	profile_init();
+
 	while (1) {
 		int tracee_status;
 		Tracee *tracee;
+		bool was_sysenter;
 		int signal;
 		pid_t pid;
 
@@ -339,9 +344,13 @@ int event_loop()
 			break;
 		}
 
+		if (profile_enabled)
+			profile_stop_begin();
+
 		/* Get information about this tracee. */
 		tracee = get_tracee(NULL, pid, true);
 		assert(tracee != NULL);
+		was_sysenter = IS_IN_SYSENTER(tracee);
 
 		tracee->running = false;
 
@@ -357,8 +366,12 @@ int event_loop()
 
 		signal = handle_tracee_event(tracee, tracee_status);
 		(void) restart_tracee(tracee, signal);
+
+		if (profile_enabled)
+			profile_stop_end(tracee, tracee_status, was_sysenter);
 	}
 
+	profile_dump();
 	return last_exit_status;
 }
 

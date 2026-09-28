@@ -187,8 +187,23 @@ impl ArchProcess {
                 "PROOT_LOADER",
                 context.native_library_dir.join("libproot_loader.so"),
             )
-            .env("PROOT_TMP_DIR", context.data_dir)
+            .env("PROOT_TMP_DIR", &context.data_dir)
             .env("PROOT_L2S_DIR", l2s_dir);
+
+        // For measuring proot itself: with `files/.proot-profile-enable` present, each proot
+        // writes its per-syscall stop counts to `files/.proot-profile.<pid>`, plus stack samples
+        // at the rate the file starts with, and a log of the paths used if it says "paths" too.
+        // See scripts/proot-profile.sh.
+        let profile_switch = context.data_dir.join(".proot-profile-enable");
+        if let Ok(settings) = fs::read_to_string(&profile_switch) {
+            let mut settings = settings.split_whitespace();
+            process
+                .env("PROOT_PROFILE", context.data_dir.join(".proot-profile"))
+                .env("PROOT_PROFILE_HZ", settings.next().unwrap_or("0"));
+            if settings.any(|setting| setting == "paths") {
+                process.env("PROOT_PROFILE_PATHS", "1");
+            }
+        }
 
         process
             .arg("-r")

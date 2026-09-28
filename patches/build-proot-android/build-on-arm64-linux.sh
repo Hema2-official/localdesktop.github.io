@@ -6,6 +6,8 @@
 #
 # Usage: patches/build-proot-android/build-on-arm64-linux.sh [--install]
 #   --install  copy libproot.so and libproot_loader.so into assets/libs/arm64-v8a
+# Environment: PROOT_EXTRA_CFLAGS. The unstripped binary is kept as proot.unstripped next to the
+# output, for symbolizing profiles (scripts/proot-profile.sh).
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -82,11 +84,14 @@ rm -rf "$work/proot"
 cp -r "$here/build/proot" "$work/proot"
 cd "$work/proot/src"
 make distclean > /dev/null 2>&1 || true
-CFLAGS="-I$work/static/include -Werror=implicit-function-declaration -DUSERLAND" \
+# Frame pointers let PROOT_PROFILE_HZ sample call stacks (see src/tracee/profile.c).
+CFLAGS="-I$work/static/include -Werror=implicit-function-declaration -DUSERLAND \
+-fno-omit-frame-pointer ${PROOT_EXTRA_CFLAGS:-}" \
 LDFLAGS="-L$work/static/lib" PROOT_UNBUNDLE_LOADER=. \
     make proot > "$work/proot.log" 2>&1 || { tail -40 "$work/proot.log" >&2; exit 1; }
 
 cp proot "$work/out/libproot.so"
+cp proot "$work/out/proot.unstripped"
 cp loader/loader "$work/out/libproot_loader.so"
 "$STRIP" "$work/out/libproot.so" "$work/out/libproot_loader.so"
 ls -l "$work/out"
