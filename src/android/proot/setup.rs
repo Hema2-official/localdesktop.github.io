@@ -1457,6 +1457,9 @@ export MESA_VK_WSI_DEBUG=sw
 # Qt sends its warnings to the journal, which nothing reads here, unless told otherwise; this
 # way they land in the session log.
 export QT_FORCE_STDERR_LOGGING=1
+# Without a GPU, Qt Quick's OpenGL renders through llvmpipe: scrolling a Plasma menu took two
+# cores. Its own 2D renderer only repaints what changed and needs a tenth of that.
+export QT_QUICK_BACKEND=software
 /usr/local/bin/localdesktop-no-sandbox-entries
 exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
 "#,
