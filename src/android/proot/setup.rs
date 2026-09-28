@@ -1418,6 +1418,10 @@ export ELECTRON_DISABLE_SANDBOX=1
 # The compositors here only take shared-memory buffers (there's no GPU render node), so Vulkan
 # apps have to present through them.
 export MESA_VK_WSI_DEBUG=sw
+# Firefox's main process can't reopen a memfd read-only through /proc/self/fd (Android's SELinux),
+# so it shares memory through /dev/shm instead; its content processes still insist on memfd seals
+# and crashed on every page ("Shared memory PlatformHandle is not safe to map").
+export MOZ_SHM_NO_SEALS=1
 {TZ_FROM_LOCALTIME}"#
     )
 }
