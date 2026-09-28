@@ -9,6 +9,10 @@
 
 #define IGNORE_SYSARG (Reg)2000
 
+/* A file's meta file is "<dir>/" META_TAG "<name>" META_SUFFIX. */
+#define META_TAG ".proot-meta-file."
+#define META_SUFFIX ".meta"
+
 int check_dir_perms(Tracee *tracee, char type, char path[PATH_MAX], char rel_path[PATH_MAX], Config *config);
 
 int get_dir_path(char path[PATH_MAX], char dir_path[PATH_MAX]);

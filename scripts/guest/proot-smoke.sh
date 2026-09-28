@@ -40,6 +40,13 @@ rm -rf tree 2>/dev/null
 [ ! -e tree ] && pass "rm -rf removes a tree with hard links in one pass" \
     || fail "rm -rf removes a tree with hard links in one pass"
 
+# mv takes the ownership record along. A record left behind is invisible but keeps its
+# directory from ever being removed ("Directory not empty").
+mkdir -p moved/from moved/to && touch moved/from/f && mv moved/from/f moved/to/f
+rmdir moved/from 2>/dev/null
+[ ! -e moved/from ] && pass "mv leaves no ownership record behind" \
+    || fail "mv leaves no ownership record behind" "rmdir: directory not empty"
+
 # fstat() on sockets and eventfds (libwayland-server, Python's signal.set_wakeup_fd, Zed).
 if command -v python3 >/dev/null 2>&1; then
     result=$(python3 - <<'PY' 2>&1
