@@ -23,6 +23,7 @@
 
 #ifdef __ANDROID__
 #include <linux/ashmem.h> /* ASHMEM_* */
+#include <stdio.h> /* snprintf */
 #else
 #include <unistd.h> /* ftruncate */
 #endif
@@ -613,7 +614,21 @@ int sysvipc_shm_namespace_destructor(struct SysVIpcNamespace *ipc_namespace) {
 
 static int sysvipc_shm_do_allocate(size_t size, int shmid) {
 #ifdef __ANDROID__
-	int fd = open("/dev/ashmem", O_RDWR, 0);
+	char name[32];
+	int fd;
+
+	/* memfd first: apps targeting Android 10 and later can't open
+	 * /dev/ashmem, so every shmget(2) failed with ENOSPC (GIMP then
+	 * turns off its shared-memory tile transport).  */
+	snprintf(name, sizeof(name), "sysvshm_0x%X", shmid);
+	fd = syscall(SYS_memfd_create, name, 0);
+	if (fd >= 0) {
+		if (ftruncate(fd, size) == 0)
+			return fd;
+		close(fd);
+	}
+
+	fd = open("/dev/ashmem", O_RDWR, 0);
 	if (fd < 0) return -ENOSPC;
 
 	char name_buffer[ASHMEM_NAME_LEN] = {0};

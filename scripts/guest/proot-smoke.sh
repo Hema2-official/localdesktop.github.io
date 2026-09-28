@@ -109,6 +109,14 @@ if [ "$(id -u)" != 0 ]; then
         || fail "a directory's new permissions apply at once" "denied after chmod 000: $denied, allowed after chmod 755: $allowed"
 fi
 
+# SysV shared memory (proot --sysvipc): X11's MIT-SHM and GIMP's plug-ins use it.
+if command -v ipcmk > /dev/null; then
+    shm_id=$(ipcmk -M 65536 2>&1 | awk '/[Ii][Dd]:/ { print $NF }')
+    [ -n "$shm_id" ] && ipcrm -m "$shm_id" 2> /dev/null \
+        && pass "SysV shared memory segments can be created" \
+        || fail "SysV shared memory segments can be created" "$(ipcmk -M 65536 2>&1)"
+fi
+
 # The emulated ids, through every call that reports them.
 if command -v python3 > /dev/null; then
     ids=$(python3 -c 'import os; print(os.getuid(), os.geteuid(), *os.getresuid(), os.getgid(), os.getegid(), *os.getresgid())' 2>&1)
