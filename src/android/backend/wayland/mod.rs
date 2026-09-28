@@ -11,7 +11,7 @@ pub use output_state::write_guest_output_state;
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
-pub use event_handler::handle;
+pub use event_handler::{about_to_wait, handle};
 pub use winit_backend::{bind, WinitGraphicsBackend};
 
 use smithay::{

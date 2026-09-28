@@ -13,6 +13,8 @@ use winit::{event::ElementState, event_loop::EventLoopProxy};
 #[derive(Clone, Copy, Debug)]
 pub enum AppUserEvent {
     AccessibilityInputReady,
+    /// A Wayland client sent requests or a new one is connecting.
+    WaylandClientsReady,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +50,15 @@ pub fn register_event_loop_proxy(proxy: EventLoopProxy<AppUserEvent>) {
         .lock()
         .expect("Failed to lock accessibility bridge");
     bridge.proxy = Some(proxy);
+}
+
+/// The event loop's proxy, for other threads that need to wake it.
+pub fn event_loop_proxy() -> Option<EventLoopProxy<AppUserEvent>> {
+    bridge()
+        .lock()
+        .expect("Failed to lock accessibility bridge")
+        .proxy
+        .clone()
 }
 
 pub fn set_runtime_active(active: bool) {

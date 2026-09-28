@@ -2,7 +2,7 @@ use crate::android::{
     accessibility,
     backend::wayland::{
         compositor::{
-            send_frames_surface_tree, take_presentation_feedback_surface_tree, ClientState, State,
+            send_frames_surface_tree, take_presentation_feedback_surface_tree, State,
         },
         write_guest_output_state, CentralizedEvent, TouchMode, WaylandBackend,
     },
@@ -29,8 +29,7 @@ use smithay::{
     },
     output::{Mode, Scale},
 };
-use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
 /// Linux input event code for the left mouse button (`BTN_LEFT`).
@@ -150,7 +149,8 @@ fn emit_pointer_click(
 /// Arm the long press once the finger has stayed put for `ViewConfiguration`'s timeout.
 ///
 /// No button is sent here: moving afterwards starts a drag with the left button held, lifting
-/// instead fires a right click. Called from the redraw loop, which already ticks every frame.
+/// instead fires a right click. Checked whenever the event loop is about to sleep, which wakes
+/// up at `long_press_deadline` for it.
 fn poll_long_press(backend: &mut WaylandBackend) {
     if backend.touch_mode != TouchMode::Undecided || backend.touch_points.len() != 1 {
         return;
@@ -175,37 +175,56 @@ fn poll_long_press(backend: &mut WaylandBackend) {
     );
 }
 
+/// When a finger that is down and hasn't moved becomes a long press.
+fn long_press_deadline(backend: &WaylandBackend) -> Option<Instant> {
+    if backend.touch_mode != TouchMode::Undecided || backend.touch_points.len() != 1 {
+        return None;
+    }
+    let down_time = backend.touch_down_time?;
+    let now = backend.clock.now().as_millis() as u64;
+    let remaining = (down_time + backend.long_press_timeout_ms).saturating_sub(now);
+    Some(Instant::now() + Duration::from_millis(remaining))
+}
+
+/// Runs whenever the event loop has handled what woke it and is about to sleep: answer the
+/// clients, draw a frame only if something on screen changed, and sleep until the next event
+/// (a client, input, the long-press timeout). Nothing is drawn while the desktop is idle.
+pub fn about_to_wait(backend: &mut WaylandBackend, event_loop: &ActiveEventLoop) {
+    poll_long_press(backend);
+
+    if let Err(error) = backend.compositor.service_clients() {
+        log::error!("{error}");
+    }
+
+    if backend.compositor.state.needs_redraw {
+        if let Some(winit) = backend.graphic_renderer.as_ref() {
+            winit.window().request_redraw();
+        }
+    }
+
+    let control_flow = if !backend.compositor.has_client_waker() {
+        // Nothing would wake the loop for clients: look every frame.
+        ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16))
+    } else if let Some(deadline) = long_press_deadline(backend) {
+        ControlFlow::WaitUntil(deadline)
+    } else {
+        ControlFlow::Wait
+    };
+    event_loop.set_control_flow(control_flow);
+}
+
 pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop: &ActiveEventLoop) {
     match event {
         CentralizedEvent::CloseRequested => {
             event_loop.exit();
         }
         CentralizedEvent::Redraw => {
-            poll_long_press(backend);
-
+            // The next frame comes when something changes again (see `about_to_wait`).
             if let Err(error) = redraw(backend) {
                 log::error!("Redraw failed; dropping renderer until next resume: {error}");
                 backend.graphic_renderer = None;
                 accessibility::set_runtime_active(false);
                 event_loop.set_control_flow(ControlFlow::Wait);
-                return;
-            }
-
-            // Redraw the application.
-            //
-            // It's preferable for applications that do not render continuously to render in
-            // this event rather than in AboutToWait, since rendering in here allows
-            // the program to gracefully handle redraws requested by the OS.
-
-            // Draw.
-
-            // Queue a RedrawRequested event.
-            //
-            // You only need to call this if you've determined that you need to redraw in
-            // applications which do not always need to. Applications that redraw continuously
-            // can render here instead.
-            if let Some(winit) = backend.graphic_renderer.as_ref() {
-                winit.window().request_redraw();
             }
         }
         CentralizedEvent::Input(event) => match event {
@@ -394,6 +413,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             guest_scale_factor,
         } => {
             backend.compositor.state.size = (size.w, size.h).into();
+            backend.compositor.state.needs_redraw = true;
 
             if let Some(output) = &backend.compositor.output {
                 output.change_current_state(
@@ -426,6 +446,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     let size = winit.window_size();
     let damage = Rectangle::from_size(size);
     let mut presentation_feedback = Vec::new();
+    backend.compositor.state.needs_redraw = false;
     {
         let (renderer, mut framebuffer) = winit
             .bind()
@@ -478,38 +499,8 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
             ));
         }
 
-        match compositor.listener.accept() {
-            Ok(Some(stream)) => match compositor
-                .display
-                .handle()
-                .insert_client(stream, Arc::new(ClientState::default()))
-            {
-                Ok(client) => compositor.clients.push(client),
-                Err(error) => log::error!("Failed to insert Wayland client: {error}"),
-            },
-            Ok(None) => {}
-            Err(error) => log::error!("Failed to accept Wayland client: {error}"),
-        }
-
-        compositor
-            .display
-            .dispatch_clients(&mut compositor.state)
-            .map_err(|error| format!("Failed to dispatch clients: {error}"))?;
-
-        // Give the desktop keyboard focus as soon as it's there, not only after the first tap.
-        if compositor.keyboard.current_focus().is_none() {
-            if let Some(surface) = get_surface(&compositor.state) {
-                compositor.keyboard.set_focus(
-                    &mut compositor.state,
-                    Some(surface.wl_surface().clone()),
-                    SERIAL_COUNTER.next_serial(),
-                );
-            }
-        }
-        compositor
-            .display
-            .flush_clients()
-            .map_err(|error| format!("Failed to flush clients: {error}"))?;
+        // Hand out the frame callbacks before swapping, which may block.
+        compositor.service_clients()?;
     }
 
     // It is important that all events on the display have been dispatched and flushed to clients

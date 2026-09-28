@@ -48,7 +48,15 @@ use smithay::{
         Client, ListeningSocket, Resource,
     },
 };
-use std::{error::Error, os::unix::io::OwnedFd, time::Instant};
+use crate::android::accessibility::{self, AppUserEvent};
+use std::{
+    error::Error,
+    os::unix::io::{AsFd, AsRawFd, OwnedFd, RawFd},
+    sync::{mpsc, Arc},
+    thread,
+    time::Instant,
+};
+use winit::event_loop::EventLoopProxy;
 
 pub struct Compositor {
     pub state: State,
@@ -64,6 +72,10 @@ pub struct Compositor {
     pub output_global: Option<GlobalId>,
     /// Frames presented so far, for presentation feedback.
     pub frame_sequence: u64,
+    /// Tells the client waker that the clients were serviced since it last woke the loop.
+    waker_ack: Option<mpsc::Sender<()>>,
+    /// Whether the client waker is waiting for that.
+    waker_waiting: bool,
 }
 
 pub struct State {
@@ -85,6 +97,8 @@ pub struct State {
     /// Surfaces whose clients asked for fractional scaling. They get logical sizes and are drawn
     /// scaled by `client_scale`; everyone else works in physical pixels.
     pub scaled_surfaces: Vec<WlSurface>,
+    /// Something on screen changed since the last frame (a surface committed or went away).
+    pub needs_redraw: bool,
 }
 
 impl State {
@@ -150,6 +164,10 @@ impl XdgShellHandler for State {
         // the configure (such as fractional scaling).
     }
 
+    fn toplevel_destroyed(&mut self, _surface: ToplevelSurface) {
+        self.needs_redraw = true;
+    }
+
     fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
         // Handle popup creation here
     }
@@ -194,6 +212,8 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        // Also answers the frame callbacks and presentation feedback this commit asked for.
+        self.needs_redraw = true;
 
         let toplevel = self
             .xdg_shell_state
@@ -329,7 +349,7 @@ delegate_fractional_scale!(State);
 
 impl Compositor {
     pub fn build() -> Result<Compositor, Box<dyn Error>> {
-        let display = Display::new()?;
+        let mut display = Display::new()?;
         let dh = display.handle();
 
         let mut seat_state = SeatState::new();
@@ -364,7 +384,16 @@ impl Compositor {
             size: (1920, 1080).into(),
             client_scale: 1.0,
             scaled_surfaces: Vec::new(),
+            needs_redraw: false,
         };
+
+        let waker_ack = accessibility::event_loop_proxy().and_then(|proxy| {
+            spawn_client_waker(
+                display.backend().poll_fd().as_raw_fd(),
+                listener.as_fd().as_raw_fd(),
+                proxy,
+            )
+        });
 
         Ok(Compositor {
             state,
@@ -379,6 +408,110 @@ impl Compositor {
             output: None,
             output_global: None,
             frame_sequence: 0,
+            waker_ack,
+            waker_waiting: false,
         })
+    }
+
+    /// Accept new clients, handle what they sent and flush our replies and events. Call it
+    /// whenever the event loop is about to sleep, so nothing waits on us.
+    pub fn service_clients(&mut self) -> Result<(), String> {
+        loop {
+            match self.listener.accept() {
+                Ok(Some(stream)) => match self
+                    .display
+                    .handle()
+                    .insert_client(stream, Arc::new(ClientState::default()))
+                {
+                    Ok(client) => self.clients.push(client),
+                    Err(error) => log::error!("Failed to insert Wayland client: {error}"),
+                },
+                Ok(None) => break,
+                Err(error) => {
+                    log::error!("Failed to accept Wayland client: {error}");
+                    break;
+                }
+            }
+        }
+
+        self.display
+            .dispatch_clients(&mut self.state)
+            .map_err(|error| format!("Failed to dispatch clients: {error}"))?;
+
+        // Give the desktop keyboard focus as soon as it's there, not only after the first tap.
+        if self.keyboard.current_focus().is_none() {
+            if let Some(toplevel) = self.state.xdg_shell_state.toplevel_surfaces().first() {
+                let surface = toplevel.wl_surface().clone();
+                self.keyboard.set_focus(
+                    &mut self.state,
+                    Some(surface),
+                    smithay::utils::SERIAL_COUNTER.next_serial(),
+                );
+            }
+        }
+
+        self.display
+            .flush_clients()
+            .map_err(|error| format!("Failed to flush clients: {error}"))?;
+
+        if self.waker_waiting {
+            self.waker_waiting = false;
+            if let Some(ack) = &self.waker_ack {
+                let _ = ack.send(());
+            }
+        }
+        Ok(())
+    }
+
+    /// The client waker woke the event loop; `service_clients` lets it poll again.
+    pub fn clients_ready(&mut self) {
+        self.waker_waiting = true;
+    }
+
+    /// Whether the client waker runs. Without it the event loop has to poll for clients.
+    pub fn has_client_waker(&self) -> bool {
+        self.waker_ack.is_some()
+    }
+}
+
+/// Wakes the event loop when a Wayland client sent something or a new one is connecting, so the
+/// loop can sleep in between instead of polling. It then waits until the loop has serviced the
+/// clients before polling again, or a still-readable fd would flood the loop with wake-ups.
+fn spawn_client_waker(
+    display_fd: RawFd,
+    listener_fd: RawFd,
+    proxy: EventLoopProxy<AppUserEvent>,
+) -> Option<mpsc::Sender<()>> {
+    let (ack, acked) = mpsc::channel();
+    let spawned = thread::Builder::new()
+        .name("wayland-waker".into())
+        .spawn(move || {
+            let mut fds = [
+                libc::pollfd { fd: display_fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: listener_fd, events: libc::POLLIN, revents: 0 },
+            ];
+            loop {
+                let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    log::error!("Wayland client waker stopped: {error}");
+                    return;
+                }
+                if proxy.send_event(AppUserEvent::WaylandClientsReady).is_err()
+                    || acked.recv().is_err()
+                {
+                    return;
+                }
+            }
+        });
+    match spawned {
+        Ok(_) => Some(ack),
+        Err(error) => {
+            log::error!("Failed to start the Wayland client waker: {error}");
+            None
+        }
     }
 }

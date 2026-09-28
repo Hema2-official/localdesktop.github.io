@@ -6,8 +6,8 @@ use crate::android::{
     backend::{
         pipewire_standalone_aaudio,
         wayland::{
-            bind, centralize, centralize_injected_keyboard, handle, write_guest_output_state,
-            CentralizedEvent, State,
+            about_to_wait, bind, centralize, centralize_injected_keyboard, handle,
+            write_guest_output_state, CentralizedEvent, State,
         },
         webview::ErrorVariant,
     },
@@ -142,11 +142,16 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         }
     }
 
-    fn user_event(&mut self, event_loop: &ActiveEventLoop, _event: AppUserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppUserEvent) {
         let PolarBearBackend::Wayland(backend) = &mut self.backend else {
             accessibility::drain_pending_events();
             return;
         };
+        if let AppUserEvent::WaylandClientsReady = event {
+            // Serviced in `about_to_wait`, right after this.
+            backend.compositor.clients_ready();
+            return;
+        }
 
         for event in accessibility::drain_pending_events() {
             let event = centralize_injected_keyboard(
@@ -178,6 +183,12 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
             // Handle the centralized events
             handle(event, backend, event_loop);
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let PolarBearBackend::Wayland(backend) = &mut self.backend {
+            about_to_wait(backend, event_loop);
         }
     }
 
