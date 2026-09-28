@@ -10,11 +10,7 @@ On launch, Local Desktop reads the config file located at:
 /etc/localdesktop/localdesktop.toml
 ```
 
-If the content of the config file is invalid (for example, invalid TOML format), it will be **replaced** with the default config. You can still view its original content in:
-
-```
-/etc/localdesktop/localdesktop.bak
-```
+If part of the config file is invalid (a typo, a value of the wrong type, broken TOML), a notification lists the problems with their line numbers. A bad value only costs its own section, which falls back to the defaults; the rest of the config still applies. Local Desktop reads the file when it starts and when you restart the desktop from the notification.
 
 Some important notes:
 - Although TOML does support multi-line strings, Local Desktop requires each config to fit in a **single line**. You can use `\n` for multi-line config values if needed.
