@@ -45,10 +45,14 @@ impl WebviewBackend {
         // The question stays open until the page answers, so a page that connects (or reloads)
         // later still gets it.
         let desktop_question_open = Arc::new(AtomicBool::new(false));
+        // What the page last showed, for a page that connects late (e.g. once the phone is
+        // unlocked).
+        let last_message: Arc<Mutex<Option<OwnedMessage>>> = Arc::new(Mutex::new(None));
 
         let active_client_clone = active_client.clone();
         let progress_clone = progress.clone();
         let question_open = desktop_question_open.clone();
+        let last_message_clone = last_message.clone();
         thread::spawn(move || {
             for message in receiver {
                 let progress = *progress_clone.lock().unwrap();
@@ -83,6 +87,9 @@ impl WebviewBackend {
                 };
 
                 let mut active_client = active_client_clone.lock().unwrap();
+                if !question_open.load(Ordering::Acquire) {
+                    *last_message_clone.lock().unwrap() = Some(message.clone());
+                }
 
                 if let Some(writer) = active_client.as_mut() {
                     if writer.send_message(&message).is_err() {
@@ -126,13 +133,15 @@ impl WebviewBackend {
                 };
 
                 let progress = *progress_clone.lock().unwrap();
-                let message = OwnedMessage::Text(
-                    json!({
-                        "progress": progress,
-                        "message": "Connected to installer",
-                    })
-                    .to_string(),
-                );
+                let message = last_message.lock().unwrap().clone().unwrap_or_else(|| {
+                    OwnedMessage::Text(
+                        json!({
+                            "progress": progress,
+                            "message": "Connected to installer",
+                        })
+                        .to_string(),
+                    )
+                });
                 if writer.send_message(&message).is_err() {
                     log::info!("Setup progress client disconnected during initial update");
                     continue;
