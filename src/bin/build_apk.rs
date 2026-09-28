@@ -1146,6 +1146,8 @@ pub mod apk {
             pub theme: Option<String>,
             #[serde(rename(serialize = "android:hasCode"))]
             pub has_code: Option<bool>,
+            #[serde(rename(serialize = "android:allowBackup"))]
+            pub allow_backup: Option<bool>,
             #[serde(rename(serialize = "android:icon"))]
             pub icon: Option<String>,
             #[serde(rename(serialize = "android:label"))]

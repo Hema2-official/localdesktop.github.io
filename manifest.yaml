@@ -19,6 +19,9 @@ android:
     application:
       label: "Local Desktop"
       extract_native_libs: true # Required for proot invocations
+      # Android's Auto Backup runs in the app's process and kills it afterwards (seen killing an
+      # install midway), and the Linux system is far too big to back up anyway.
+      allow_backup: false
       use_cleartext_traffic: true # Required for connecting to ws://127.0.0.1, see assets/setup-progress.html
       activities:
         - {} # The NativeActivity; the APK builder fills it in
