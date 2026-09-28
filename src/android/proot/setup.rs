@@ -429,7 +429,8 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
         .success()
     };
 
-    if installed() {
+    let mut broken = broken_packages();
+    if broken.is_empty() && installed() {
         return None;
     }
 
@@ -452,6 +453,37 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            if !broken.is_empty() {
+                let names: Vec<&str> = broken.iter().map(|(_, name)| name.as_str()).collect();
+                let dirs: Vec<&str> = broken.iter().map(|(dir, _)| dir.as_str()).collect();
+                log::warn!("Reinstalling packages with broken database entries: {names:?}");
+                mpsc_sender
+                    .send(SetupMessage::Progress(format!(
+                        "Repairing packages an interrupted install left behind: {}",
+                        names.join(" ")
+                    )))
+                    .unwrap_or(());
+                // Forget the broken entries, then install the packages again over whatever
+                // files they left.
+                let sender = mpsc_sender.clone();
+                let repaired = ArchProcess {
+                    command: format!(
+                        "cd /var/lib/pacman/local && rm -rf {} && pacman -Sy --noconfirm --overwrite '*' {}",
+                        dirs.join(" "),
+                        names.join(" ")
+                    ),
+                    user: None,
+                    log: Some(Arc::new(move |it| {
+                        sender.send(SetupMessage::Progress(it)).unwrap_or(());
+                    })),
+                }
+                .run()
+                .status
+                .success();
+                if repaired {
+                    broken.clear();
+                }
+            }
             let sender = mpsc_sender.clone();
             ArchProcess {
                 command: install.clone(),
@@ -464,7 +496,7 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
             }
             .run();
 
-            if installed() {
+            if broken.is_empty() && installed() {
                 download_user_manual();
                 return;
             }
@@ -493,6 +525,27 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
             }
         }
     }));
+}
+
+/// Packages whose entry in pacman's local database lacks `desc` or `files`, as `(directory,
+/// name)`. That happens when the app is killed during a transaction. pacman still counts them as
+/// installed (by the directory name), so `--needed` never replaces their half-extracted files.
+fn broken_packages() -> Vec<(String, String)> {
+    let local = Path::new(ARCH_FS_ROOT).join("var/lib/pacman/local");
+    let Ok(entries) = fs::read_dir(local) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_dir())
+        .filter(|entry| !entry.path().join("desc").is_file() || !entry.path().join("files").is_file())
+        .filter_map(|entry| {
+            let dir = entry.file_name().into_string().ok()?;
+            // "<name>-<pkgver>-<pkgrel>"
+            let name = dir.rsplitn(3, '-').nth(2)?.to_string();
+            Some((dir, name))
+        })
+        .collect()
 }
 
 /// Drop the offline User Manual for this app version onto the guest desktop.
