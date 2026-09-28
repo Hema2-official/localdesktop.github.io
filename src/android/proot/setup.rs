@@ -1853,7 +1853,90 @@ exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
         let _ = fs::write(&ksplashrc, "[KSplash]\nEngine=none\nTheme=None\n");
     }
 
+    add_android_place(fs_root, &home_dir);
+
     None
+}
+
+/// Adds the phone's shared storage (bound at `/android` when the app may access all files) to
+/// Dolphin's places, right after Home. Only once: someone who removes it keeps it removed.
+fn add_android_place(fs_root: &Path, home_dir: &Path) {
+    if !get_application_context().permission_all_files_access {
+        return;
+    }
+    let data_dir = home_dir.join(".local/share");
+    let stamp = data_dir.join("localdesktop/android-place-added");
+    if stamp.exists() {
+        return;
+    }
+    let places = data_dir.join("user-places.xbel");
+    let guest_home = Path::new("/").join(home_dir.strip_prefix(fs_root).unwrap_or(home_dir));
+    // Before the first session KDE hasn't written its defaults yet. A file holding only this
+    // place would keep it from adding Home and Trash, so start from its defaults.
+    let mut content =
+        fs::read_to_string(&places).unwrap_or_else(|_| default_places(&guest_home.to_string_lossy()));
+    if !content.contains("href=\"file:///android\"") {
+        let Some(home_end) = content.find("</bookmark>").map(|it| it + "</bookmark>".len()) else {
+            return;
+        };
+        content.insert_str(
+            home_end,
+            &places_bookmark("file:///android", "Android", "smartphone", "localdesktop/android", false),
+        );
+        let _ = fs::create_dir_all(&data_dir);
+        if let Err(error) = fs::write(&places, content) {
+            log::warn!("Failed to add the Android place to {}: {error}", places.display());
+            return;
+        }
+    }
+    let _ = fs::create_dir_all(data_dir.join("localdesktop"));
+    let _ = fs::write(stamp, "");
+}
+
+fn places_bookmark(href: &str, title: &str, icon: &str, id: &str, system: bool) -> String {
+    let system = if system {
+        "    <isSystemItem>true</isSystemItem>\n"
+    } else {
+        ""
+    };
+    format!(
+        "\n <bookmark href=\"{href}\">\n  <title>{title}</title>\n  <info>\n   \
+         <metadata owner=\"http://freedesktop.org\">\n    <bookmark:icon name=\"{icon}\"/>\n   \
+         </metadata>\n   <metadata owner=\"http://www.kde.org\">\n    <ID>{id}</ID>\n{system}   \
+         </metadata>\n  </info>\n </bookmark>"
+    )
+}
+
+/// The places KDE (KIO 6, places version 4) starts a user with, except "Recent Files" and "Recent
+/// Locations": KDE adds those itself when the file doesn't say it did (`withRecentlyUsed`), which
+/// would list them twice.
+fn default_places(home: &str) -> String {
+    let defaults = [
+        (format!("file://{home}"), "Home", "user-home"),
+        (format!("file://{home}/Desktop"), "Desktop", "user-desktop"),
+        (format!("file://{home}/Documents"), "Documents", "folder-documents"),
+        (format!("file://{home}/Downloads"), "Downloads", "folder-downloads"),
+        (format!("file://{home}/Music"), "Music", "folder-music"),
+        (format!("file://{home}/Pictures"), "Pictures", "folder-pictures"),
+        (format!("file://{home}/Videos"), "Videos", "folder-videos"),
+        ("remote:/".to_string(), "Network", "folder-network"),
+        ("trash:/".to_string(), "Trash", "user-trash"),
+    ];
+    let bookmarks: String = defaults
+        .iter()
+        .enumerate()
+        .map(|(index, (href, title, icon))| {
+            places_bookmark(href, title, icon, &format!("localdesktop/{index}"), true)
+        })
+        .collect();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE xbel>\n<xbel \
+         xmlns:bookmark=\"http://www.freedesktop.org/standards/desktop-bookmarks\" \
+         xmlns:kdepriv=\"http://www.kde.org/kdepriv\" \
+         xmlns:mime=\"http://www.freedesktop.org/standards/shared-mime-info\">\n <info>\n  \
+         <metadata owner=\"http://www.kde.org\">\n   <kde_places_version>4</kde_places_version>\n  \
+         </metadata>\n </info>{bookmarks}\n</xbel>\n"
+    )
 }
 
 fn fix_xkb_symlink(options: &SetupOptions) -> StageOutput {
