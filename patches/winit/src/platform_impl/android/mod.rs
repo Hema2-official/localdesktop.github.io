@@ -1,5 +1,5 @@
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +12,7 @@ use android_activity::input::{
 use android_activity::{
     AndroidApp, AndroidAppWaker, ConfigurationRef, InputStatus, MainEvent, Rect,
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::cursor::Cursor;
 use crate::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
@@ -145,8 +145,11 @@ pub struct EventLoop<T: 'static> {
     cause: StartCause,
     ignore_volume_keys: bool,
     combining_accent: Option<char>,
-    /// Last reported pointer button mask per input device.
-    pointer_buttons: HashMap<i32, u32>,
+    /// Last reported pointer button mask per input device, and whether a contact without any
+    /// button (a stylus tip) holds the primary button.
+    pointer_buttons: HashMap<i32, (u32, bool)>,
+    /// Pointer devices whose source has been logged.
+    pointer_devices_seen: HashSet<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -218,6 +221,7 @@ impl<T: 'static> EventLoop<T> {
             ignore_volume_keys: attributes.ignore_volume_keys,
             combining_accent: None,
             pointer_buttons: HashMap::new(),
+            pointer_devices_seen: HashSet::new(),
         })
     }
 
@@ -444,48 +448,61 @@ impl<T: 'static> EventLoop<T> {
                         | MotionAction::Down
                         | MotionAction::Up
                         | MotionAction::Cancel=> {
-                            // Mouse button pressed
-
-                            // Skip `MotionAction::Down` and `MotionAction::Up` when source is mouse as they already reported on `MotionAction::PointerDown` and `MotionAction::PointerUp`
-                            // The issue is here: drag gesture start with down and up
-                            if (source == Source::Mouse ||  source == Source::Touchpad) && (action == MotionAction::Down || action == MotionAction::Up) {
-                                return input_status;
+                            let device = motion_event.device_id();
+                            if self.pointer_devices_seen.insert(device) {
+                                info!(
+                                    "Pointer input from device {device}: source {source:?} \
+                                     ({:#x}), tool {tool_type:?}",
+                                    u32::from(source)
+                                );
                             }
 
-                            let state = match action {
-                                MotionAction::ButtonPress
-                                | MotionAction::Down
-                                | MotionAction::PointerDown => event::ElementState::Pressed,
-                                _ => event::ElementState::Released,
+                            // Android reports a mouse press twice, as ACTION_DOWN and as
+                            // ACTION_BUTTON_PRESS, and a release as ACTION_BUTTON_RELEASE and
+                            // ACTION_UP; DeX doesn't always tag them as coming from a mouse,
+                            // which made every click arrive twice. So compare the buttons held
+                            // before and after the event (`button_state()` is the mask after
+                            // it) and report only what changed. A contact without any button,
+                            // like a stylus tip, holds the primary button until it lifts.
+                            let (previous_mask, previous_contact) =
+                                self.pointer_buttons.get(&device).copied().unwrap_or((0, false));
+                            let current_mask = button.0;
+                            let buttonless = mouse_buttons(button).is_empty();
+                            let contact = match action {
+                                MotionAction::Down | MotionAction::PointerDown => {
+                                    previous_contact || buttonless
+                                },
+                                MotionAction::Up
+                                | MotionAction::PointerUp
+                                | MotionAction::Cancel => false,
+                                _ => previous_contact,
                             };
 
-                            // `button_state()` is the mask *after* this event, so a released
-                            // button is already missing from it. Compare with the device's
-                            // previous mask to find the buttons that actually changed.
-                            let previous = self
-                                .pointer_buttons
-                                .insert(motion_event.device_id(), button.0)
-                                .unwrap_or(0);
-                            let changed = match action {
-                                MotionAction::Cancel => previous,
-                                _ if state == event::ElementState::Pressed => button.0 & !previous,
-                                _ => previous & !button.0,
-                            };
-                            if action == MotionAction::Cancel {
-                                self.pointer_buttons.remove(&motion_event.device_id());
-                            }
-
-                            let mut buttons = mouse_buttons(input::ButtonState(changed));
-                            if buttons.is_empty() {
-                                // No known button changed, e.g. a stylus touching down without
-                                // pressing one: treat it as the primary button.
-                                if changed != 0 {
-                                    warn!("Unknown button: {changed:#x}");
+                            let held = |mask: u32, contact: bool| {
+                                let mut buttons = mouse_buttons(input::ButtonState(mask));
+                                if contact && !buttons.contains(&MouseButton::Left) {
+                                    buttons.push(MouseButton::Left);
                                 }
-                                buttons.push(MouseButton::Left);
-                            }
+                                buttons
+                            };
+                            let before = held(previous_mask, previous_contact);
+                            let after = if action == MotionAction::Cancel {
+                                self.pointer_buttons.remove(&device);
+                                Vec::new()
+                            } else {
+                                self.pointer_buttons.insert(device, (current_mask, contact));
+                                held(current_mask, contact)
+                            };
 
-                            for button in buttons {
+                            let released = before.iter().filter(|button| !after.contains(button));
+                            let pressed = after.iter().filter(|button| !before.contains(button));
+                            let changes = released
+                                .map(|button| (*button, event::ElementState::Released))
+                                .chain(
+                                    pressed.map(|button| (*button, event::ElementState::Pressed)),
+                                )
+                                .collect::<Vec<_>>();
+                            for (button, state) in changes {
                                 callback(
                                     Event::WindowEvent {
                                         window_id,
