@@ -9,6 +9,7 @@
 
 #include "tracee/statx.h"
 #include "tracee/mem.h"
+#include "tracee/abi.h"
 #include "attribute.h"
 
 static volatile sig_atomic_t statx_trapped;
@@ -113,6 +114,69 @@ static int answer_statx(Tracee *tracee, const char *path, const char *host_path,
 		return status;
 
 	return write_data(tracee, buffer, &state.statx_buf, sizeof(state.statx_buf));
+}
+
+/**
+ * Answer the @tracee's stat(2)-like syscall at the entry stage, like
+ * answer_statx_at_entry() does statx(2): stat @path with @flags here,
+ * let the extensions correct the result for the file at @host_path
+ * (STAT_SYSCALL: ownership records, fake hard links) and write it to
+ * @buffer in the tracee.  This function returns 0 if it answered,
+ * -errno to answer with that error, or 1 if it can't answer.
+ */
+static int answer_stat(Tracee *tracee, const char *path, const char *host_path,
+		bool of_descriptor, int flags, word_t buffer)
+{
+	struct stat_syscall_state state = {};
+	int status;
+
+	/* Their struct stat is another one.  */
+	if (is_32on64_mode(tracee))
+		return 1;
+
+	strcpy(state.host_path, host_path);
+	state.of_descriptor = of_descriptor;
+	if (fstatat(AT_FDCWD, path, &state.stat_buf, flags) < 0)
+		return -errno;
+
+	status = notify_extensions(tracee, STAT_SYSCALL, (intptr_t) &state, 0);
+	if (status < 0)
+		return status;
+
+	return write_data(tracee, buffer, &state.stat_buf, sizeof(state.stat_buf));
+}
+
+/**
+ * answer_stat() for @host_path, the translation of the tracee's path.
+ */
+int answer_stat_at_entry(Tracee *tracee, const char host_path[PATH_MAX], int flags, word_t buffer)
+{
+	return answer_stat(tracee, host_path, host_path, false, flags, buffer);
+}
+
+/**
+ * answer_stat() for the descriptor @fd (fstat(2), or an empty path with
+ * AT_EMPTY_PATH), or the working directory for AT_FDCWD: through its
+ * link in /proc.
+ */
+int answer_stat_of_descriptor_at_entry(Tracee *tracee, int fd, word_t buffer)
+{
+	char host_path[PATH_MAX];
+	char link[64];
+	ssize_t length;
+
+	if (fd == AT_FDCWD)
+		snprintf(link, sizeof(link), "/proc/%d/cwd", tracee->pid);
+	else
+		snprintf(link, sizeof(link), "/proc/%d/fd/%d", tracee->pid, fd);
+
+	/* Not a descriptor of the tracee's: the kernel answers.  */
+	length = readlink(link, host_path, sizeof(host_path) - 1);
+	if (length < 0)
+		return 1;
+	host_path[length] = '\0';
+
+	return answer_stat(tracee, link, host_path, true, 0, buffer);
 }
 
 int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {

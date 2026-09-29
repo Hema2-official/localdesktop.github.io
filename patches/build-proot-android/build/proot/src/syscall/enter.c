@@ -171,6 +171,65 @@ static int translate_statx(Tracee *tracee, int dir_fd, char path[PATH_MAX])
 }
 
 /**
+ * Void the current syscall with @status if it is 0 (answered), and
+ * return it if it is an error; 1 (not answered) asks for the exit
+ * stage instead, where the extensions correct the kernel's result.
+ * This function returns the status for translate_syscall_enter().
+ */
+static int answered_or_exit_stage(Tracee *tracee, int status)
+{
+	if (status == 0) {
+		set_sysnum(tracee, PR_void);
+		poke_reg(tracee, SYSARG_RESULT, 0);
+	}
+	if (status <= 0)
+		return status;
+
+	tracee->restart_how = PTRACE_SYSCALL;
+	return 0;
+}
+
+/**
+ * Translate the path of fstatat(2) (newfstatat), @path relative to
+ * @dir_fd, and answer it right away (see answer_stat_at_entry()), as
+ * translate_statx() does statx(2).  This function returns -errno if an
+ * error occured, otherwise 0.
+ */
+static int translate_stat(Tracee *tracee, int dir_fd, char path[PATH_MAX])
+{
+	int flags = (int) peek_reg(tracee, CURRENT, SYSARG_4);
+	word_t buffer = peek_reg(tracee, CURRENT, SYSARG_3);
+	char host_path[PATH_MAX];
+	int status;
+
+	if (path[0] != '\0') {
+		status = translate_path(tracee, host_path, dir_fd, path,
+					(flags & AT_SYMLINK_NOFOLLOW) == 0);
+		if (status < 0)
+			return status;
+
+		status = answer_stat_at_entry(tracee, host_path, flags, buffer);
+		if (status > 0) {
+			status = set_sysarg_path(tracee, host_path, SYSARG_2);
+			if (status < 0)
+				return status;
+			status = 1;
+		}
+	}
+	/* An empty path: the descriptor's file (AT_EMPTY_PATH, what
+	 * glibc's fstat(3) does), or an error.  A NULL one is left to
+	 * the kernel.  */
+	else if (peek_reg(tracee, CURRENT, SYSARG_2) == 0)
+		status = 1;
+	else if ((flags & AT_EMPTY_PATH) == 0)
+		return -ENOENT;
+	else
+		status = answer_stat_of_descriptor_at_entry(tracee, dir_fd, buffer);
+
+	return answered_or_exit_stage(tracee, status);
+}
+
+/**
  * Translate the input arguments of the current @tracee's syscall in the
  * @tracee->pid process area. This function sets @tracee->status to
  * -errno if an error occured from the tracee's point-of-view (EFAULT
@@ -517,9 +576,25 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_sysarg(tracee, SYSARG_1, REGULAR);
 		break;
 
-	case PR_fchownat:
+	/* fstatat(2) is PR_fstatat64 on arm64, like fstatat64(2) on arm.  */
 	case PR_fstatat64:
 	case PR_newfstatat:
+		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
+
+		status = get_sysarg_path(tracee, path, SYSARG_2);
+		if (status < 0)
+			break;
+
+		status = translate_stat(tracee, dirfd, path);
+		break;
+
+	case PR_fstat:
+		status = answered_or_exit_stage(tracee,
+			answer_stat_of_descriptor_at_entry(tracee, (int) peek_reg(tracee, CURRENT, SYSARG_1),
+							peek_reg(tracee, CURRENT, SYSARG_2)));
+		break;
+
+	case PR_fchownat:
 	case PR_utimensat:
 	case PR_name_to_handle_at:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);

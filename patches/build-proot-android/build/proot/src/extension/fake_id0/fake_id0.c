@@ -315,9 +315,11 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_fchown,		FILTER_SYSEXIT },
 	{ PR_fchown32,		FILTER_SYSEXIT },
 	{ PR_fchownat,		FILTER_SYSEXIT },
-	{ PR_fstat,		FILTER_SYSEXIT },
+	/* fstat(2) and fstatat(2) are answered at entry (STAT_SYSCALL),
+	 * PRoot asks for the exit stage when it can't.  */
+	{ PR_fstat,		0 },
 	{ PR_fstat64,		FILTER_SYSEXIT },
-	{ PR_fstatat64,		FILTER_SYSEXIT },
+	{ PR_fstatat64,		0 },
 	{ PR_getegid,		0 },
 	{ PR_getegid32,		0 },
 	{ PR_geteuid,		0 },
@@ -339,7 +341,7 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_lstat64,		FILTER_SYSEXIT },
 	{ PR_mknod,		FILTER_SYSEXIT },
 	{ PR_mknodat,		FILTER_SYSEXIT },
-	{ PR_newfstatat,	FILTER_SYSEXIT },
+	{ PR_newfstatat,	0 },
 	{ PR_oldlstat,		FILTER_SYSEXIT },
 	{ PR_oldstat,		FILTER_SYSEXIT },
 	{ PR_sendmsg,		0 },
@@ -1286,6 +1288,13 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 		Config *config = talloc_get_type_abort(extension->config, Config);
 
 		return handle_sysexit_start(tracee, config);
+	}
+
+	case STAT_SYSCALL: {
+		Tracee *tracee = EXTENSION_TRACEE(extension);
+		Config *config = talloc_get_type_abort(extension->config, Config);
+
+		return fake_id0_handle_stat_syscall(tracee, config, data1);
 	}
 
 	case STATX_SYSCALL: {

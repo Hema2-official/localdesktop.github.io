@@ -27,6 +27,10 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, Reg stat_sysarg) {
 	if (result != 0)
 		return 0;
 
+	/* Answered at the entry stage (STAT_SYSCALL), already corrected.  */
+	if (get_sysnum(tracee, MODIFIED) == PR_void)
+		return 0;
+
 	address = peek_reg(tracee, ORIGINAL, stat_sysarg);
 
 	/* Sanity checks.  */
@@ -133,6 +137,10 @@ int handle_fstat_exit_end(Tracee *tracee, Config *config)
 	if (peek_reg(tracee, CURRENT, SYSARG_RESULT) != 0)
 		return 0;
 
+	/* Answered at the entry stage (STAT_SYSCALL), already corrected.  */
+	if (get_sysnum(tracee, MODIFIED) == PR_void)
+		return 0;
+
 	address = peek_reg(tracee, ORIGINAL, SYSARG_2);
 	snprintf(link, sizeof(link), "/proc/%d/fd/%d", tracee->pid, (int) peek_reg(tracee, ORIGINAL, SYSARG_1));
 	length = readlink(link, path, sizeof(path) - 1);
@@ -168,6 +176,10 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 	if (result != 0)
 		return 0;
 
+	/* Answered at the entry stage (STAT_SYSCALL), already corrected.  */
+	if (get_sysnum(tracee, MODIFIED) == PR_void)
+		return 0;
+
 	/* Get the pathname of the file to be 'stat'. */
 	if(sysnum == PR_fstatat64 || sysnum == PR_newfstatat)
 		status = read_sysarg_path(tracee, path, SYSARG_2, MODIFIED);
@@ -198,6 +210,52 @@ int handle_stat_exit_end(Tracee *tracee, Config *config, word_t sysnum) {
 }
 
 #endif /* ifdef USERLAND */
+
+/**
+ * Correct a stat(2)-like syscall answered at the entry stage
+ * (STAT_SYSCALL), as handle_stat_exit_end() and handle_fstat_exit_end()
+ * correct the kernel's result.
+ */
+int fake_id0_handle_stat_syscall(Tracee *tracee, Config *config, uintptr_t stat_state_raw)
+{
+	struct stat_syscall_state *state = (struct stat_syscall_state *) stat_state_raw;
+	struct stat *stat_buf = &state->stat_buf;
+#ifdef USERLAND
+	const char *path = state->host_path;
+	size_t length = strlen(path);
+	const char *deleted = " (deleted)";
+	size_t deleted_length = strlen(deleted);
+
+	if (path[0] == '/'
+	    && !(length >= deleted_length && strcmp(path + length - deleted_length, deleted) == 0)) {
+		char meta_path[PATH_MAX];
+		mode_t mode;
+		uid_t uid;
+		gid_t gid;
+
+		/* Like stat(2) by name: files outside the guest
+		 * (bindings) keep their real owner.  */
+		if (state->of_descriptor && !belongs_to_guestfs(tracee, path))
+			return 0;
+
+		if (get_meta_path((char *) path, meta_path) == 0
+		    && load_record(meta_path, &mode, &uid, &gid) == 0) {
+			stat_buf->st_mode = (mode & 07777) | (stat_buf->st_mode & (S_IFMT | 07000));
+			stat_buf->st_uid = uid;
+			stat_buf->st_gid = gid;
+			return 0;
+		}
+	}
+#else
+	(void) tracee;
+#endif
+	/* Files owned by the real user are the emulated one's.  */
+	if (stat_buf->st_uid == getuid())
+		stat_buf->st_uid = config->suid;
+	if (stat_buf->st_gid == getgid())
+		stat_buf->st_gid = config->sgid;
+	return 0;
+}
 
 int fake_id0_handle_statx_syscall(Tracee *tracee, Config *config, uintptr_t statx_state_raw) {
 	struct statx_syscall_state *state = (struct statx_syscall_state *) statx_state_raw;

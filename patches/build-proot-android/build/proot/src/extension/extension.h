@@ -149,6 +149,11 @@ typedef enum {
 	 * defined in tracee/statx.h
 	 * */
 	STATX_SYSCALL,
+
+	/* stat(2), lstat(2), fstatat(2) or fstat(2) is answered at the
+	 * entry stage: "data1" is a struct stat_syscall_state (see
+	 * tracee/statx.h), whose result the extension may correct.  */
+	STAT_SYSCALL,
 } ExtensionEvent;
 
 /* What HOST_PATH passes in "data2".  */

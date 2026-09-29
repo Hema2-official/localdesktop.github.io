@@ -349,6 +349,10 @@ static int handle_sysexit_end(Tracee *tracee)
 		if (result != 0)
 			return 0;
 
+		/* Answered at the entry stage (STAT_SYSCALL), already corrected.  */
+		if (get_sysnum(tracee, MODIFIED) == PR_void)
+			return 0;
+
 		if (sysnum == PR_fstat64 || sysnum == PR_fstat) {
 			status = readlink_proc_pid_fd(tracee->pid, peek_reg(tracee, MODIFIED, SYSARG_1), original);
 			if (status < 0) {
@@ -441,31 +445,54 @@ static int handle_sysexit_end(Tracee *tracee)
 	}
 }
 
-static void link2symlink_handle_statx(struct statx_syscall_state *state)
+/**
+ * The number of names of the fake hard link whose data file is at
+ * @host_path, from its name, or 0 if it isn't one.
+ */
+static int fake_link_count(const char *host_path)
 {
-	if (!(state->statx_buf.stx_mask & STATX_NLINK))
-		return;
-
-	const char *path_ending = strrchr(state->host_path, '/');
+	const char *path_ending = strrchr(host_path, '/');
 	if (NULL == path_ending)
-		return;
+		return 0;
 
 	size_t ending_len = strlen(path_ending);
 	if (ending_len < strlen(PREFIX) + 6) /* 6 = strlen("/") + strlen(".0002") */
-		return;
+		return 0;
 
 	if (0 != strncmp(path_ending + 1, PREFIX, strlen(PREFIX)))
-		return;
+		return 0;
 
 	if (path_ending[ending_len - 5] != '.')
-		return;
+		return 0;
 
 	for (size_t i = 1; i <= 4; i++) {
 		if (!isdigit(path_ending[ending_len - i]))
-			return;
+			return 0;
 	}
 
-	state->statx_buf.stx_nlink = atoi(&path_ending[ending_len - 4]);
+	return atoi(&path_ending[ending_len - 4]);
+}
+
+static void link2symlink_handle_statx(struct statx_syscall_state *state)
+{
+	int count;
+
+	if (!(state->statx_buf.stx_mask & STATX_NLINK))
+		return;
+
+	count = fake_link_count(state->host_path);
+	if (count > 0)
+		state->statx_buf.stx_nlink = count;
+}
+
+/* stat(2) answered at the entry stage: the translation already led to
+ * a fake hard link's data file, see translated_path().  */
+static void link2symlink_handle_stat(struct stat_syscall_state *state)
+{
+	int count = fake_link_count(state->host_path);
+
+	if (count > 0)
+		state->stat_buf.st_nlink = count;
 }
 
 /* The last host path the translation of a guest path ended with, and
@@ -669,12 +696,14 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 			{ PR_linkat,		FILTER_SYSEXIT },
 			{ PR_unlink,		FILTER_SYSEXIT },
 			{ PR_unlinkat,		FILTER_SYSEXIT },
-			{ PR_fstat,		FILTER_SYSEXIT },
+			/* Answered at entry (STAT_SYSCALL), PRoot asks for
+			 * the exit stage when it can't.  */
+			{ PR_fstat,		0 },
 			{ PR_fstat64,		FILTER_SYSEXIT },
-			{ PR_fstatat64,		FILTER_SYSEXIT },
+			{ PR_fstatat64,		0 },
 			{ PR_lstat,		FILTER_SYSEXIT },
 			{ PR_lstat64,		FILTER_SYSEXIT },
-			{ PR_newfstatat,	FILTER_SYSEXIT },
+			{ PR_newfstatat,	0 },
 			{ PR_stat,		FILTER_SYSEXIT },
 			{ PR_stat64,		FILTER_SYSEXIT },
 			{ PR_rename,		FILTER_SYSEXIT },
@@ -825,6 +854,10 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 
 	case STATX_SYSCALL:
 		link2symlink_handle_statx((struct statx_syscall_state *) data1);
+		return 0;
+
+	case STAT_SYSCALL:
+		link2symlink_handle_stat((struct stat_syscall_state *) data1);
 		return 0;
 
 	default:
