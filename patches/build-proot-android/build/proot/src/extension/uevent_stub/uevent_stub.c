@@ -158,10 +158,10 @@ int uevent_stub_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYSCALL_ENTER_END:
-		return handle_sysenter_end(TRACEE(extension));
+		return handle_sysenter_end(EXTENSION_TRACEE(extension));
 
 	case SYSCALL_EXIT_END:
-		return handle_sysexit_end(TRACEE(extension));
+		return handle_sysexit_end(EXTENSION_TRACEE(extension));
 
 	default:
 		return 0;

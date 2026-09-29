@@ -1172,7 +1172,7 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 	}
 
 	case HOST_PATH: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 		const HostPath *info = (const HostPath *) data2;
 
@@ -1234,21 +1234,21 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 #endif
 
 	case SYSCALL_ENTER_END: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 
 		return handle_sysenter_end(tracee, config);
 	}
 
 	case SYSCALL_EXIT_END: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 
 		return handle_sysexit_end(tracee, config);
 	}
 
 	case SIGSYS_OCC: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 		word_t sysnum = get_sysnum(tracee, CURRENT);
 		int status;
@@ -1282,14 +1282,14 @@ int fake_id0_callback(Extension *extension, ExtensionEvent event, intptr_t data1
 	}
 
 	case SYSCALL_EXIT_START: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 
 		return handle_sysexit_start(tracee, config);
 	}
 
 	case STATX_SYSCALL: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 
 		return fake_id0_handle_statx_syscall(tracee, config, data1);

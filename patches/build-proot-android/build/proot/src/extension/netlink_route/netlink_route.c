@@ -1013,7 +1013,7 @@ int netlink_route_callback(Extension *extension, ExtensionEvent event,
 		return 1;
 
 	case SYSCALL_ENTER_END: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 
 		/* The syscall already failed, or the tracee is 32-bit.  */
 		if ((int) data1 < 0 || is_32on64_mode(tracee))
@@ -1022,7 +1022,7 @@ int netlink_route_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYSCALL_EXIT_END: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 
 		if (!is_32on64_mode(tracee))
 			handle_sysexit_end(tracee, talloc_get_type_abort(extension->config, Config));
@@ -1030,7 +1030,7 @@ int netlink_route_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYSCALL_CHAINED_EXIT: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 
 		if (!is_32on64_mode(tracee))
 			handle_chained_exit(tracee, talloc_get_type_abort(extension->config, Config));
@@ -1041,9 +1041,10 @@ int netlink_route_callback(Extension *extension, ExtensionEvent event,
 		int status = (int) data1;
 
 		/* Signals would restart the tracee without stopping at its next syscall
-		 * otherwise; syscall stops set that themselves.  */
-		if (WIFSTOPPED(status) && ((status >> 8) & 0xffff) != (SIGTRAP | 0x80))
-			keep_stopping(TRACEE(extension),
+		 * otherwise; syscall and event stops set that themselves.  This runs at
+		 * every stop, so look at the configuration only for signals.  */
+		if (WIFSTOPPED(status) && (status >> 16) == 0 && WSTOPSIG(status) != (SIGTRAP | 0x80))
+			keep_stopping(EXTENSION_TRACEE(extension),
 				talloc_get_type_abort(extension->config, Config));
 		return 0;
 	}

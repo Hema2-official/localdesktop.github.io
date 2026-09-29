@@ -45,7 +45,7 @@ int port_switch_callback(Extension *extension, ExtensionEvent event, intptr_t da
     }
     
     case SYSCALL_ENTER_END: {
-        Tracee *tracee = TRACEE(extension);
+        Tracee *tracee = EXTENSION_TRACEE(extension);
         
         /** The 4 system calls that will be changed are bind, connect, sendto, and socketcall. 
          *  Socketcall is a wrapper function for the i386 architecture that wraps the first 3 system calls.

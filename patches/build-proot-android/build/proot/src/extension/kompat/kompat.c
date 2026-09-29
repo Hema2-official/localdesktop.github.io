@@ -1012,7 +1012,7 @@ int kompat_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYSCALL_ENTER_END: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 
 		/* Nothing to do if this syscall is being discarded
@@ -1024,14 +1024,14 @@ int kompat_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYSCALL_EXIT_END: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 
 		return handle_sysexit_end(tracee, config);
 	}
 
 	case SYSCALL_EXIT_START: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Config *config = talloc_get_type_abort(extension->config, Config);
 		word_t result = peek_reg(tracee, CURRENT, SYSARG_RESULT);;
 		word_t sysnum = get_sysnum(tracee, ORIGINAL);

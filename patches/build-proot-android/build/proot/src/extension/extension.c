@@ -67,6 +67,7 @@ static Extension *new_extension(Tracee *tracee, extension_callback_t callback)
 	if (extension == NULL)
 		return NULL;
 	extension->callback = callback;
+	extension->tracee = tracee;
 
 	/* Attach it to its tracee. */
 	LIST_INSERT_HEAD(tracee->extensions, extension, link);

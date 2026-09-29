@@ -132,7 +132,7 @@ static int sysvipc_proc_handler(
 		Extension *extension,
 		void (*handler)(FILE *proc_file, struct SysVIpcNamespace *ipc_namespace)
 		) {
-	Tracee *tracee = TRACEE(extension);
+	Tracee *tracee = EXTENSION_TRACEE(extension);
 	struct SysVIpcConfig *config = extension->config;
 
 	const char *path = create_temp_file(tracee->ctx, "prootseq");
@@ -160,7 +160,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 	switch (event) {
 	case INITIALIZATION:
 	{
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		struct SysVIpcConfig *config = talloc_zero(extension, struct SysVIpcConfig);
 		config->ipc_namespace = talloc_zero(config, struct SysVIpcNamespace);
 		talloc_set_destructor(config->ipc_namespace, sysvipc_shm_namespace_destructor);
@@ -184,7 +184,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 		if (data2 & CLONE_THREAD) {
 			child_config->process = talloc_reference(child_config, parent_config->process);
 		} else {
-			Tracee *tracee = TRACEE(extension);
+			Tracee *tracee = EXTENSION_TRACEE(extension);
 			child_config->process = talloc_zero(child_config, struct SysVIpcProcess);
 			child_config->process->pgid = tracee->pid;
 			sysvipc_shm_inherit_process(parent_config->process, child_config->process);
@@ -199,7 +199,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 	case SYSCALL_ENTER_END:
 		/* If we've just finished execve remove mapped shms from this process  */
 		if (data1 == 0) {
-			Tracee *tracee = TRACEE(extension);
+			Tracee *tracee = EXTENSION_TRACEE(extension);
 			if (get_sysnum(tracee, CURRENT) == PR_execve) {
 				struct SysVIpcConfig *config = extension->config;
 				sysvipc_shm_remove_mappings_from_process(config->process);
@@ -209,7 +209,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 
 	case SYSCALL_ENTER_START:
 	{
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		struct SysVIpcConfig *config = extension->config;
 		switch (config->wait_state) {
 		case WSTATE_NOT_WAITING:
@@ -237,14 +237,14 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 
 	case SIGSYS_OCC:
 	{
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		struct SysVIpcConfig *config = extension->config;
 		return sysvipc_syscall_common(tracee, config, true);
 	}
 
 	case SYSCALL_EXIT_START:
 	{
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		struct SysVIpcConfig *config = extension->config;
 		if (config->chain_state >= CSTATE_SHMAT_SOCKET && config->chain_state <= CSTATE_SHMAT_MMAP) {
 			assert(config->chain_state == CSTATE_SHMAT_SOCKET);
@@ -296,7 +296,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 			break;
 		case WSTATE_RESTARTED_INTO_PPOLL_CANCELED:
 		{
-			Tracee *tracee = TRACEE(extension);
+			Tracee *tracee = EXTENSION_TRACEE(extension);
 			poke_reg(tracee, SYSARG_3, 1);
 			config->wait_state = WSTATE_SIGNALED_PPOLL;
 			break;
@@ -309,7 +309,7 @@ int sysvipc_callback(Extension *extension, ExtensionEvent event, intptr_t data1,
 
 	case SYSCALL_CHAINED_EXIT:
 	{
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		struct SysVIpcConfig *config = extension->config;
 		switch (config->wait_state) {
 		case WSTATE_NOT_WAITING:

@@ -110,7 +110,7 @@ int fix_symlink_size_callback(Extension *extension, ExtensionEvent event,
     }
 
     case SYSCALL_EXIT_END: {
-        return handle_sysexit_end(TRACEE(extension));
+        return handle_sysexit_end(EXTENSION_TRACEE(extension));
     }
 
     default:

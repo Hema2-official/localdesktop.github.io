@@ -189,7 +189,7 @@ int hidden_files_callback(Extension *extension, ExtensionEvent event,
 
     case SYSCALL_CHAINED_EXIT:
     case SYSCALL_EXIT_END: {
-        return handle_getdents(TRACEE(extension));
+        return handle_getdents(EXTENSION_TRACEE(extension));
     }
 
     default:

@@ -182,12 +182,19 @@ typedef struct extension {
 	/* List of sysnum handled by this extension.  */
 	const FilteredSysnum *filtered_sysnums;
 
+	/* The tracee it belongs to, see EXTENSION_TRACEE().  */
+	Tracee *tracee;
+
 	/* Link to the next and previous extensions.  Note the order
 	 * is *never* garantee.  */
 	LIST_ENTRY(extension) link;
 } Extension;
 
 typedef LIST_HEAD(extensions, extension) Extensions;
+
+/* The tracee @extension belongs to: TRACEE() finds it through talloc's
+ * tree, which costs a walk through its siblings at every event.  */
+#define EXTENSION_TRACEE(extension) ((extension)->tracee)
 
 extern int initialize_extension(Tracee *tracee, extension_callback_t callback, const char *cli);
 extern void inherit_extensions(Tracee *child, Tracee *parent, word_t clone_flags);

@@ -129,7 +129,7 @@ int mountinfo_callback(Extension *extension, ExtensionEvent event,
     switch (event) {
     case TRANSLATED_PATH:
 	{
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		Sysnum num = get_sysnum(tracee, ORIGINAL);
 		if (num == PR_open || num == PR_openat) {
 			mountinfo_check_open_path(tracee, (char*) data1);

@@ -637,6 +637,13 @@ static void reparent_config(Tracee *new_parent, Tracee *old_parent)
 	REPARENT(extensions);
 
 #undef REPARENT
+
+	if (new_parent->extensions != NULL) {
+		Extension *extension;
+
+		LIST_FOREACH(extension, new_parent->extensions, link)
+			extension->tracee = new_parent;
+	}
 }
 
 /**

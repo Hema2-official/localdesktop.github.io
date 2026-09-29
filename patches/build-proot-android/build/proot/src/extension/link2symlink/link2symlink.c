@@ -687,7 +687,7 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYSCALL_ENTER_END: {
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 
 		switch (get_sysnum(tracee, ORIGINAL)) {
 		case PR_rename:
@@ -806,7 +806,7 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 	}
 
 	case SYSCALL_EXIT_END: {
-		return handle_sysexit_end(TRACEE(extension));
+		return handle_sysexit_end(EXTENSION_TRACEE(extension));
 	}
 
 	case GUEST_PATH:
@@ -819,7 +819,7 @@ int link2symlink_callback(Extension *extension, ExtensionEvent event,
 		return 0;
 
 	case TRANSLATED_PATH:
-		translated_path(TRACEE(extension), (char *) data1);
+		translated_path(EXTENSION_TRACEE(extension), (char *) data1);
 		last_final_is_known = false;
 		return 0;
 

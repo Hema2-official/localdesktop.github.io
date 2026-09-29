@@ -121,7 +121,7 @@ static int ashmem_memfd_handle_memfd_create(Extension *extension, Tracee *tracee
 }
 
 static void ashmem_memfd_handle_syscall(Extension *extension) {
-	Tracee *tracee = TRACEE(extension);
+	Tracee *tracee = EXTENSION_TRACEE(extension);
 	switch (get_sysnum(tracee, CURRENT)) {
 	case PR_memfd_create:
 	{
@@ -209,14 +209,14 @@ int ashmem_memfd_callback(Extension *extension, ExtensionEvent event, intptr_t d
 			case CS_STAT_CHAINED_IOCTL:
 				break;
 			case CS_STAT_ENTERED:
-				ashmem_memfd_handle_stat_exit(TRACEE(extension), state);
+				ashmem_memfd_handle_stat_exit(EXTENSION_TRACEE(extension), state);
 				break;
 		}
 		return 0;
 	}
 	case SIGSYS_OCC:
 	{
-		Tracee *tracee = TRACEE(extension);
+		Tracee *tracee = EXTENSION_TRACEE(extension);
 		if (get_sysnum(tracee, CURRENT) == PR_memfd_create) {
 			return ashmem_memfd_handle_memfd_create(extension, tracee, true);
 		}
@@ -227,7 +227,7 @@ int ashmem_memfd_callback(Extension *extension, ExtensionEvent event, intptr_t d
 		AshmemMemfdState *state = talloc_get_type_abort(extension->config, AshmemMemfdState);
 		if (state->chain_state == CS_STAT_CHAINED_IOCTL) {
 			state->chain_state = CS_IDLE;
-			Tracee *tracee = TRACEE(extension);
+			Tracee *tracee = EXTENSION_TRACEE(extension);
 			poke_uint32(tracee, state->addr, peek_reg(tracee, CURRENT, SYSARG_RESULT));
 			poke_reg(tracee, SYSARG_RESULT, 0);
 		}
