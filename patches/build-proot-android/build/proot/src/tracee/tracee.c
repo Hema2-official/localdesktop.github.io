@@ -48,6 +48,15 @@
 
 static Tracees tracees;
 
+/* Tracees by pid, in front of the list: every stop looks its tracee
+ * up, and with a desktop running there are hundreds of them.  A slot
+ * only counts if the tracee there still has that pid.  */
+#define TRACEE_CACHE_SIZE 1024
+static Tracee *tracee_cache[TRACEE_CACHE_SIZE];
+
+/* How many tracees wait for free_terminated_tracees().  */
+static size_t nb_terminated_tracees;
+
 
 /**
  * Remove @zombie from its parent's list of zombies.  Note: this is a
@@ -89,6 +98,10 @@ static int remove_tracee(Tracee *tracee)
 	int event;
 
 	LIST_REMOVE(tracee, link);
+	if (tracee_cache[(unsigned int) tracee->pid % TRACEE_CACHE_SIZE] == tracee)
+		tracee_cache[(unsigned int) tracee->pid % TRACEE_CACHE_SIZE] = NULL;
+	if (tracee->terminated)
+		nb_terminated_tracees--;
 
 	/* Clean objects that are linked to this tracee's life
 	 * span.  */
@@ -327,17 +340,24 @@ Tracee *get_tracee(const Tracee *current_tracee, pid_t pid, bool create)
 	if (current_tracee != NULL && current_tracee->pid == pid)
 		return (Tracee *)current_tracee;
 
-	LIST_FOREACH(tracee, &tracees, link) {
-		if (tracee->pid == pid) {
-			/* Flush then allocate a new memory collector.  */
-			TALLOC_FREE(tracee->ctx);
-			tracee->ctx = talloc_new(tracee);
-
-			return tracee;
+	tracee = tracee_cache[(unsigned int) pid % TRACEE_CACHE_SIZE];
+	if (tracee == NULL || tracee->pid != pid) {
+		LIST_FOREACH(tracee, &tracees, link) {
+			if (tracee->pid == pid)
+				break;
 		}
+		if (tracee == NULL)
+			return (create ? new_tracee(pid) : NULL);
+		tracee_cache[(unsigned int) pid % TRACEE_CACHE_SIZE] = tracee;
 	}
 
-	return (create ? new_tracee(pid) : NULL);
+	/* Flush the memory collector.  */
+	if (tracee->ctx != NULL)
+		talloc_free_children(tracee->ctx);
+	else
+		tracee->ctx = talloc_new(tracee);
+
+	return tracee;
 }
 
 /**
@@ -345,6 +365,8 @@ Tracee *get_tracee(const Tracee *current_tracee, pid_t pid, bool create)
  */
 void terminate_tracee(Tracee *tracee)
 {
+	if (!tracee->terminated)
+		nb_terminated_tracees++;
 	tracee->terminated = true;
 
 	/* Case where the terminated tracee is marked
@@ -362,6 +384,10 @@ void terminate_tracee(Tracee *tracee)
 void free_terminated_tracees()
 {
 	Tracee *next;
+
+	/* Called before every stop: don't walk all tracees for nothing.  */
+	if (nb_terminated_tracees == 0)
+		return;
 
 	/* Items can't be deleted when using LIST_FOREACH.  */
 	next = tracees.lh_first;
