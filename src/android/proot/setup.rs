@@ -22,6 +22,7 @@ use pathdiff::diff_paths;
 use sha2::{Digest, Sha256};
 use smithay::utils::Clock;
 use std::{
+    ffi::CString,
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Read, Write},
     os::unix::fs::{symlink, PermissionsExt},
@@ -1265,6 +1266,87 @@ exec "$@"
     None
 }
 
+/// The realpath(3) that asks proot for the whole answer (src/guest/realpath.c), as the APK has it
+/// and where the rootfs gets it.
+const FAST_REALPATH_ASSET: &str = "guest/librealpath.so";
+const FAST_REALPATH_LIB: &str = "/usr/local/lib/localdesktop/librealpath.so";
+const LD_SO_PRELOAD: &str = "etc/ld.so.preload";
+
+/// glibc's realpath(3) readlinks every component of a path to find its symlinks, and proot stops
+/// the program for each; with Node, Vite resolves every module that way. The preloaded library
+/// asks proot once per path instead. `[performance] fast_realpath = false` unloads it.
+fn setup_fast_realpath(options: &SetupOptions) -> StageOutput {
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    let mut wanted = get_application_context()
+        .local_config
+        .performance
+        .fast_realpath;
+    if wanted {
+        if let Err(error) = install_fast_realpath(&options.android_app, fs_root) {
+            // A preloaded library that isn't there makes every program complain.
+            log::warn!("Could not install {FAST_REALPATH_LIB}: {error}");
+            wanted = false;
+        }
+    }
+    if let Err(error) = set_preload_line(fs_root, FAST_REALPATH_LIB, wanted) {
+        log::warn!("Could not update /{LD_SO_PRELOAD}: {error}");
+    }
+    None
+}
+
+fn install_fast_realpath(android_app: &AndroidApp, fs_root: &Path) -> std::io::Result<()> {
+    let name = CString::new(FAST_REALPATH_ASSET).expect("asset name");
+    let mut asset = android_app
+        .asset_manager()
+        .open(&name)
+        .ok_or_else(|| std::io::Error::new(ErrorKind::NotFound, "not in the APK"))?;
+    let mut bytes = Vec::with_capacity(asset.length());
+    asset.read_to_end(&mut bytes)?;
+
+    let path = fs_root.join(FAST_REALPATH_LIB.trim_start_matches('/'));
+    if fs::read(&path).is_ok_and(|installed| installed == bytes) {
+        return Ok(());
+    }
+    // Replaced in one step: running programs may have the old one mapped.
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let new = path.with_extension("so.new");
+    fs::write(&new, &bytes)?;
+    fs::set_permissions(&new, fs::Permissions::from_mode(0o755))?;
+    fs::rename(&new, &path)
+}
+
+/// Add `library` to the rootfs' /etc/ld.so.preload, or take it out, keeping anything else there.
+fn set_preload_line(fs_root: &Path, library: &str, present: bool) -> std::io::Result<()> {
+    let path = fs_root.join(LD_SO_PRELOAD);
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let mut lines: Vec<&str> = content
+        .lines()
+        .filter(|line| line.trim() != library)
+        .collect();
+    if present {
+        lines.push(library);
+    }
+    if lines.iter().all(|line| line.trim().is_empty()) {
+        return match fs::remove_file(&path) {
+            Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    let wanted = lines.join("\n") + "\n";
+    if wanted != content {
+        fs::write(&path, wanted)?;
+        // Every user's programs read it.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(())
+}
+
 fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
 
@@ -2046,6 +2128,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(simulate_linux_sysdata_stage), // Step 2. Simulate Linux system data
         Box::new(apply_desktop_choice),         // Step 3. Write the desktop chosen on a fresh install
         Box::new(install_dependencies),         // Step 4. Install dependencies
+        Box::new(setup_fast_realpath), // Step 4b. realpath(3) in one question to proot, for every program
         Box::new(setup_machine_id),             // Step 5. Seed /etc/machine-id for D-Bus clients
         Box::new(setup_time_zone),              // Step 6. Follow Android's time zone
         Box::new(setup_pipewire_package_lock), // Step 7. Hold guest PipeWire packages for the Android-side PipeWire POC

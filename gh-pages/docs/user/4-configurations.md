@@ -96,4 +96,11 @@ Programs in Local Desktop run under proot, which steps in on many of their syste
 cpu_boost = "max"
 ```
 
-It takes effect the next time Local Desktop starts.
+Programs also turn paths into their full, canonical form with `realpath()`, some of them a lot: Node.js tools such as Vite do it for every file they load. glibc's version checks each part of the path in turn, and proot steps in for every one of them. Local Desktop loads a `realpath()` into every program (through `/etc/ld.so.preload`) that asks proot for the whole answer at once. That makes it three to four times faster, and Vite's first page loads about 15 % sooner; in return, starting a program takes about a quarter of a millisecond longer. To use glibc's own:
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[performance]
+fast_realpath = false
+```
+
+Both take effect the next time Local Desktop starts.

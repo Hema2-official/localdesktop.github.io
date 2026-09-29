@@ -319,8 +319,22 @@ int readlink_proc_pid_fd(pid_t pid, int fd, char path[PATH_MAX])
 int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 		const char *user_path, bool deref_final)
 {
+	return translate_path_with_guest(tracee, result, dir_fd, user_path, deref_final, NULL);
+}
+
+/**
+ * translate_path(), which also copies in @canonical_path, if not NULL,
+ * the canonical guest path it translated: the empty string if an
+ * extension translated @user_path itself.
+ */
+int translate_path_with_guest(Tracee *tracee, char result[PATH_MAX], int dir_fd,
+			const char *user_path, bool deref_final, char canonical_path[PATH_MAX])
+{
 	char guest_path[PATH_MAX];
 	int status;
+
+	if (canonical_path != NULL)
+		canonical_path[0] = '\0';
 
 	if (profile_paths_enabled)
 		profile_path(tracee, user_path);
@@ -377,6 +391,9 @@ int translate_path(Tracee *tracee, char result[PATH_MAX], int dir_fd,
 	status = canonicalize(tracee, guest_path, deref_final, result, 0);
 	if (status < 0)
 		return status;
+
+	if (canonical_path != NULL)
+		strcpy(canonical_path, result);
 
 	/* Final binding substitution to convert "result" into a host
 	 * path, since canonicalize() works from the guest

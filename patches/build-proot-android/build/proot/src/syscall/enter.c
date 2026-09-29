@@ -195,6 +195,152 @@ static int translate_readlink(Tracee *tracee, int dir_fd, char path[PATH_MAX], R
 	return set_sysarg_path(tracee, host_path, reg);
 }
 
+/* readlinkat(2) with this descriptor, which no process can have, asks
+ * PRoot what realpath(3) returns for the path, see answer_realpath().
+ * Local Desktop's realpath(3) asks this (src/guest/realpath.c in its
+ * repository).  */
+#define REALPATH_DIRFD (-1279545936)
+
+/* How many symlinks glibc's realpath(3) follows.  */
+#define REALPATH_MAX_LINKS 40
+
+/**
+ * Answer readlinkat(REALPATH_DIRFD, @user_path, buffer, size) with what
+ * realpath(3) returns for @user_path, relative to the current directory:
+ * the canonical guest path of a file that exists.  That is one stop
+ * instead of glibc's readlink(2) of every component.  The answer ends
+ * with a '\0', counted in the length, which no symlink's target has: it
+ * tells this answer from what readlink(2) would return anywhere else.
+ * Symlinks are followed, but not the fake hard links of the link2symlink
+ * extension: their name is where the file is, as for any hard link.
+ * Paths out of the guest rootfs (in /proc or other bindings) are left to
+ * realpath(3) itself: EBADF, the kernel's answer to that descriptor,
+ * tells it to walk the path the long way.  This function returns -errno
+ * if an error occured, otherwise 0.
+ */
+static int answer_realpath(Tracee *tracee, const char user_path[PATH_MAX])
+{
+	word_t buffer = peek_reg(tracee, CURRENT, SYSARG_3);
+	word_t size = peek_reg(tracee, CURRENT, SYSARG_4);
+	char guest_path[PATH_MAX];
+	char host_path[PATH_MAX];
+	char link_path[PATH_MAX];
+	char directory[PATH_MAX];
+	char target[PATH_MAX];
+	char path[PATH_MAX];
+	unsigned int links;
+	size_t length;
+	int status;
+
+	if (user_path[0] == '\0')
+		return -ENOENT;
+	strcpy(path, user_path);
+
+	for (links = 0; ; links++) {
+		struct stat statl;
+		ssize_t target_length;
+		bool want_directory = false;
+		char *slash;
+		int type;
+
+		/* All of it resolved but its last component, unless a
+		 * trailing "/" or "/." asks for a directory there.  */
+		set_final_type_only(true);
+		status = translate_path_with_guest(tracee, host_path, AT_FDCWD, path, false, guest_path);
+		set_final_type_only(false);
+		/* canonicalize() gives up on fewer nested symlinks than
+		 * glibc does.  */
+		if (status == -ELOOP)
+			return -EBADF;
+		if (status < 0)
+			return status;
+		if (guest_path[0] == '\0' || !belongs_to_guestfs(tracee, host_path))
+			return -EBADF;
+
+		length = strlen(guest_path);
+		if (length > 1 && guest_path[length - 1] == '/') {
+			guest_path[--length] = '\0';
+			want_directory = true;
+		}
+		else if (length >= 2 && strcmp(guest_path + length - 2, "/.") == 0) {
+			length = length > 2 ? length - 2 : 1;
+			guest_path[length] = '\0';
+			want_directory = true;
+		}
+
+		if (want_directory) {
+			if (stat(host_path, &statl) < 0)
+				return -errno;
+			if (!S_ISDIR(statl.st_mode))
+				return -ENOTDIR;
+			break;
+		}
+
+		/* The link2symlink extension replaced a fake hard link with
+		 * its data file, which has to be there.  */
+		strcpy(link_path, guest_path);
+		status = substitute_binding(tracee, GUEST, link_path);
+		if (status < 0)
+			return status;
+		if (strcmp(link_path, host_path) != 0) {
+			if (lstat(host_path, &statl) < 0)
+				return -errno;
+			break;
+		}
+
+		/* What canonicalize() found at the end, or the kernel's
+		 * error if nothing.  */
+		type = final_component_type(host_path);
+		if (type <= 0) {
+			if (lstat(host_path, &statl) < 0)
+				return -errno;
+			type = statl.st_mode & S_IFMT;
+		}
+		if (type != S_IFLNK)
+			break;
+
+		/* A symlink: go on from its target, which is relative to
+		 * where the symlink is.  */
+		if (links >= REALPATH_MAX_LINKS)
+			return -ELOOP;
+
+		target_length = readlink(host_path, target, sizeof(target));
+		if (target_length < 0)
+			return -errno;
+		if ((size_t) target_length >= sizeof(target))
+			return -ENAMETOOLONG;
+		target[target_length] = '\0';
+
+		status = detranslate_path(tracee, target, host_path);
+		if (status < 0)
+			return status;
+
+		if (target[0] == '/') {
+			strcpy(path, target);
+			continue;
+		}
+
+		strcpy(directory, guest_path);
+		slash = strrchr(directory, '/');
+		slash[slash == directory ? 1 : 0] = '\0';
+		status = join_paths(2, path, directory, target);
+		if (status < 0)
+			return status;
+	}
+
+	length = strlen(guest_path) + 1;
+	if (length > size)
+		return -ENAMETOOLONG;
+
+	status = write_data(tracee, buffer, guest_path, length);
+	if (status < 0)
+		return status;
+
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, length);
+	return 0;
+}
+
 /**
  * Translate the path of statx(2), @path relative to @dir_fd, and
  * answer it right away (see answer_statx_at_entry()).  When that isn't
@@ -795,7 +941,10 @@ int translate_syscall_enter(Tracee *tracee)
 		if (status < 0)
 			break;
 
-		status = translate_readlink(tracee, dirfd, path, SYSARG_2);
+		if (dirfd == REALPATH_DIRFD)
+			status = answer_realpath(tracee, path);
+		else
+			status = translate_readlink(tracee, dirfd, path, SYSARG_2);
 		break;
 
 	case PR_unlinkat:

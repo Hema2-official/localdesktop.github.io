@@ -8,6 +8,7 @@ android:
     - assets/unsupported.html
     - assets/ld-linux-aarch64.so.1
     - assets/wireplumber-share.tar
+    - assets/guest
   runtime_libs:
     - assets/libs
   gradle: true

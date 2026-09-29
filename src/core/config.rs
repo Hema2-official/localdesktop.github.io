@@ -163,6 +163,10 @@ pub struct PerformanceConfig {
     /// back to `balanced` instead of invalidating the section.
     #[serde(default = "default_cpu_boost")]
     pub cpu_boost: String,
+    /// Load a realpath(3) that asks proot for the whole answer at once into every program
+    /// (through /etc/ld.so.preload), instead of glibc's, which stops for each part of the path.
+    #[serde(default = "default_true")]
+    pub fast_realpath: bool,
 }
 
 fn default_cpu_boost() -> String {
@@ -173,6 +177,7 @@ impl Default for PerformanceConfig {
     fn default() -> Self {
         Self {
             cpu_boost: default_cpu_boost(),
+            fast_realpath: true,
         }
     }
 }
@@ -367,7 +372,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("desktop", &["preset"]),
     ("ssh", &["enabled", "port", "password_login", "authorized_keys"]),
     ("graphics", &["adreno_drivers"]),
-    ("performance", &["cpu_boost"]),
+    ("performance", &["cpu_boost", "fast_realpath"]),
     ("command", &["check", "install", "launch"]),
 ];
 
@@ -634,6 +639,19 @@ mod tests {
         });
         with_config_file("[performance]\ncpu_boost = \"turbo\"\n", |full_config_path| {
             assert_eq!(parse_config(full_config_path).performance.utilization_floor(), 512);
+        });
+    }
+
+    #[test]
+    fn should_use_the_fast_realpath_unless_turned_off() {
+        with_config_file("[performance]\ncpu_boost = \"max\"\n", |full_config_path| {
+            assert!(parse_config(full_config_path).performance.fast_realpath);
+        });
+        with_config_file("[performance]\nfast_realpath = false\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert!(!config.performance.fast_realpath);
+            assert_eq!(config.performance.utilization_floor(), 512);
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
         });
     }
 

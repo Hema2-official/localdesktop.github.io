@@ -253,6 +253,46 @@ print(len(socket.if_nameindex()), socket.if_nametoindex("lo"), end="")
         *) fail "network interfaces can be listed" "$(echo "$interfaces" | tail -1)" ;;
     esac
 fi
+# realpath(3) (Node's fs.realpathSync.native, Qt, Rust): Local Desktop preloads one that asks proot
+# for the whole answer (src/guest/realpath.c). It has to say what glibc's own says, through
+# symlinks, hard links (link2symlink), trailing slashes, errors and paths it leaves to glibc.
+if command -v python3 > /dev/null; then
+    mkdir -p realpath/dir/sub && echo x > realpath/dir/sub/file && ln -s dir/sub realpath/rel \
+        && ln realpath/dir/sub/file realpath/hard 2>/dev/null && ln -s hard realpath/tohard \
+        && ln -s nowhere realpath/dangling
+    realpaths=$(cd realpath && python3 - <<'PY' 2>&1
+import ctypes, errno, os
+fast = ctypes.CDLL(None, use_errno=True)
+glibc = ctypes.CDLL("libc.so.6", use_errno=True)
+for lib in (fast, glibc):
+    lib.realpath.restype = ctypes.c_void_p
+    lib.realpath.argtypes = [ctypes.c_char_p, ctypes.c_void_p]
+glibc.free.argtypes = [ctypes.c_void_p]
+def realpath(lib, path):
+    ctypes.set_errno(0)
+    result = lib.realpath(path.encode(), None)
+    if not result:
+        return errno.errorcode.get(ctypes.get_errno(), "?")
+    value = ctypes.string_at(result).decode()
+    glibc.free(result)
+    return value
+paths = ["rel/file", "rel/..", "hard", "tohard", "rel/file/", "dangling", "missing/x", ".",
+         os.getcwd() + "/rel/", "/proc/self/cwd", "/dev/null"]
+different = [p for p in paths if realpath(fast, p) != realpath(glibc, p)]
+# Whether proot answers the question the preloaded realpath(3) asks.
+glibc.syscall.restype = ctypes.c_long
+answer = ctypes.create_string_buffer(8)
+length = glibc.syscall(ctypes.c_long(78), ctypes.c_long(-1279545936), b"/", answer, ctypes.c_long(8))
+print("different: " + " ".join(different) if different else "same", "answered" if length == 2 else "unanswered")
+PY
+)
+    case "$realpaths" in
+        same*) pass "realpath() says what glibc's does" ;;
+        *) fail "realpath() says what glibc's does" "$realpaths" ;;
+    esac
+    grep -qs librealpath /etc/ld.so.preload && preloaded=preloaded || preloaded="not preloaded"
+    info "fast realpath()" "$preloaded, proot ${realpaths##* }"
+fi
 [ -r /dev/kgsl-3d0 ] && info "GPU (/dev/kgsl-3d0)" "accessible" || info "GPU (/dev/kgsl-3d0)" "not accessible"
 [ -r /dev/dri/renderD128 ] && info "DRM render node" "accessible" || info "DRM render node" "not accessible"
 if [ -n "${LD_PRELOAD:-}" ]; then info "LD_PRELOAD" "$LD_PRELOAD"; fi
