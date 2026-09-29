@@ -103,39 +103,26 @@ static void free_program_filter(struct sock_fprog *program)
 	program->len = 0;
 }
 
-/**
- * A syscall PRoot only needs to see when one of its arguments has one
- * of a few values; with any other value it goes straight to the
- * kernel.  The argument is compared as the 32 bits the kernel uses for
- * an int (e.g. ioctl(2)'s request).
- */
-typedef struct {
-	Sysnum sysnum;
-	unsigned int argument;
-	size_t nb_values;
-	struct {
-		uint32_t value;
-		word_t flags;
-	} values[6];
-} ArgumentFilter;
-
-static const ArgumentFilter argument_filters[] = {
 #ifdef __ANDROID__
-	/* Only these requests are rewritten, see translate_syscall_enter()
-	 * and translate_syscall_exit().  Tracing every ioctl(2) cost two
-	 * stops per GPU (KGSL) or terminal request.  */
-	{ PR_ioctl, 1, 6, {
-		{ TCSETS + 2, 0 },
-		{ TCGETS2, 0 },
-		{ TCSETS2, 0 },
-		{ TCSETSW2, 0 },
-		{ TCSETSF2, 0 },
-		{ _IOW(0x94, 9, int) /* FICLONE */, FILTER_SYSEXIT },
-	} },
-#endif
-	/* Only PR_SET_DUMPABLE is handled, see translate_syscall_enter().  */
-	{ PR_prctl, 0, 1, { { PR_SET_DUMPABLE, 0 } } },
+/* Only these requests are rewritten, see translate_syscall_enter() and
+ * translate_syscall_exit().  Tracing every ioctl(2) cost two stops per
+ * GPU (KGSL) or terminal request.  */
+static const ArgumentValue ioctl_requests[] = {
+	{ TCSETS + 2, 0 },
+	{ TCGETS2, 0 },
+	{ TCSETS2, 0 },
+	{ TCSETSW2, 0 },
+	{ TCSETSF2, 0 },
+	{ _IOW(0x94, 9, int) /* FICLONE */, FILTER_SYSEXIT },
 };
+static const ArgumentFilter ioctl_filter = {
+	1, sizeof(ioctl_requests) / sizeof(ArgumentValue), ioctl_requests
+};
+#endif
+
+/* Only PR_SET_DUMPABLE is handled, see translate_syscall_enter().  */
+static const ArgumentValue prctl_options[] = { { PR_SET_DUMPABLE, 0 } };
+static const ArgumentFilter prctl_filter = { 0, 1, prctl_options };
 
 /* A traced syscall of one architecture, as the BPF program sees it.  */
 typedef struct {
@@ -267,20 +254,6 @@ static int emit_search(struct sock_fprog *program, const TracedSyscall *syscalls
 }
 
 /**
- * Whether @sysnum is in @sysnums.
- */
-static bool is_filtered(const FilteredSysnum *sysnums, Sysnum sysnum)
-{
-	size_t i;
-
-	for (i = 0; sysnums != NULL && sysnums[i].value != PR_void; i++) {
-		if (sysnums[i].value == sysnum)
-			return true;
-	}
-	return false;
-}
-
-/**
  * Convert the given @sysnums into BPF filters according to the
  * following pseudo-code, then enabled them for the given @tracee and
  * all of its future children:
@@ -291,11 +264,9 @@ static bool is_filtered(const FilteredSysnum *sysnums, Sysnum sysnum)
  *         allow
  *     kill
  *
- * The argument filters apply only to syscalls no extension asked for
- * (@extension_sysnums): extensions get all of them.  This function
- * returns -errno if an error occurred, otherwise 0.
+ * This function returns -errno if an error occurred, otherwise 0.
  */
-static int set_seccomp_filters(const FilteredSysnum *sysnums, const FilteredSysnum *extension_sysnums)
+static int set_seccomp_filters(const FilteredSysnum *sysnums)
 {
 	SeccompArch seccomp_archs[] = SECCOMP_ARCHS;
 	size_t nb_archs = sizeof(seccomp_archs) / sizeof(SeccompArch);
@@ -304,7 +275,7 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums, const FilteredSysn
 
 	struct sock_fprog program = { .len = 0, .filter = NULL };
 	TracedSyscall *syscalls = NULL;
-	size_t i, j, k, l;
+	size_t i, j, k;
 	int status;
 
 	status = new_program_filter(&program);
@@ -336,12 +307,7 @@ static int set_seccomp_filters(const FilteredSysnum *sysnums, const FilteredSysn
 				syscalls = grown;
 				syscalls[nb_syscalls].number = number;
 				syscalls[nb_syscalls].flags  = sysnums[k].flags;
-				syscalls[nb_syscalls].filter = NULL;
-				for (l = 0; l < sizeof(argument_filters) / sizeof(ArgumentFilter); l++) {
-					if (argument_filters[l].sysnum == sysnums[k].value
-					    && !is_filtered(extension_sysnums, sysnums[k].value))
-						syscalls[nb_syscalls].filter = &argument_filters[l];
-				}
+				syscalls[nb_syscalls].filter = sysnums[k].filter;
 				nb_syscalls++;
 			}
 		}
@@ -452,7 +418,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_getxattr,		0 },
 	{ PR_inotify_add_watch,	0 },
 #ifdef __ANDROID__
-	{ PR_ioctl,		FILTER_SYSEXIT },
+	{ PR_ioctl,		FILTER_SYSEXIT, &ioctl_filter },
 #endif
 	{ PR_lchown,		0 },
 	{ PR_lchown32,		0 },
@@ -480,7 +446,7 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_open,		0 },
 	{ PR_openat,		0 },
 	{ PR_pivot_root,	0 },
-	{ PR_prctl, 		0 },
+	{ PR_prctl, 		0, &prctl_filter },
 	{ PR_prlimit64,		FILTER_SYSEXIT },
 	{ PR_ptrace,		FILTER_SYSEXIT },
 	{ PR_readlink,		FILTER_SYSEXIT },
@@ -517,6 +483,46 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_waitpid,		FILTER_SYSEXIT },
 	FILTERED_SYSNUM_END,
 };
+
+/**
+ * The filter that traces what either @a or @b traces: NULL (every call)
+ * unless both filter the same argument, in which case the union of their
+ * values, allocated with @context.
+ */
+static const ArgumentFilter *merge_argument_filters(TALLOC_CTX *context,
+					const ArgumentFilter *a, const ArgumentFilter *b)
+{
+	ArgumentFilter *merged;
+	ArgumentValue *values;
+	size_t i, j, n;
+
+	if (a == NULL || b == NULL || a->argument != b->argument)
+		return NULL;
+	if (a == b)
+		return a;
+
+	merged = talloc_zero(context, ArgumentFilter);
+	values = talloc_array(context, ArgumentValue, a->nb_values + b->nb_values);
+	if (merged == NULL || values == NULL)
+		return NULL;
+
+	n = 0;
+	for (i = 0; i < a->nb_values + b->nb_values; i++) {
+		const ArgumentValue *value = i < a->nb_values ? &a->values[i] : &b->values[i - a->nb_values];
+
+		for (j = 0; j < n && values[j].value != value->value; j++)
+			;
+		if (j < n)
+			values[j].flags |= value->flags;
+		else
+			values[n++] = *value;
+	}
+
+	merged->argument = a->argument;
+	merged->nb_values = n;
+	merged->values = values;
+	return merged;
+}
 
 /**
  * Add the @new_sysnums to the list of filtered @sysnums, using the
@@ -556,10 +562,13 @@ static int merge_filtered_sysnums(TALLOC_CTX *context, FilteredSysnum **sysnums,
 			/* The last item is the terminator.  */
 			(*sysnums)[j + 1].value = PR_void;
 		}
-		else
+		else {
 			/* The sysnum is already filtered, merge the
-			 * flags.  */
+			 * flags and the argument filters.  */
 			(*sysnums)[j].flags |= new_sysnums[i].flags;
+			(*sysnums)[j].filter = merge_argument_filters(context,
+				(*sysnums)[j].filter, new_sysnums[i].filter);
+		}
 	}
 
 	return 0;
@@ -574,7 +583,6 @@ static int merge_filtered_sysnums(TALLOC_CTX *context, FilteredSysnum **sysnums,
 int enable_syscall_filtering(const Tracee *tracee)
 {
 	FilteredSysnum *filtered_sysnums = NULL;
-	FilteredSysnum *extension_sysnums = NULL;
 	Extension *extension;
 	int status;
 
@@ -597,15 +605,10 @@ int enable_syscall_filtering(const Tracee *tracee)
 							extension->filtered_sysnums);
 			if (status < 0)
 				return status;
-
-			status = merge_filtered_sysnums(tracee->ctx, &extension_sysnums,
-							extension->filtered_sysnums);
-			if (status < 0)
-				return status;
 		}
 	}
 
-	status = set_seccomp_filters(filtered_sysnums, extension_sysnums);
+	status = set_seccomp_filters(filtered_sysnums);
 	if (status < 0)
 		return status;
 

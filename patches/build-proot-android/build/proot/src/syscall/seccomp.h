@@ -23,14 +23,36 @@
 #ifndef SECCOMP_H
 #define SECCOMP_H
 
+#include <stdint.h>
+
 #include "syscall/sysnum.h"
 #include "tracee/tracee.h"
 #include "attribute.h"
 #include "arch.h"
 
+/* One value of an ArgumentFilter, with the flags for syscalls that
+ * have it.  */
+typedef struct {
+	uint32_t value;
+	word_t flags;
+} ArgumentValue;
+
+/* Trace a syscall only when one of its arguments has one of a few
+ * values; with any other value it goes straight to the kernel.  The
+ * argument is compared as 32 bits, like the int the kernel uses for
+ * ioctl(2)'s request.  */
+typedef struct {
+	unsigned int argument;
+	size_t nb_values;
+	const ArgumentValue *values;
+} ArgumentFilter;
+
 typedef struct {
 	Sysnum value;
 	word_t flags;
+
+	/* NULL to trace every call, otherwise only these.  */
+	const ArgumentFilter *filter;
 } FilteredSysnum;
 
 typedef struct {
@@ -39,7 +61,7 @@ typedef struct {
 	Abi abis[NB_MAX_ABIS];
 } SeccompArch;
 
-#define FILTERED_SYSNUM_END { PR_void, 0 }
+#define FILTERED_SYSNUM_END { PR_void, 0, NULL }
 
 #define FILTER_SYSEXIT  0x1
 
