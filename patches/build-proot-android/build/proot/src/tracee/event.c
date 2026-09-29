@@ -108,6 +108,10 @@ int launch_process(Tracee *tracee, char *const argv[])
 	default: /* parent */
 		/* We know the pid of the first tracee now.  */
 		tracee->pid = pid;
+
+		/* What its filter traces, see get_seccomp_flags().  */
+		if (getenv("PROOT_NO_SECCOMP") == NULL)
+			remember_syscall_filtering(tracee);
 		return 0;
 	}
 
@@ -351,6 +355,7 @@ int event_loop()
 		tracee = get_tracee(NULL, pid, true);
 		assert(tracee != NULL);
 		was_sysenter = IS_IN_SYSENTER(tracee);
+		tracee->regs_are_current = false;
 
 		tracee->running = false;
 
@@ -556,6 +561,7 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 		case SIGTRAP | PTRACE_EVENT_SECCOMP2 << 8:
 		case SIGTRAP | PTRACE_EVENT_SECCOMP << 8: {
 			unsigned long flags = 0;
+			long known_flags;
 
 			signal = 0;
 
@@ -589,9 +595,22 @@ int handle_tracee_event(Tracee *tracee, int tracee_status)
 			if (tracee->seccomp != ENABLED)
 				break;
 
-			status = ptrace(PTRACE_GETEVENTMSG, tracee->pid, NULL, &flags);
+			/* The flags the filter returned: from its table, with
+			 * the registers translate_syscall() needs anyway,
+			 * rather than one more ptrace request.  */
+			status = fetch_regs(tracee);
 			if (status < 0)
 				break;
+			tracee->regs_are_current = true;
+
+			known_flags = get_seccomp_flags(tracee);
+			if (known_flags >= 0)
+				flags = known_flags;
+			else {
+				status = ptrace(PTRACE_GETEVENTMSG, tracee->pid, NULL, &flags);
+				if (status < 0)
+					break;
+			}
 
 			/* Use the common ptrace flow when
 			 * sysexit has to be handled.  */

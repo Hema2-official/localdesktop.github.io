@@ -158,6 +158,9 @@ typedef struct tracee {
 	/* Value of the tracee's general purpose registers.  */
 	struct user_regs_struct _regs[NB_REG_VERSION];
 	bool _regs_were_changed;
+
+	/* _regs[CURRENT] was read during this stop already.  */
+	bool regs_are_current;
 	bool restore_original_regs;
 	bool restore_original_regs_after_seccomp_event;
 
