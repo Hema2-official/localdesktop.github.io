@@ -480,7 +480,8 @@ static void remember_final_path(const char *host_path, const HostPath *info)
 		return;
 	}
 	strcpy(last_final_path, host_path);
-	/* A path that doesn't exist can't be a link either.  */
+	/* A path that doesn't exist can't be a link either, nor a
+	 * directory canonicalize() knew already (stat is NULL for both).  */
 	last_final_is_symlink = info->stat != NULL && S_ISLNK(info->stat->st_mode);
 	last_final_is_known = true;
 }

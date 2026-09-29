@@ -156,8 +156,13 @@ typedef struct {
 	/* The last iteration of the translation.  */
 	bool is_final;
 
-	/* lstat(2) of the host path, or NULL if that failed.  */
+	/* lstat(2) of the host path, or NULL if that failed or wasn't
+	 * needed: see is_known_directory.  */
 	const struct stat *stat;
+
+	/* A directory canonicalize() knew already (see its cache), which
+	 * its owner can search.  */
+	bool is_known_directory;
 } HostPath;
 
 #define CLONE_RECONF ((word_t) -1)

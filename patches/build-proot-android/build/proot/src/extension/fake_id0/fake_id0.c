@@ -399,9 +399,10 @@ static void override_permissions(const Tracee *tracee, const char *path, bool is
 	struct stat perms;
 	mode_t new_mode;
 
-	/* Nothing to open up if it doesn't exist.  A symlink's own mode
-	 * doesn't matter: its target gets translated (and opened up) as
-	 * a path of its own when it is followed.  */
+	/* Nothing to open up if it doesn't exist, or is a directory
+	 * canonicalize() knew already, which its owner can search.  A
+	 * symlink's own mode doesn't matter: its target gets translated
+	 * (and opened up) as a path of its own when it is followed.  */
 	if (lstat_result == NULL || S_ISLNK(lstat_result->st_mode))
 		return;
 	perms = *lstat_result;

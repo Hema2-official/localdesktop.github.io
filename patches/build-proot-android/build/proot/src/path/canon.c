@@ -51,8 +51,11 @@
  * after a while for changes made by other processes.  Even a stale
  * entry costs little: a directory removed meanwhile still makes the
  * syscall fail as it should, only one replaced by a symlink to an
- * absolute path would be followed on the host side.  */
-#define DIRECTORY_CACHE_SIZE 1024
+ * absolute path would be followed on the host side.  A directory at
+ * the end of a path is cached and answered from the cache only when
+ * the type of that path is all that matters (see set_final_type_only()),
+ * since other syscalls might be about to remove or rename it.  */
+#define DIRECTORY_CACHE_SIZE 16384
 #define DIRECTORY_CACHE_LIFETIME_NS 2000000000ULL
 
 typedef struct {
@@ -122,6 +125,42 @@ static void cache_directory(const char *host_path)
 	entry->hash = hash;
 	entry->generation = directory_cache_generation;
 	entry->expires = coarse_now() + DIRECTORY_CACHE_LIFETIME_NS;
+}
+
+/* Whether the type of the file at the end of the path is all the
+ * current translation needs, as for readlink(2).  */
+static bool final_type_only;
+
+void set_final_type_only(bool type_only)
+{
+	final_type_only = type_only;
+}
+
+/* The end of the last path canonicalize() walked, a component it
+ * didn't follow, and the type of the file there.  */
+static struct {
+	bool known;
+	mode_t type;
+	char host_path[PATH_MAX];
+} final_component;
+
+static void remember_final_component(const char *host_path, mode_t type)
+{
+	strcpy(final_component.host_path, host_path);
+	final_component.type = type;
+	final_component.known = true;
+}
+
+/**
+ * The type (S_IFMT bits) of the file at @host_path, if the last path
+ * canonicalize() walked ended there (without a trailing "/" or "."):
+ * 0 if lstat(2) found nothing there, -1 if it isn't known.
+ */
+int final_component_type(const char *host_path)
+{
+	if (!final_component.known || strcmp(final_component.host_path, host_path) != 0)
+		return -1;
+	return final_component.type;
 }
 
 /**
@@ -222,6 +261,8 @@ static inline Finality next_component(char component[NAME_MAX], const char **cur
 static inline int substitute_binding_stat(Tracee *tracee, Finality finality, unsigned int recursion_level,
 					const char guest_path[PATH_MAX], char host_path[PATH_MAX])
 {
+	/* The end of the path itself, not of a symlink's target.  */
+	bool is_last = finality == FINAL_NORMAL && recursion_level == 0;
 	struct stat statl;
 	int status;
 
@@ -230,9 +271,19 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	if (status < 0)
 		return status;
 
-	/* A directory on the way, known already.  */
-	if (!IS_FINAL(finality) && tracee->glue_type == 0 && is_cached_directory(host_path))
-		return 0;
+	/* A directory on the way, known already, or at the end when its
+	 * type is all that matters.  */
+	if (tracee->glue_type == 0 && (!IS_FINAL(finality) || (is_last && final_type_only))
+	    && is_cached_directory(host_path)) {
+		HostPath info = { .is_final = true, .stat = NULL, .is_known_directory = true };
+
+		if (!IS_FINAL(finality))
+			return 0;
+
+		remember_final_component(host_path, S_IFDIR);
+		status = notify_extensions(tracee, HOST_PATH, (intptr_t) host_path, (intptr_t) &info);
+		return status < 0 ? status : 0;
+	}
 
 	statl.st_mode = 0;
 	if (should_skip_file_access_due_to_f2fs_bug(tracee, host_path)) {
@@ -270,9 +321,12 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 		if (notified < 0)
 			return notified;
 
-		if (!IS_FINAL(finality) && status == 0 && S_ISDIR(statl.st_mode)
+		if ((!IS_FINAL(finality) || final_type_only) && status == 0 && S_ISDIR(statl.st_mode)
 		    && (statl.st_mode & S_IRWXU) == S_IRWXU)
 			cache_directory(host_path);
+
+		if (is_last)
+			remember_final_component(host_path, status < 0 ? 0 : (statl.st_mode & S_IFMT));
 	}
 
 	/* Return an error if a non-final component isn't a
@@ -306,6 +360,10 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 	/* Avoid infinite loop on circular links.  */
 	if (recursion_level > MAXSYMLINKS)
 		return -ELOOP;
+
+	/* A new path: what the last one ended with doesn't apply.  */
+	if (recursion_level == 0)
+		final_component.known = false;
 
 	/* Sanity checks.  */
 	assert(user_path != NULL);

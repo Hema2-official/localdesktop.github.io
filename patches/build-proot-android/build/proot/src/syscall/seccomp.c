@@ -449,8 +449,9 @@ static FilteredSysnum proot_sysnums[] = {
 	{ PR_prctl, 		0, &prctl_filter },
 	{ PR_prlimit64,		FILTER_SYSEXIT },
 	{ PR_ptrace,		FILTER_SYSEXIT },
-	{ PR_readlink,		FILTER_SYSEXIT },
-	{ PR_readlinkat,	FILTER_SYSEXIT },
+	/* The exit stage only for a symlink, see translate_readlink().  */
+	{ PR_readlink,		0 },
+	{ PR_readlinkat,	0 },
 	{ PR_removexattr,	0 },
 	{ PR_rename,		FILTER_SYSEXIT },
 	{ PR_renameat,		FILTER_SYSEXIT },

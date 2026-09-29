@@ -31,5 +31,7 @@
 extern int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 			char guest_path[PATH_MAX], unsigned int nb_recursion);
 extern void invalidate_directory_cache(void);
+extern void set_final_type_only(bool type_only);
+extern int final_component_type(const char *host_path);
 
 #endif /* CANON_H */

@@ -90,9 +90,31 @@ mkdir slashed && mkdir slashed/sub/ && rmdir slashed/sub && rmdir slashed 2> /de
     && pass "directories made with a trailing slash can be removed" \
     || fail "directories made with a trailing slash can be removed" "$(rmdir slashed 2>&1)"
 
-# proot remembers directories it has walked through; one replaced by a symlink to an absolute path
-# must be followed inside the rootfs right away, not on Android's side.
+# readlink() gets "not a symlink" from proot when its path walk just found something else there
+# (glibc's realpath() readlinks every component of a path); links, trailing slashes and descriptors
+# still get the kernel's answer.
+if command -v python3 > /dev/null; then
+    mkdir -p readlinks/dir && echo x > readlinks/file && ln -s file readlinks/link
+    readlinks=$(cd readlinks && python3 -c '
+import errno, os
+def readlink(path, **options):
+    try:
+        return os.readlink(path, **options)
+    except OSError as e:
+        return errno.errorcode[e.errno]
+fd = os.open("link", os.O_PATH | os.O_NOFOLLOW)
+print(readlink("dir"), readlink("file"), readlink("link"), readlink("file/"), readlink("missing"),
+      readlink("", dir_fd=fd))
+' 2>&1)
+    [ "$readlinks" = "EINVAL EINVAL file ENOTDIR ENOENT file" ] \
+        && pass "readlink() tells symlinks from other files like the kernel" \
+        || fail "readlink() tells symlinks from other files like the kernel" "$readlinks"
+fi
+
+# proot remembers directories it has walked through (or readlink()ed); one replaced by a symlink to
+# an absolute path must be followed inside the rootfs right away, not on Android's side.
 mkdir -p swapped/sub && touch swapped/sub/f && ls swapped/sub/f > /dev/null
+readlink swapped > /dev/null
 mv swapped swapped.old && ln -s /etc swapped
 [ "$(cat swapped/hostname 2>&1)" = "$(cat /etc/hostname 2>&1)" ] && [ -e swapped/pacman.conf ] \
     && pass "a directory replaced by a symlink is followed at once" \
