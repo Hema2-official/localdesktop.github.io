@@ -30,6 +30,7 @@
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
 #include <sys/ptrace.h>  /* PTRACE_SYSCALL, */
 #include <sys/stat.h>    /* S_IFLNK, */
+#include <unistd.h>      /* readlink(2), */
 #include <termios.h>     /* TCSETS, TCSANOW */
 
 #include "cli/note.h"
@@ -47,6 +48,7 @@
 #include "tracee/abi.h"
 #include "path/path.h"
 #include "path/canon.h"
+#include "path/binding.h"
 #include "tracee/statx.h"
 #include "arch.h"
 
@@ -91,6 +93,45 @@ static int translate_sysarg(Tracee *tracee, Reg reg, Type type)
 }
 
 /**
+ * Answer readlink(2) of the symlink at @host_path at the entry stage:
+ * read it here and translate its target back, as the exit stage does
+ * with what the kernel returns (see translate_syscall_exit()), into
+ * the tracee's @buffer of @size bytes.  This function returns 0 if it
+ * answered, -errno to answer with that error, or 1 if it can't.
+ */
+static int answer_readlink(Tracee *tracee, const char host_path[PATH_MAX], word_t buffer, word_t size)
+{
+	char referee[PATH_MAX];
+	ssize_t length;
+	int status;
+
+	/* The kernel checks that first.  */
+	if ((int) size <= 0)
+		return -EINVAL;
+
+	length = readlink(host_path, referee, sizeof(referee));
+	if (length < 0 || (size_t) length >= sizeof(referee))
+		return 1;
+	referee[length] = '\0';
+
+	status = detranslate_path(tracee, referee, host_path);
+	if (status < 0)
+		return 1;
+	length = strlen(referee);
+
+	/* readlink(2) truncates silently.  */
+	if ((word_t) length > size)
+		length = size;
+	status = write_data(tracee, buffer, referee, length);
+	if (status < 0)
+		return status;
+
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, length);
+	return 0;
+}
+
+/**
  * Translate the path of readlink(2) or readlinkat(2), @path relative
  * to @dir_fd, into the @reg argument of the current syscall.  Only a
  * symlink at the end of the path gives it something to return, which
@@ -113,15 +154,41 @@ static int translate_readlink(Tracee *tracee, int dir_fd, char path[PATH_MAX], R
 		return 0;
 	}
 
+	/* A directory known already, without walking the path again.  */
+	if (is_known_guest_directory(get_root(tracee), path))
+		return -EINVAL;
+
 	set_final_type_only(true);
 	status = translate_path(tracee, host_path, dir_fd, path, false);
 	set_final_type_only(false);
 	if (status < 0)
 		return status;
 
+	/* The walk didn't end there: an extension replaced the path, like
+	 * link2symlink for a fake hard link (pnpm's are, hard-linked from
+	 * its store).  Look at the file itself, as the kernel would.  */
 	type = final_component_type(host_path);
-	if (type > 0 && type != S_IFLNK)
+	if (type < 0) {
+		struct stat statl;
+
+		if (lstat(host_path, &statl) == 0)
+			type = statl.st_mode & S_IFMT;
+	}
+
+	if (type > 0 && type != S_IFLNK) {
+		if (type == S_IFDIR)
+			remember_guest_directory(get_root(tracee), path, host_path);
 		return -EINVAL;
+	}
+
+	/* A symlink in the guest's file system (pnpm's node_modules, say):
+	 * the ones in /proc and in bindings keep the exit stage.  */
+	if (type == S_IFLNK && belongs_to_guestfs(tracee, host_path)) {
+		status = answer_readlink(tracee, host_path, peek_reg(tracee, CURRENT, reg + 1),
+					peek_reg(tracee, CURRENT, reg + 2));
+		if (status <= 0)
+			return status;
+	}
 
 	/* A symlink, or not known.  */
 	tracee->restart_how = PTRACE_SYSCALL;

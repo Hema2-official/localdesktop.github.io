@@ -33,5 +33,7 @@ extern int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 extern void invalidate_directory_cache(void);
 extern void set_final_type_only(bool type_only);
 extern int final_component_type(const char *host_path);
+extern bool is_known_guest_directory(const char *root, const char *guest_path);
+extern void remember_guest_directory(const char *root, const char *guest_path, const char *host_path);
 
 #endif /* CANON_H */

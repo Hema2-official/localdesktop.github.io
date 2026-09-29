@@ -339,6 +339,10 @@ void translate_syscall_exit(Tracee *tracee)
 		if ((int) syscall_result < 0)
 			goto end;
 
+		/* Answered at the entry stage, see answer_readlink().  */
+		if (get_sysnum(tracee, MODIFIED) == PR_void)
+			goto end;
+
 		old_size = syscall_result;
 
 		if (syscall_number == PR_readlink) {

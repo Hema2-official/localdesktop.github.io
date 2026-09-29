@@ -142,6 +142,9 @@ static struct {
 	bool known;
 	mode_t type;
 	char host_path[PATH_MAX];
+
+	/* No symlink was followed on the way.  */
+	bool direct;
 } final_component;
 
 static void remember_final_component(const char *host_path, mode_t type)
@@ -161,6 +164,127 @@ int final_component_type(const char *host_path)
 	if (!final_component.known || strcmp(final_component.host_path, host_path) != 0)
 		return -1;
 	return final_component.type;
+}
+
+/* Guest paths known to lead to a directory of the directory cache
+ * without any symlink on the way: readlink(2) of one is EINVAL
+ * without walking it again.  glibc's realpath(3) readlinks every
+ * prefix of every path it resolves, and it resolves them left to
+ * right, so they have no symlinks in them.  Only such directories are
+ * kept, so the directory cache's invalidation is all it takes: a
+ * directory stops being one through rmdir(2), rename(2), chmod(2)...
+ * The key is the guest path after the host path of the guest root,
+ * which a chroot(2) changes.  */
+#define GUEST_DIRECTORY_CACHE_SIZE 4096
+
+typedef struct {
+	char *key;
+	size_t length;
+	size_t root_length;
+	uint64_t hash;
+	unsigned long generation;
+	unsigned long long expires;
+} CachedGuestDirectory;
+
+static CachedGuestDirectory guest_directory_cache[GUEST_DIRECTORY_CACHE_SIZE];
+
+/**
+ * Whether @path is absolute and plain: no "." or ".." component, no
+ * doubled or trailing "/" (a path readlink(2) can be answered for
+ * from its text).
+ */
+static bool is_plain_absolute_path(const char *path)
+{
+	const char *cursor;
+
+	if (path[0] != '/' || path[1] == '\0')
+		return false;
+
+	for (cursor = path; *cursor != '\0'; cursor++) {
+		if (*cursor != '/')
+			continue;
+		if (cursor[1] == '/' || cursor[1] == '\0')
+			return false;
+		if (cursor[1] == '.' && (cursor[2] == '/' || cursor[2] == '\0'))
+			return false;
+		if (cursor[1] == '.' && cursor[2] == '.' && (cursor[3] == '/' || cursor[3] == '\0'))
+			return false;
+	}
+	return true;
+}
+
+static CachedGuestDirectory *guest_directory_slot(const char *root, const char *guest_path,
+						uint64_t *hash, size_t *root_length, size_t *length)
+{
+	size_t guest_length;
+	uint64_t value;
+
+	value = hash_path(root, root_length);
+	value ^= hash_path(guest_path, &guest_length) * 31;
+	*hash = value;
+	*length = *root_length + guest_length;
+	return &guest_directory_cache[value % GUEST_DIRECTORY_CACHE_SIZE];
+}
+
+/**
+ * Whether @guest_path, for a tracee whose guest root is at @root on
+ * the host, is known to be a directory reached without symlinks.
+ */
+bool is_known_guest_directory(const char *root, const char *guest_path)
+{
+	const CachedGuestDirectory *entry;
+	size_t root_length;
+	size_t length;
+	uint64_t hash;
+
+	if (root == NULL || !is_plain_absolute_path(guest_path))
+		return false;
+
+	entry = guest_directory_slot(root, guest_path, &hash, &root_length, &length);
+	return entry->key != NULL
+		&& entry->generation == directory_cache_generation
+		&& entry->hash == hash
+		&& entry->length == length
+		&& entry->root_length == root_length
+		&& memcmp(entry->key, root, root_length) == 0
+		&& memcmp(entry->key + root_length, guest_path, length - root_length) == 0
+		&& coarse_now() < entry->expires;
+}
+
+/**
+ * Remember @guest_path (see is_known_guest_directory()) if the last
+ * path canonicalize() walked was it, and led, without following any
+ * symlink, to @host_path, a directory of the directory cache.
+ */
+void remember_guest_directory(const char *root, const char *guest_path, const char *host_path)
+{
+	CachedGuestDirectory *entry;
+	size_t root_length;
+	size_t length;
+	uint64_t hash;
+
+	if (root == NULL
+	    || !final_component.known || !final_component.direct
+	    || final_component.type != S_IFDIR
+	    || strcmp(final_component.host_path, host_path) != 0
+	    || !is_plain_absolute_path(guest_path)
+	    || !is_cached_directory(host_path))
+		return;
+
+	entry = guest_directory_slot(root, guest_path, &hash, &root_length, &length);
+	if (entry->key == NULL || entry->length < length) {
+		free(entry->key);
+		entry->key = malloc(length + 1);
+		if (entry->key == NULL)
+			return;
+	}
+	memcpy(entry->key, root, root_length);
+	memcpy(entry->key + root_length, guest_path, length - root_length + 1);
+	entry->length = length;
+	entry->root_length = root_length;
+	entry->hash = hash;
+	entry->generation = directory_cache_generation;
+	entry->expires = coarse_now() + DIRECTORY_CACHE_LIFETIME_NS;
 }
 
 /**
@@ -379,8 +503,10 @@ static int canonicalize_path(Tracee *tracee, const char *user_path, bool deref_f
 		return -ELOOP;
 
 	/* A new path: what the last one ended with doesn't apply.  */
-	if (recursion_level == 0)
+	if (recursion_level == 0) {
 		final_component.known = false;
+		final_component.direct = true;
+	}
 
 	/* Sanity checks.  */
 	assert(user_path != NULL);
@@ -452,6 +578,8 @@ static int canonicalize_path(Tracee *tracee, const char *user_path, bool deref_f
 				return status;
 			continue;
 		}
+
+		final_component.direct = false;
 
 		/* It's a link, so we have to dereference *and*
 		 * canonicalize to ensure we are not going outside the

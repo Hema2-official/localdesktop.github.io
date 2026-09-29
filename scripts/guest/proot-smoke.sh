@@ -103,10 +103,15 @@ def readlink(path, **options):
     except OSError as e:
         return errno.errorcode[e.errno]
 fd = os.open("link", os.O_PATH | os.O_NOFOLLOW)
+# A directory proot knows by its absolute path, then removed.
+os.mkdir("gone")
+gone = os.path.abspath("gone")
+readlink(gone)
+os.rmdir("gone")
 print(readlink("dir"), readlink("file"), readlink("link"), readlink("file/"), readlink("missing"),
-      readlink("", dir_fd=fd))
+      readlink("", dir_fd=fd), readlink(gone))
 ' 2>&1)
-    [ "$readlinks" = "EINVAL EINVAL file ENOTDIR ENOENT file" ] \
+    [ "$readlinks" = "EINVAL EINVAL file ENOTDIR ENOENT file ENOENT" ] \
         && pass "readlink() tells symlinks from other files like the kernel" \
         || fail "readlink() tells symlinks from other files like the kernel" "$readlinks"
 fi
@@ -123,7 +128,7 @@ statx_result=$(cd statx && { stat -c %F dir file link; stat -L -c %F link; stat 
 # proot remembers directories it has walked through (or readlink()ed); one replaced by a symlink to
 # an absolute path must be followed inside the rootfs right away, not on Android's side.
 mkdir -p swapped/sub && touch swapped/sub/f && ls swapped/sub/f > /dev/null
-readlink swapped > /dev/null
+readlink "$work/swapped" > /dev/null
 mv swapped swapped.old && ln -s /etc swapped
 [ "$(cat swapped/hostname 2>&1)" = "$(cat /etc/hostname 2>&1)" ] && [ -e swapped/pacman.conf ] \
     && pass "a directory replaced by a symlink is followed at once" \
