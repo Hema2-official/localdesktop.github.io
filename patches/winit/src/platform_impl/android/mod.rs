@@ -502,6 +502,23 @@ impl<T: 'static> EventLoop<T> {
                                     pressed.map(|button| (*button, event::ElementState::Pressed)),
                                 )
                                 .collect::<Vec<_>>();
+                            // A mouse hovers there first, but a stylus that touches down without
+                            // hovering would press wherever the pointer last was.
+                            if !changes.is_empty() {
+                                callback(
+                                    Event::WindowEvent {
+                                        window_id,
+                                        event: WindowEvent::CursorMoved {
+                                            device_id,
+                                            position: PhysicalPosition {
+                                                x: pointer.x() as _,
+                                                y: pointer.y() as _,
+                                            },
+                                        },
+                                    },
+                                    self.window_target(),
+                                );
+                            }
                             for (button, state) in changes {
                                 callback(
                                     Event::WindowEvent {
