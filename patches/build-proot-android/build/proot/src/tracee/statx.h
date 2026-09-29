@@ -28,6 +28,8 @@ struct statx_syscall_state {
 };
 
 int handle_statx_syscall(Tracee *tracee, bool from_sigsys);
+int answer_statx_at_entry(Tracee *tracee, const char host_path[PATH_MAX]);
+int answer_statx_of_descriptor_at_entry(Tracee *tracee, int dir_fd);
 
 
 #endif // STATX_H

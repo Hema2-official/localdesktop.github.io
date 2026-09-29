@@ -1,8 +1,119 @@
 #include <errno.h>          /* E*, */
+#include <fcntl.h>          /* AT_FDCWD, */
+#include <signal.h>         /* sigaction(2), SIGSYS, */
+#include <stdio.h>          /* snprintf(3), */
+#include <string.h>         /* strcpy(3), */
+#include <unistd.h>         /* syscall(2), */
+#include <sys/syscall.h>    /* SYS_statx, */
 #include <sys/sysmacros.h>  /* major, minor, */
 
 #include "tracee/statx.h"
 #include "tracee/mem.h"
+#include "attribute.h"
+
+static volatile sig_atomic_t statx_trapped;
+
+static void note_trapped_syscall(int signal UNUSED)
+{
+	statx_trapped = 1;
+}
+
+/**
+ * Whether PRoot may call statx(2) itself: the seccomp policy for apps
+ * traps it on Android versions before 11 (handle_statx_syscall() then
+ * emulates it for the tracees).
+ */
+static bool statx_allowed(void)
+{
+	static int allowed = -1;
+
+	if (allowed < 0) {
+		struct sigaction trap;
+		struct sigaction previous;
+		struct statx buffer;
+		long status;
+
+		memset(&trap, 0, sizeof(trap));
+		trap.sa_handler = note_trapped_syscall;
+		sigemptyset(&trap.sa_mask);
+		statx_trapped = 0;
+		sigaction(SIGSYS, &trap, &previous);
+		status = syscall(SYS_statx, AT_FDCWD, "/", 0, STATX_BASIC_STATS, &buffer);
+		sigaction(SIGSYS, &previous, NULL);
+		allowed = status == 0 && !statx_trapped;
+	}
+	return allowed;
+}
+
+static int answer_statx(Tracee *tracee, const char *path, const char *host_path, int flags);
+
+/**
+ * Answer the @tracee's statx(2) of @host_path, the translation of its
+ * path, at the entry stage: call statx(2) here, let the extensions
+ * correct the result (ownership records, fake hard links) and write it
+ * to the tracee's buffer.  That saves the exit stage, and copying the
+ * translated path to the tracee.  This function returns 0 if it
+ * answered, -errno to answer with that error, or 1 if it can't answer.
+ */
+int answer_statx_at_entry(Tracee *tracee, const char host_path[PATH_MAX])
+{
+	return answer_statx(tracee, host_path, host_path, (int) peek_reg(tracee, CURRENT, SYSARG_3));
+}
+
+/**
+ * answer_statx_at_entry() for statx(2) of the descriptor @dir_fd (an
+ * empty path with AT_EMPTY_PATH), or of the working directory for
+ * AT_FDCWD: through its link in /proc, like fstat(2).
+ */
+int answer_statx_of_descriptor_at_entry(Tracee *tracee, int dir_fd)
+{
+	char host_path[PATH_MAX];
+	char link[64];
+	ssize_t length;
+	int flags;
+
+	if (dir_fd == AT_FDCWD)
+		snprintf(link, sizeof(link), "/proc/%d/cwd", tracee->pid);
+	else
+		snprintf(link, sizeof(link), "/proc/%d/fd/%d", tracee->pid, dir_fd);
+
+	/* The file it refers to, for the extensions.  Not a descriptor of
+	 * the tracee's: the kernel answers.  */
+	length = readlink(link, host_path, sizeof(host_path) - 1);
+	if (length < 0)
+		return 1;
+	host_path[length] = '\0';
+
+	flags = (int) peek_reg(tracee, CURRENT, SYSARG_3) & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
+	return answer_statx(tracee, link, host_path, flags);
+}
+
+/**
+ * statx(2) @path with @flags for the tracee, and let the extensions
+ * correct the result for the file at @host_path.  See
+ * answer_statx_at_entry() for the returned value.
+ */
+static int answer_statx(Tracee *tracee, const char *path, const char *host_path, int flags)
+{
+	struct statx_syscall_state state = {};
+	unsigned int mask = (unsigned int) peek_reg(tracee, CURRENT, SYSARG_4);
+	word_t buffer = peek_reg(tracee, CURRENT, SYSARG_5);
+	int status;
+
+	if (!statx_allowed())
+		return 1;
+
+	strcpy(state.host_path, host_path);
+	if (syscall(SYS_statx, AT_FDCWD, path, flags, mask, &state.statx_buf) < 0)
+		return -errno;
+
+	state.updated_stats = true;
+	status = notify_extensions(tracee, STATX_SYSCALL, (intptr_t) &state, 0);
+	if (status < 0)
+		return status;
+
+	return write_data(tracee, buffer, &state.statx_buf, sizeof(state.statx_buf));
+}
 
 int handle_statx_syscall(Tracee *tracee, bool from_sigsys) {
 	RegVersion regVersion = from_sigsys ? CURRENT : ORIGINAL;

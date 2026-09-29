@@ -47,6 +47,7 @@
 #include "tracee/abi.h"
 #include "path/path.h"
 #include "path/canon.h"
+#include "tracee/statx.h"
 #include "arch.h"
 
 /**
@@ -125,6 +126,48 @@ static int translate_readlink(Tracee *tracee, int dir_fd, char path[PATH_MAX], R
 	/* A symlink, or not known.  */
 	tracee->restart_how = PTRACE_SYSCALL;
 	return set_sysarg_path(tracee, host_path, reg);
+}
+
+/**
+ * Translate the path of statx(2), @path relative to @dir_fd, and
+ * answer it right away (see answer_statx_at_entry()).  When that isn't
+ * possible, the translated path goes to the tracee and the exit stage
+ * corrects the result, see handle_statx_syscall().  This function
+ * returns -errno if an error occured, otherwise 0.
+ */
+static int translate_statx(Tracee *tracee, int dir_fd, char path[PATH_MAX])
+{
+	int flags = (int) peek_reg(tracee, CURRENT, SYSARG_3);
+	char host_path[PATH_MAX];
+	int status;
+
+	if (path[0] != '\0') {
+		status = translate_path(tracee, host_path, dir_fd, path,
+					(flags & AT_SYMLINK_NOFOLLOW) == 0);
+		if (status < 0)
+			return status;
+
+		status = answer_statx_at_entry(tracee, host_path);
+	}
+	/* An empty path: the descriptor's file (AT_EMPTY_PATH, what
+	 * fstat(2) does through statx(2)), or an error.  A NULL one is
+	 * left to the kernel.  */
+	else if (peek_reg(tracee, CURRENT, SYSARG_2) == 0)
+		status = 1;
+	else if ((flags & AT_EMPTY_PATH) == 0)
+		return -ENOENT;
+	else
+		status = answer_statx_of_descriptor_at_entry(tracee, dir_fd);
+
+	if (status == 0) {
+		set_sysnum(tracee, PR_void);
+		poke_reg(tracee, SYSARG_RESULT, 0);
+	}
+	if (status <= 0)
+		return status;
+
+	tracee->restart_how = PTRACE_SYSCALL;
+	return path[0] != '\0' ? set_sysarg_path(tracee, host_path, SYSARG_2) : 0;
 }
 
 /**
@@ -674,13 +717,7 @@ int translate_syscall_enter(Tracee *tracee)
 		if (status < 0)
 			break;
 
-		status = translate_path2(
-			tracee,
-			newdirfd,
-			newpath,
-			SYSARG_2,
-			(peek_reg(tracee, CURRENT, SYSARG_3) & AT_SYMLINK_NOFOLLOW) ? SYMLINK : REGULAR
-		);
+		status = translate_statx(tracee, newdirfd, newpath);
 		break;
 
 	case PR_prctl:

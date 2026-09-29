@@ -111,6 +111,15 @@ print(readlink("dir"), readlink("file"), readlink("link"), readlink("file/"), re
         || fail "readlink() tells symlinks from other files like the kernel" "$readlinks"
 fi
 
+# statx() (coreutils' stat, Node's fs.stat) is answered by proot itself: file kinds, following a
+# link and the errors must be the kernel's.
+mkdir -p statx/dir && echo x > statx/file && ln -s file statx/link
+statx_result=$(cd statx && { stat -c %F dir file link; stat -L -c %F link; stat -c %F missing file/ 2>&1 \
+    | sed 's/.*: //'; } | tr '\n' ,)
+[ "$statx_result" = "directory,regular file,symbolic link,regular file,No such file or directory,Not a directory," ] \
+    && pass "statx() reports kinds, links and errors like the kernel" \
+    || fail "statx() reports kinds, links and errors like the kernel" "$statx_result"
+
 # proot remembers directories it has walked through (or readlink()ed); one replaced by a symlink to
 # an absolute path must be followed inside the rootfs right away, not on Android's side.
 mkdir -p swapped/sub && touch swapped/sub/f && ls swapped/sub/f > /dev/null

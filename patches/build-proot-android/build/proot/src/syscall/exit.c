@@ -541,6 +541,10 @@ void translate_syscall_exit(Tracee *tracee)
 	}
 
 	case PR_statx:
+		/* Answered at the entry stage, see translate_statx().  */
+		if (get_sysnum(tracee, MODIFIED) == PR_void)
+			goto end;
+
 		status = handle_statx_syscall(tracee, false);
 		break;
 
