@@ -164,10 +164,11 @@ char * get_name(char path[PATH_MAX])
 
 /* The records of directories check_dir_perms() read, so that it doesn't
  * read those of /, /usr, /usr/share, ... again for every path below them.
- * Anything this PRoot writes, deletes or moves among the records empties
- * it (write_meta_file(), unlink_meta(), rename_meta()), and entries expire
- * after a while for changes made by other processes.  */
-#define RECORD_CACHE_SIZE 2048
+ * A record this PRoot writes is dropped from it (write_meta_file()), and
+ * deleting or moving records empties it (unlink_meta(), rename_meta():
+ * moving a directory moves the records inside).  Entries expire after a
+ * while for changes made by other processes.  */
+#define RECORD_CACHE_SIZE 16384
 #define RECORD_CACHE_LIFETIME_NS 2000000000ULL
 
 typedef struct {
@@ -210,27 +211,54 @@ static unsigned long long coarse_now(void)
 	return (unsigned long long) time.tv_sec * 1000000000ULL + time.tv_nsec;
 }
 
+/** The cache entry for the record at @path, which may hold another
+ *  record: see is_cached_record().  */
+static CachedRecord *record_slot(const char *path, uint64_t *hash, size_t *length)
+{
+	uint64_t value = 0xcbf29ce484222325ULL; /* FNV-1a */
+	size_t i;
+
+	for (i = 0; path[i] != '\0'; i++) {
+		value ^= (unsigned char) path[i];
+		value *= 0x100000001b3ULL;
+	}
+	*hash = value;
+	*length = i;
+	return &record_cache[value % RECORD_CACHE_SIZE];
+}
+
+static bool is_cached_record(const CachedRecord *entry, const char *path, uint64_t hash, size_t length)
+{
+	return entry->path != NULL
+		&& entry->generation == record_cache_generation
+		&& entry->hash == hash
+		&& entry->length == length
+		&& memcmp(entry->path, path, length) == 0
+		&& coarse_now() < entry->expires;
+}
+
+/** Drop the record at @path from the cache, it is being written.  */
+static void forget_record(const char *path)
+{
+	uint64_t hash;
+	size_t length;
+	CachedRecord *entry = record_slot(path, &hash, &length);
+
+	if (is_cached_record(entry, path, hash, length))
+		entry->expires = 0;
+}
+
 /** Like load_meta_file(), through the cache: for the records looked up
  *  over and over (directories on the way, stat(2) and statx(2)).  */
 int load_record(const char path[PATH_MAX], mode_t *mode, uid_t *owner, gid_t *group)
 {
-	uint64_t hash = 0xcbf29ce484222325ULL; /* FNV-1a */
 	CachedRecord *entry;
+	uint64_t hash;
 	size_t length;
 	int status;
 
-	for (length = 0; path[length] != '\0'; length++) {
-		hash ^= (unsigned char) path[length];
-		hash *= 0x100000001b3ULL;
-	}
-	entry = &record_cache[hash % RECORD_CACHE_SIZE];
-
-	if (entry->path != NULL
-	    && entry->generation == record_cache_generation
-	    && entry->hash == hash
-	    && entry->length == length
-	    && memcmp(entry->path, path, length) == 0
-	    && coarse_now() < entry->expires) {
+	entry = record_slot(path, &hash, &length);
+	if (is_cached_record(entry, path, hash, length)) {
 		*mode = entry->mode;
 		*owner = entry->owner;
 		*group = entry->group;
@@ -511,7 +539,7 @@ int write_meta_file(char path[PATH_MAX], mode_t mode, uid_t owner, gid_t group,
 	bool is_creat, Config *config)
 {
 	FILE *fp;
-	invalidate_record_cache();
+	forget_record(path);
 	fp = fopen(path, "w");
 	if(!fp)
 		//Errno is set
