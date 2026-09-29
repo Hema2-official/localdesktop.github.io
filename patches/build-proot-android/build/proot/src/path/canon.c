@@ -256,13 +256,16 @@ static inline Finality next_component(char component[NAME_MAX], const char **cur
  * path into @host_path.  Also, this function checks that a non-final
  * component is either a directory (returned value is 0) or a symlink
  * (returned value is 1), otherwise it returns -errno (-ENOENT or
- * -ENOTDIR).
+ * -ENOTDIR).  @end_on_the_way tells that the path goes on after the
+ * final component: it ends the target of a symlink in its middle.
  */
 static inline int substitute_binding_stat(Tracee *tracee, Finality finality, unsigned int recursion_level,
-					const char guest_path[PATH_MAX], char host_path[PATH_MAX])
+					bool end_on_the_way, const char guest_path[PATH_MAX],
+					char host_path[PATH_MAX])
 {
 	/* The end of the path itself, not of a symlink's target.  */
 	bool is_last = finality == FINAL_NORMAL && recursion_level == 0;
+	bool on_the_way = !IS_FINAL(finality) || end_on_the_way;
 	struct stat statl;
 	int status;
 
@@ -273,11 +276,11 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 
 	/* A directory on the way, known already, or at the end when its
 	 * type is all that matters.  */
-	if (tracee->glue_type == 0 && (!IS_FINAL(finality) || (is_last && final_type_only))
+	if (tracee->glue_type == 0 && (on_the_way || (is_last && final_type_only))
 	    && is_cached_directory(host_path)) {
 		HostPath info = { .is_final = true, .stat = NULL, .is_known_directory = true };
 
-		if (!IS_FINAL(finality))
+		if (on_the_way)
 			return 0;
 
 		remember_final_component(host_path, S_IFDIR);
@@ -321,7 +324,7 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 		if (notified < 0)
 			return notified;
 
-		if ((!IS_FINAL(finality) || final_type_only) && status == 0 && S_ISDIR(statl.st_mode)
+		if ((on_the_way || final_type_only) && status == 0 && S_ISDIR(statl.st_mode)
 		    && (statl.st_mode & S_IRWXU) == S_IRWXU)
 			cache_directory(host_path);
 
@@ -339,6 +342,9 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
 	return (S_ISLNK(statl.st_mode) ? 1 : 0);
 }
 
+static int canonicalize_path(Tracee *tracee, const char *user_path, bool deref_final,
+			char guest_path[PATH_MAX], unsigned int recursion_level, bool end_on_the_way);
+
 /**
  * Copy in @guest_path the canonicalization (see `man 3 realpath`) of
  * @user_path regarding to @tracee->root.  The path to canonicalize
@@ -351,6 +357,17 @@ static inline int substitute_binding_stat(Tracee *tracee, Finality finality, uns
  */
 int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 char guest_path[PATH_MAX], unsigned int recursion_level)
+{
+	return canonicalize_path(tracee, user_path, deref_final, guest_path, recursion_level, false);
+}
+
+/**
+ * canonicalize(), where @end_on_the_way tells that @user_path is the
+ * target of a symlink the path goes on after, so its end is a
+ * directory on the way.
+ */
+static int canonicalize_path(Tracee *tracee, const char *user_path, bool deref_final,
+			char guest_path[PATH_MAX], unsigned int recursion_level, bool end_on_the_way)
 {
 	char scratch_path[PATH_MAX];
 	Finality finality;
@@ -417,7 +434,8 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 * symlink.  For this latter case, we check that the
 		 * symlink points to a directory once it is
 		 * canonicalized, at the end of this loop.  */
-		status = substitute_binding_stat(tracee, finality, recursion_level, scratch_path, host_path);
+		status = substitute_binding_stat(tracee, finality, recursion_level, end_on_the_way,
+						 scratch_path, host_path);
 		if (status < 0)
 			return status;
 
@@ -489,13 +507,15 @@ int canonicalize(Tracee *tracee, const char *user_path, bool deref_final,
 		 * is/contains a link, moreover if it is not an
 		 * absolute link then it is relative to
 		 * 'guest_path'. */
-		status = canonicalize(tracee, scratch_path, true, guest_path, recursion_level + 1);
+		status = canonicalize_path(tracee, scratch_path, true, guest_path, recursion_level + 1,
+					   !IS_FINAL(finality) || end_on_the_way);
 		if (status < 0)
 			return status;
 
 		/* Check that a non-final canonicalized/dereferenced
 		 * symlink exists and is a directory.  */
-		status = substitute_binding_stat(tracee, finality, recursion_level, guest_path, host_path);
+		status = substitute_binding_stat(tracee, finality, recursion_level, end_on_the_way,
+						 guest_path, host_path);
 		if (status < 0)
 			return status;
 
