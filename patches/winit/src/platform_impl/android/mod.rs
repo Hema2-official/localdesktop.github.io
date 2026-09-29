@@ -249,9 +249,9 @@ impl<T: 'static> EventLoop<T> {
                 },
                 MainEvent::WindowResized { .. } => resized = true,
                 MainEvent::RedrawNeeded { .. } => pending_redraw = true,
-                MainEvent::ContentRectChanged { .. } => {
-                    warn!("TODO: find a way to notify application of content rect change");
-                },
+                // What Android doesn't draw over changed (the caption bar of a DeX window comes
+                // and goes): report a resize, applications read the area with `content_rect()`.
+                MainEvent::ContentRectChanged { .. } => resized = true,
                 MainEvent::GainedFocus => {
                     HAS_FOCUS.store(true, Ordering::Relaxed);
                     callback(

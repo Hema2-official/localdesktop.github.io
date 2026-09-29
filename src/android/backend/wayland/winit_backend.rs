@@ -38,6 +38,7 @@ use smithay::{
 use std::ffi::c_void;
 use std::sync::Arc;
 use winit::event_loop::ActiveEventLoop;
+use winit::platform::android::WindowExtAndroid;
 use winit::raw_window_handle::{AndroidNdkWindowHandle, HasWindowHandle, RawWindowHandle};
 use winit::window::{Window as WinitWindow, WindowAttributes};
 
@@ -286,6 +287,20 @@ where
     pub fn window_size(&self) -> Size<i32, Physical> {
         let (w, h): (i32, i32) = self.window.inner_size().into();
         (w, h).into()
+    }
+
+    /// The part of the window the desktop shows in: all of it but what Android draws over it,
+    /// like the caption bar of a DeX window (NativeActivity lays its content out below that).
+    pub fn content_area(&self) -> Rectangle<i32, Physical> {
+        let size = self.window_size();
+        let rect = self.window.content_rect();
+        let (left, top) = (rect.left.max(0), rect.top.max(0));
+        let (right, bottom) = (rect.right.min(size.w), rect.bottom.min(size.h));
+        // Not reported yet.
+        if right <= left || bottom <= top {
+            return Rectangle::from_size(size);
+        }
+        Rectangle::new((left, top).into(), (right - left, bottom - top).into())
     }
 
     /// Scale factor of the underlying window.

@@ -444,6 +444,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
     };
 
     let size = winit.window_size();
+    let origin = winit.content_area().loc;
     let damage = Rectangle::from_size(size);
     let mut presentation_feedback = Vec::new();
     backend.compositor.state.needs_redraw = false;
@@ -465,7 +466,7 @@ fn redraw(backend: &mut WaylandBackend) -> Result<(), String> {
                 let elements = render_elements_from_surface_tree(
                     renderer,
                     surface.wl_surface(),
-                    (0, 0),
+                    origin,
                     scale,
                     1.0,
                     Kind::Unspecified,

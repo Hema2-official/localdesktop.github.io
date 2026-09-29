@@ -31,8 +31,8 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
         return;
     };
 
-    let window_size = winit.window_size();
-    let size = (window_size.w, window_size.h);
+    let content_size = winit.content_area().size;
+    let size = (content_size.w, content_size.h);
     // Not `winit.scale_factor()`: that reads `AConfiguration`, which still reports the 160 dpi
     // default on the first launch and only becomes accurate after a configuration change.
     let guest_scale_factor = ndk::scale_factor(&backend.android_app);
@@ -71,7 +71,7 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     );
 
     let guest_scale = guest_scale_factor.round().max(1.0) as i32;
-    write_guest_output_state(window_size.w, window_size.h, guest_scale);
+    write_guest_output_state(content_size.w, content_size.h, guest_scale);
 
     let state = &mut backend.compositor.state;
     state.set_client_scale(guest_scale as f64);

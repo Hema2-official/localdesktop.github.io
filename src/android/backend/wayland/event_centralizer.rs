@@ -83,23 +83,24 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
         WindowEvent::Resized(size) => {
             let (w, h): (i32, i32) = size.into();
             backend.guest_scale_factor = ndk::scale_factor(&backend.android_app);
+            let size = match backend.graphic_renderer.as_ref() {
+                Some(renderer) => {
+                    let area = renderer.content_area();
+                    log::info!("Window {w}x{h}, desktop {area:?}");
+                    area.size
+                }
+                None => (w, h).into(),
+            };
 
             CentralizedEvent::Resized {
-                size: (w, h).into(),
+                size,
                 guest_scale_factor: backend.guest_scale_factor,
             }
         }
         WindowEvent::ScaleFactorChanged { .. } => {
             backend.guest_scale_factor = ndk::scale_factor(&backend.android_app);
-            let (w, h): (i32, i32) = backend
-                .graphic_renderer
-                .as_ref()
-                .unwrap()
-                .window()
-                .inner_size()
-                .into();
             CentralizedEvent::Resized {
-                size: (w, h).into(),
+                size: backend.graphic_renderer.as_ref().unwrap().content_area().size,
                 guest_scale_factor: backend.guest_scale_factor,
             }
         }
@@ -115,6 +116,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             centralize_keyboard(scancode, event.state, time, backend)
         }
         WindowEvent::CursorMoved { position, .. } => {
+            let position = desktop_position(backend, position);
             let event = InputEvent::PointerMotionAbsolute {
                 event: WinitMouseMovedEvent {
                     time,
@@ -147,6 +149,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             id,
             ..
         }) => {
+            let location = desktop_position(backend, location);
             backend.touch_points.insert(id, location);
             backend.scroll_centroid = Some(centroid(&backend.touch_points));
 
@@ -174,6 +177,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             id,
             ..
         }) => {
+            let location = desktop_position(backend, location);
             backend.touch_points.insert(id, location);
 
             if backend.touch_mode == TouchMode::Undecided && travelled_past_slop(backend, location)
@@ -234,6 +238,7 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
             id,
             ..
         }) => {
+            let location = desktop_position(backend, location);
             backend.touch_points.remove(&id);
             if !backend.touch_points.is_empty() {
                 // Don't forward a stray TouchUp while other fingers are still down; re-anchor
@@ -278,20 +283,31 @@ pub fn centralize(event: WindowEvent, backend: &mut WaylandBackend) -> Centraliz
     };
 }
 
-/// Normalize a window-relative pixel position into the 0..1 range the input backend expects.
+/// Where a position in the window is on the desktop, which shows in the window's content area
+/// (see `content_area`). Positions outside it, over a DeX window's caption bar, go to its edge.
+fn desktop_position(
+    backend: &WaylandBackend,
+    location: PhysicalPosition<f64>,
+) -> PhysicalPosition<f64> {
+    let Some(renderer) = backend.graphic_renderer.as_ref() else {
+        return location;
+    };
+    let area = renderer.content_area();
+    PhysicalPosition {
+        x: (location.x - area.loc.x as f64).clamp(0.0, (area.size.w - 1).max(0) as f64),
+        y: (location.y - area.loc.y as f64).clamp(0.0, (area.size.h - 1).max(0) as f64),
+    }
+}
+
+/// Normalize a desktop position into the 0..1 range the input backend expects.
 fn relative_position(
     backend: &WaylandBackend,
     location: PhysicalPosition<f64>,
 ) -> RelativePosition {
-    let size = backend
-        .graphic_renderer
-        .as_ref()
-        .unwrap()
-        .window()
-        .inner_size();
+    let size = backend.graphic_renderer.as_ref().unwrap().content_area().size;
     RelativePosition::new(
-        location.x / size.width as f64,
-        location.y / size.height as f64,
+        location.x / size.w as f64,
+        location.y / size.h as f64,
     )
 }
 
