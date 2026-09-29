@@ -261,6 +261,10 @@ impl ArchProcess {
             // Android refuses uevent netlink sockets; a silent stand-in keeps libudev monitors
             // (and KWin, which needs one) working.
             .arg("--uevent-stub")
+            // Android refuses apps the list of network interfaces (RTM_GETLINK) and route
+            // netlink bind(); answer them without hardware addresses, so getifaddrs() works
+            // (Node's os.networkInterfaces(), which Vite's dev server calls).
+            .arg("--netlink-route")
             .arg("--bind=/dev")
             .arg("--bind=/proc")
             .arg("--bind=/sys")

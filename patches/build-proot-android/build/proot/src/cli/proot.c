@@ -317,6 +317,18 @@ static int handle_option_uevent_stub(Tracee *tracee, const Cli *cli UNUSED, cons
 	return 0;
 }
 
+static int handle_option_netlink_route(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
+{
+	int status;
+
+	/* Initialize the netlink-route extension.  */
+	status = initialize_extension(tracee, netlink_route_callback, NULL);
+	if (status < 0)
+		note(tracee, WARNING, INTERNAL, "netlink-route not initialized");
+
+	return 0;
+}
+
 static int handle_option_sysvipc(Tracee *tracee, const Cli *cli UNUSED, const char *value UNUSED)
 {
 	int status;

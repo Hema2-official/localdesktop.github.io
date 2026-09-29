@@ -16,7 +16,7 @@ package=${LOCALDESKTOP_PACKAGE:-app.polarbear.dev}
 user=root
 command=
 proot_dir=
-options="-L --link2symlink --sysvipc --kill-on-exit --root-id -H --uevent-stub"
+options="-L --link2symlink --sysvipc --kill-on-exit --root-id -H --uevent-stub --netlink-route"
 proot_env=
 wrapper=
 while getopts u:c:p:o:e:w: opt; do

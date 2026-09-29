@@ -59,6 +59,7 @@ OBJECTS += \
 	extension/extension.o	\
 	extension/ashmem_memfd/ashmem_memfd.o \
 	extension/uevent_stub/uevent_stub.o \
+	extension/netlink_route/netlink_route.o \
 	extension/kompat/kompat.o \
 	extension/fake_id0/chown.o \
 	extension/fake_id0/chroot.o \

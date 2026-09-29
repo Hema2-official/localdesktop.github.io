@@ -204,6 +204,19 @@ PY
         *) fail "libudev monitor can be created and enabled" "${monitor#bad }" ;;
     esac
 fi
+# The network interfaces, which glibc lists through route netlink (getifaddrs(), if_nameindex())
+# and SIOCGIF* ioctls on a Unix socket (if_nametoindex()): Node's os.networkInterfaces(), which
+# Vite's dev server calls, Go's net.Interfaces() and Python's socket.if_nameindex().
+if command -v python3 > /dev/null; then
+    interfaces=$(python3 -c '
+import socket
+print(len(socket.if_nameindex()), socket.if_nametoindex("lo"), end="")
+' 2>&1)
+    case "$interfaces" in
+        [1-9]*" 1") pass "network interfaces can be listed (${interfaces% 1} of them)" ;;
+        *) fail "network interfaces can be listed" "$(echo "$interfaces" | tail -1)" ;;
+    esac
+fi
 [ -r /dev/kgsl-3d0 ] && info "GPU (/dev/kgsl-3d0)" "accessible" || info "GPU (/dev/kgsl-3d0)" "not accessible"
 [ -r /dev/dri/renderD128 ] && info "DRM render node" "accessible" || info "DRM render node" "not accessible"
 if [ -n "${LD_PRELOAD:-}" ]; then info "LD_PRELOAD" "$LD_PRELOAD"; fi

@@ -63,6 +63,7 @@ static int handle_option_S(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_link2symlink(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_ashmem_memfd(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_uevent_stub(Tracee *tracee, const Cli *cli, const char *value);
+static int handle_option_netlink_route(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_sysvipc(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_kill_on_exit(Tracee *tracee, const Cli *cli, const char *value);
 static int handle_option_L(Tracee *tracee, const Cli *cli, const char *value);
@@ -268,6 +269,15 @@ Copyright (C) 2015 STMicroelectronics, licensed under GPL v2 or later.",
 	  .handler = handle_option_uevent_stub,
 	  .description = "Hand out a silent stand-in for uevent netlink sockets the kernel refuses",
 	  .detail = "\tlibudev monitors (udev_monitor_new_from_netlink) then work, without events.",
+	},
+	{ .class = "Extension options",
+	  .arguments = {
+		{ .name = "--netlink-route", .separator = '\0', .value = NULL },
+		{ .name = NULL, .separator = '\0', .value = NULL } },
+	  .handler = handle_option_netlink_route,
+	  .description = "Answer the route netlink requests and interface ioctls Android refuses",
+	  .detail = "\tgetifaddrs(), if_nameindex() and if_nametoindex() then work, without\n\
+\thardware addresses.",
 	},
         { .class = "Extension options",
           .arguments = {
