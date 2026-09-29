@@ -11,7 +11,7 @@ Linux programs run under proot on Local Desktop, which translates their file pat
 |---|---|---|
 | git | ✅ | init, commit, clone over HTTPS, removing a repository |
 | Python (`venv`, `pip`) | ✅ | creating a venv and installing a package from PyPI |
-| Node.js, npm, pnpm, yarn | ✅ | installing packages; pnpm works with its default settings |
+| Node.js, npm, pnpm, yarn | ✅ | installing packages; pnpm works with its default settings; a Vite dev server (`pnpm run dev`), reachable from the network |
 | Go | ✅ | building and running a module |
 | Rust (cargo) | ✅ | building and running a crate |
 | C (gcc, make, cmake) | ✅ | building KDE's KSvg library from source, with its tests |
@@ -38,3 +38,4 @@ Linux programs run under proot on Local Desktop, which translates their file pat
 - **Docker and Podman** need namespaces and cgroups too.
 - **AppImages** can't mount themselves (no FUSE); `--appimage-extract-and-run` unpacks them instead.
 - **Sticky `/tmp`**: proot doesn't enforce the sticky bit, so users can delete each other's files in `/tmp`.
+- **`ip link` and `ip addr`** report "Permission denied": Android doesn't give apps the list of network interfaces. Local Desktop answers for it when programs ask the usual way, so Node.js, Python and Go see the interfaces and their addresses (but not hardware addresses), but `ip` asks differently. `ifconfig` from `net-tools` shows the IPv4 addresses.
