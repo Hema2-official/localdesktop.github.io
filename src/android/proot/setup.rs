@@ -427,6 +427,101 @@ fn apply_desktop_choice(options: &SetupOptions) -> StageOutput {
     }))
 }
 
+/// sudo's rule for the session user, in a file of its own so nobody has to edit `sudoers`.
+const SUDOERS_DROP_IN: &str = "etc/sudoers.d/localdesktop";
+const SUDOERS_RULE: &str =
+    "# Written by Local Desktop: the session user can do anything.\n%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n";
+
+/// What `useradd` takes, which is also what the config has to say to be safe in a shell command.
+fn valid_username(username: &str) -> bool {
+    let mut chars = username.chars();
+    chars.next().is_some_and(|it| it.is_ascii_lowercase() || it == '_')
+        && chars.all(|it| it.is_ascii_lowercase() || it.is_ascii_digit() || it == '_' || it == '-')
+        && username.len() <= 32
+}
+
+fn user_exists(fs_root: &Path, username: &str) -> bool {
+    fs::read_to_string(fs_root.join("etc/passwd"))
+        .unwrap_or_default()
+        .lines()
+        .any(|line| line.split(':').next() == Some(username))
+}
+
+/// The sudoers drop-in as sudo wants it: owned by root and readable only, which for a file
+/// without an ownership record is its real mode, and the mode keeps the app from rewriting it
+/// in place.
+fn write_sudoers_drop_in(fs_root: &Path) {
+    let path = fs_root.join(SUDOERS_DROP_IN);
+    if fs::read_to_string(&path).is_ok_and(|it| it == SUDOERS_RULE) {
+        return;
+    }
+    let _ = fs::create_dir_all(path.parent().unwrap());
+    let new = path.with_extension("new");
+    if let Err(error) = fs::write(&new, SUDOERS_RULE)
+        .and_then(|()| fs::set_permissions(&new, fs::Permissions::from_mode(0o440)))
+        .and_then(|()| fs::rename(&new, &path))
+    {
+        log::warn!("Could not write the sudoers rule: {error}");
+    }
+}
+
+/// Setup stage: create the session user (`[user] username`) when it doesn't exist: a home
+/// directory from `/etc/skel`, membership of `wheel`, which sudo lets through without a
+/// password, and no password of its own (SSH takes keys; `passwd` sets one). A user made by hand
+/// is used as is, and gets the sudo rule too.
+fn setup_user(options: &SetupOptions) -> StageOutput {
+    let username = get_application_context().local_config.user.username;
+    if username == "root" {
+        return None;
+    }
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    write_sudoers_drop_in(fs_root);
+    if user_exists(fs_root, &username) {
+        return None;
+    }
+    // Quick enough to do on the way to the desktop, rather than through the setup page and a
+    // restart. What goes wrong shows in the log and, when the setup page is up, there too.
+    let problem = if !valid_username(&username) {
+        Some(format!(
+            "\"{username}\" can't be a user name: lowercase letters, digits, _ and -, starting with a letter"
+        ))
+    } else {
+        // "*" as the password: none works, and the account isn't locked, which sshd would
+        // refuse keys for. The User Manual was downloaded to root's desktop at install time.
+        let output = ArchProcess {
+            command: format!(
+                r#"useradd -m -G wheel -s /bin/bash -p '*' '{username}' || exit 1
+manual='/root/Desktop/Local Desktop - User Manual.pdf'
+home=$(getent passwd '{username}' | cut -d: -f6)
+if [ -f "$manual" ] && [ -n "$home" ]; then
+    mkdir -p "$home/Desktop" && cp "$manual" "$home/Desktop/" && chown -R '{username}:' "$home/Desktop"
+fi
+exit 0"#
+            ),
+            user: None,
+            log: None,
+        }
+        .run();
+        (!output.status.success()).then(|| {
+            format!(
+                "Could not create the user {username}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })
+    };
+    match problem {
+        Some(problem) => {
+            log::error!("{problem}");
+            options
+                .mpsc_sender
+                .send(SetupMessage::Error(problem))
+                .unwrap_or(());
+        }
+        None => log::info!("Created the user {username}"),
+    }
+    None
+}
+
 fn install_dependencies(options: &SetupOptions) -> StageOutput {
     let SetupOptions { mpsc_sender, .. } = options;
 
@@ -1516,9 +1611,10 @@ fn seed_desktop_items(home_dir: &Path, pdf_viewer: &str) {
     let desktop_dir = home_dir.join("Desktop");
     let _ = fs::create_dir_all(&desktop_dir);
 
+    // Executable, or Plasma marks the shortcut as untrusted and asks before running it.
     let online_docs = desktop_dir.join("localdesktop-online-docs.desktop");
     if !online_docs.exists() {
-        let _ = fs::write(
+        let written = fs::write(
             &online_docs,
             format!(
                 r#"[Desktop Entry]
@@ -1533,6 +1629,9 @@ StartupNotify=true
 "#
             ),
         );
+        if written.is_ok() {
+            let _ = fs::set_permissions(&online_docs, fs::Permissions::from_mode(0o755));
+        }
     }
     // Remove the launcher's former name so existing installs pick up the rename.
     let _ = fs::remove_file(desktop_dir.join("localdesktop-documentation.desktop"));
@@ -2127,6 +2226,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_arch_fs),                // Step 1. Setup Arch FS (extract)
         Box::new(simulate_linux_sysdata_stage), // Step 2. Simulate Linux system data
         Box::new(apply_desktop_choice),         // Step 3. Write the desktop chosen on a fresh install
+        Box::new(setup_user),                   // Step 3b. Create the session user, before anything lands in its home
         Box::new(install_dependencies),         // Step 4. Install dependencies
         Box::new(setup_fast_realpath), // Step 4b. realpath(3) in one question to proot, for every program
         Box::new(setup_machine_id),             // Step 5. Seed /etc/machine-id for D-Bus clients

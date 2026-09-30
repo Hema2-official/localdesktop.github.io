@@ -248,13 +248,14 @@ pub struct CommandConfig {
     pub launch: String,
 }
 
+/// `sudo` for the session user (see `setup_user`), in both presets.
 fn xfce_check() -> String {
-    "pacman -Q noto-fonts && pacman -Q xfce4-session && pacman -Q xfce4-panel && pacman -Q xfce4-settings && pacman -Q xfce4-terminal && pacman -Q thunar && pacman -Q xfdesktop && pacman -Q xfconf && pacman -Q labwc && pacman -Q wlr-randr && pacman -Q xorg-xwayland && pacman -Q xdg-desktop-portal && pacman -Q xdg-desktop-portal-gtk && pacman -Q onboard && pacman -Q firefox && pacman -Q evince && pacman -Q pipewire && pacman -Q pipewire-audio && pacman -Q pipewire-alsa"
+    "pacman -Q noto-fonts && pacman -Q xfce4-session && pacman -Q xfce4-panel && pacman -Q xfce4-settings && pacman -Q xfce4-terminal && pacman -Q thunar && pacman -Q xfdesktop && pacman -Q xfconf && pacman -Q labwc && pacman -Q wlr-randr && pacman -Q xorg-xwayland && pacman -Q xdg-desktop-portal && pacman -Q xdg-desktop-portal-gtk && pacman -Q onboard && pacman -Q firefox && pacman -Q evince && pacman -Q pipewire && pacman -Q pipewire-audio && pacman -Q pipewire-alsa && pacman -Q sudo"
         .to_string()
 }
 
 fn xfce_install() -> String {
-    "stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar noto-fonts xfce4 labwc wlr-randr xorg-xwayland xdg-desktop-portal xdg-desktop-portal-gtk onboard firefox evince pipewire pipewire-audio pipewire-alsa"
+    "stdbuf -oL pacman -Syu --needed --noconfirm --noprogressbar noto-fonts xfce4 labwc wlr-randr xorg-xwayland xdg-desktop-portal xdg-desktop-portal-gtk onboard firefox evince pipewire pipewire-audio pipewire-alsa sudo"
         .to_string()
 }
 /// Direct the desktop session to the compositor and the host PipeWire socket.
@@ -265,7 +266,7 @@ fn xfce_launch() -> String {
 
 /// Plasma without the parts that need hardware or services Android doesn't give proot (Bluetooth,
 /// NetworkManager, disks, printers). KWin nests directly on Local Desktop's compositor.
-const PLASMA_PACKAGES: &str = "noto-fonts plasma-desktop plasma-keyboard plasma-pa kscreen konsole dolphin okular xdg-desktop-portal-kde xorg-xwayland firefox pipewire pipewire-audio pipewire-alsa";
+const PLASMA_PACKAGES: &str = "noto-fonts plasma-desktop plasma-keyboard plasma-pa kscreen konsole dolphin okular xdg-desktop-portal-kde xorg-xwayland firefox pipewire pipewire-audio pipewire-alsa sudo";
 
 fn plasma_check() -> String {
     format!("pacman -Q {PLASMA_PACKAGES}")

@@ -1,88 +1,31 @@
 ---
-title: Creating a Non-root User
+title: Using a Non-root User
 ---
 
-For a simple setup process, Local Desktop won't prompt for a user registration form, that's why **it is login as root by default**.
+Local Desktop logs in as root unless told otherwise: there is no registration form to fill in. Some programs are better off, or only work, as a normal user:
 
-However, some applications are **recommended** or **required** to run as a normal user. For example:
+- Chromium and Electron-based programs like VS Code are safer without root.
+- AUR helpers like paru or yay refuse to run as root.
 
-- Chrome and Electron-based applications like VS Code **work better or are safer** without root.
-- AUR helpers like Paru or Yay require a non-root user and **won't work as root**.
+## Tell Local Desktop who to log in as
 
-:::info
-
-Please follow the instructions below carefully, or you can continue to use XFCE with root if you prefer.
-
-:::
-
-## Create your user
-
-Open a terminal and run the following command:
-
-_(Replace `teddy` with your preferred username)_
-
-```bash
-useradd -m teddy
-```
-
-The `-m` flag creates a home directory for the user.
-
-## Create your password
-
-Set a password for your new user (you'll need this for `sudo`):
-
-```bash
-passwd teddy
-```
-
-## Set up `sudo`
-
-Once you have logged in as a non-root user, you **must** use `sudo` to run commands with root privileges. If you skip this step, you **won't** be able to install new packages.
-
-Install `sudo`:
-
-```bash
-pacman -S sudo
-```
-
-Allow your user to use `sudo` by editing the sudoers file:
-
-```bash
-EDITOR=nano visudo
-```
-
-Append a new line:
-
-```
-teddy ALL=(ALL) ALL
-```
-
-_(Replace `teddy` with the username you created [previously](#create-your-user))_
-
-Save and exit.
-
-You can test if your new user can use `sudo` by temporarily logging in:
-
-```bash
-su teddy # Change to your username
-sudo ls /root # Make sure it does not output something like: "teddy is not in the sudoers file"
-```
-
-## [Important] Tell Local Desktop
-
-You must tell Local Desktop who to log in as, or it will log in as root. To (create and) edit the config file:
-
-```
-nano /etc/localdesktop/localdesktop.toml
-```
-
-Add the following content:
+Add the user's name to the config file (create the file if it isn't there):
 
 ```toml title="/etc/localdesktop/localdesktop.toml"
 [user]
 username = "teddy"
 ```
 
-_(Replace `teddy` with the username you created [previously](#create-your-user))_
+_(Replace `teddy` with the name you want: lowercase letters, digits, `_` and `-`, starting with a letter.)_
 
-The changes will take effect the next time you launch Local Desktop. If something goes wrong, you can always delete this config file and restart as root.
+The next start creates the user if it doesn't exist yet:
+
+- a home directory, `/home/teddy`, with the usual starting files (`/etc/skel`);
+- `sudo` without a password, as a member of the `wheel` group (the rule is in `/etc/sudoers.d/localdesktop`);
+- no password of its own, so there is nothing to type. SSH logs in with keys; to log in with a password instead, set one with `passwd`.
+
+The desktop, the SSH server and the shared clipboard then run as that user. Root's files stay where they were, in `/root`.
+
+A user you created yourself (`useradd -m teddy`) is used as is, and gets the same `sudo` rule.
+
+If the desktop doesn't come up with the new user, delete the `[user]` section or fix the name and restart. `try_username` tries a name once, see [Configurations](./4-configurations.md#special-try_-configs).
