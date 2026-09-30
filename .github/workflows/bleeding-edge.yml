@@ -1,0 +1,150 @@
+# Builds the "Local Desktop (bleeding edge)" APK from the bleeding-edge branch of this fork: the
+# work here that hasn't reached the official app yet. It installs next to the official app as its
+# own package (app.polarbear.edge) with its own Linux system, and next to the dev build.
+#
+# Every push to the branch builds an APK you can download from the run. A tag named
+# bleeding-edge-<anything> also publishes it as a GitHub release.
+#
+# The APK is signed with the fork's own key, so that updates install over each other. The key
+# comes from the repository secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
+# ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD (the same names the official build uses).
+name: Bleeding edge APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - bleeding-edge
+    tags:
+      - "bleeding-edge-*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+env:
+  CARGO_TERM_COLOR: always
+  ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+  ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+  ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+  # Its own package next to the official app; build.rs derives the rootfs path from it.
+  LOCALDESKTOP_PACKAGE: app.polarbear.edge
+  LOCALDESKTOP_LABEL: Local Desktop (bleeding edge)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Gradle 8.14.3
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Name the build
+        id: version
+        run: |
+          base=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[0].version')
+          stamp=$(date -u +%Y%m%d)
+          run=$(printf '%02d' $((GITHUB_RUN_NUMBER % 100)))
+          echo "name=${base}-bleeding-edge.${stamp}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          # Grows with every build, so that a newer APK installs over an older one.
+          echo "code=$(date -u +%y%m%d)${run}" >> "$GITHUB_OUTPUT"
+          echo "file=localdesktop-bleeding-edge-${stamp}-${GITHUB_SHA::7}.apk" >> "$GITHUB_OUTPUT"
+
+      - name: Setup signing keystore
+        run: |
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "::error::The repository secret ANDROID_KEYSTORE_BASE64 is missing (with ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD). See docs/bleeding-edge.md."
+            exit 1
+          fi
+          mkdir -p target/x/release/android/gradle/app
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > target/x/release/android/gradle/app/release-key.jks
+          keytool -list -keystore target/x/release/android/gradle/app/release-key.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" > /dev/null
+
+      - name: Set the package, label and version
+        run: |
+          sed -i \
+            -e "s/^\(    package:\) app\.polarbear\$/\1 $LOCALDESKTOP_PACKAGE\n    version_code: ${{ steps.version.outputs.code }}\n    version_name: \"${{ steps.version.outputs.name }}\"/" \
+            -e "s/^\(      label:\) \"Local Desktop\"\$/\1 \"$LOCALDESKTOP_LABEL\"/" \
+            -e 's/target_sdk_version: 33/target_sdk_version: 35/' \
+            manifest.yaml
+          grep -q "^    package: $LOCALDESKTOP_PACKAGE\$" manifest.yaml
+          grep -q "^    version_code: " manifest.yaml
+          grep -q "^      label: \"$LOCALDESKTOP_LABEL\"\$" manifest.yaml
+          sed -n '/^  manifest:/,/^    sdk:/p' manifest.yaml
+
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm
+
+      - name: Download Android NDK r28
+        run: |
+          curl -o android-ndk-r28-linux.zip https://dl.google.com/android/repository/android-ndk-r28-linux.zip
+          unzip -q android-ndk-r28-linux.zip
+          rm android-ndk-r28-linux.zip
+
+      - name: Prepare Android.ndk
+        run: |
+          TOOLCHAIN=android-ndk-r28/toolchains/llvm/prebuilt/linux-x86_64
+          CLANG_VERSION=$(ls $TOOLCHAIN/lib/clang | head -n 1)
+          CLANG=$TOOLCHAIN/lib/clang/$CLANG_VERSION
+
+          mkdir Android.ndk
+          cp -r $TOOLCHAIN/sysroot/usr Android.ndk/
+          cp -r $CLANG/lib/linux/aarch64/* Android.ndk/usr/lib/aarch64-linux-android/
+          cp -r $CLANG/lib/linux/arm/* Android.ndk/usr/lib/arm-linux-androideabi/
+          cp -r $CLANG/lib/linux/x86_64/* Android.ndk/usr/lib/x86_64-linux-android/
+          cp -r $CLANG/lib/linux/i386/* Android.ndk/usr/lib/i686-linux-android/
+
+          echo "INPUT(-lunwind)" > Android.ndk/usr/lib/aarch64-linux-android/libgcc.a
+          echo "INPUT(-lunwind)" > Android.ndk/usr/lib/arm-linux-androideabi/libgcc.a
+          echo "INPUT(-lunwind)" > Android.ndk/usr/lib/x86_64-linux-android/libgcc.a
+          echo "INPUT(-lunwind)" > Android.ndk/usr/lib/i686-linux-android/libgcc.a
+
+          mkdir -p ~/.cache/x/
+          mv Android.ndk ~/.cache/x/
+
+      - name: Build xbuild
+        working-directory: patches/xbuild
+        run: cargo install --path xbuild
+
+      - name: Build APK
+        run: x build --release --platform=android --arch=arm64 --format=apk
+
+      - name: Collect the APK
+        run: |
+          mkdir -p out
+          mv target/x/release/android/gradle/app/build/outputs/apk/release/app-release.apk "out/${{ steps.version.outputs.file }}"
+          ls -l out
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.file }}
+          path: out/${{ steps.version.outputs.file }}
+          if-no-files-found: error
+
+      - name: Release notes
+        if: github.ref_type == 'tag'
+        run: |
+          {
+            echo "**Local Desktop (bleeding edge)**, version ${{ steps.version.outputs.name }}, built from ${GITHUB_SHA::7}."
+            echo
+            echo "How to install it, what it is and what to expect: [docs/bleeding-edge.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/bleeding-edge.md)."
+            echo
+            git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
+          } > notes.md
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Local Desktop (bleeding edge) ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body_path: notes.md
+          prerelease: true
+          files: out/${{ steps.version.outputs.file }}

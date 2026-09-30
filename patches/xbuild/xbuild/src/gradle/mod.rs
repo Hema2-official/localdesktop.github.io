@@ -267,6 +267,20 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
         &java,
     )?;
 
+    // The ProGuard rules the app's build.gradle refers to: the package's, or none. R8 would
+    // otherwise drop the classes and methods that are only reached from native code.
+    let rules = android_source_path(
+        env.cargo().package_root(),
+        "proguard-rules.pro",
+        "proguard-rules.pro",
+    );
+    let rules = if rules.exists() {
+        std::fs::read_to_string(&rules)?
+    } else {
+        String::new()
+    };
+    std::fs::write(app.join("proguard-rules.pro"), rules)?;
+
     let kotlin_srcs = [
         android_source_path(env.cargo().package_root(), "kotlin", "kotlin"),
         env.platform_dir().join("wry"),
