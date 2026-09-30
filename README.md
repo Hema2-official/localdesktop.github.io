@@ -1,5 +1,7 @@
 # Local Desktop
 
+> **This fork** carries work that hasn't reached the official app yet: KDE Plasma, a faster proot, a shared clipboard, a normal user, SSH. Its `bleeding-edge` branch builds an app that installs next to the official one: see [docs/bleeding-edge.md](docs/bleeding-edge.md).
+
 Local Desktop helps you run a desktop Linux environment on your Android device.
 
 **Note**: It is expected that you already have a usable desktop experience, i.e., a large enough display (tablet or DEX), a physical keyboard, and optionally a mouse/trackpad. **Local Desktop aims to bridge the gap between the two platforms, not trying to "simulate" the desktop experience by introducing inconvenient interactions**.
