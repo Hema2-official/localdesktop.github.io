@@ -37,6 +37,8 @@ extern int writev_data(Tracee *tracee, word_t dest_tracee, const struct iovec *s
 extern int read_data(const Tracee *tracee, void *dest_tracer, word_t src_tracee, word_t size);
 extern int read_string(const Tracee *tracee, char *dest_tracer, word_t src_tracee, word_t max_size);
 extern word_t peek_word(const Tracee *tracee, word_t address);
+#define READ_WORDS_MAX 256
+extern size_t read_words(const Tracee *tracee, word_t address, word_t words[], size_t count);
 extern void poke_word(const Tracee *tracee, word_t address, word_t value);
 extern word_t alloc_mem(Tracee *tracee, ssize_t size);
 extern int clear_mem(Tracee *tracee, word_t address, size_t size);

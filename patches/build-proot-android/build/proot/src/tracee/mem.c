@@ -601,6 +601,51 @@ word_t peek_word(const Tracee *tracee, word_t address)
 }
 
 /**
+ * Copy up to @count (at most READ_WORDS_MAX) words of the @tracee's
+ * memory at @address into @words, each widened to a word_t (a 32-bit
+ * tracee has 32-bit words): one system call instead of peek_word()'s
+ * one per word.  A read that runs into memory the tracee doesn't have
+ * stops there.  This function returns how many words it copied.
+ */
+size_t read_words(const Tracee *tracee, word_t address, word_t words[], size_t count)
+{
+	size_t word_size = sizeof_word(tracee);
+	size_t i;
+
+	assert(count <= READ_WORDS_MAX);
+
+#if defined(HAVE_PROCESS_VM)
+	uint32_t small_words[READ_WORDS_MAX];
+	struct iovec local;
+	struct iovec remote;
+	ssize_t length;
+
+	local.iov_base = word_size == sizeof(word_t) ? (void *) words : (void *) small_words;
+	local.iov_len  = count * word_size;
+
+	remote.iov_base = (void *) address;
+	remote.iov_len  = count * word_size;
+
+	length = process_vm_readv(tracee->pid, &local, 1, &remote, 1, 0);
+	if (length >= (ssize_t) word_size) {
+		count = length / word_size;
+		if (word_size != sizeof(word_t)) {
+			for (i = 0; i < count; i++)
+				words[i] = small_words[i];
+		}
+		return count;
+	}
+	/* Fallback to ptrace if something went wrong.  */
+#endif
+	for (i = 0; i < count; i++) {
+		words[i] = peek_word(tracee, address + i * word_size);
+		if (errno != 0)
+			break;
+	}
+	return i;
+}
+
+/**
  * Set the word at the given @address in the @tracee's memory space to
  * the given @value.  The caller must test errno to check if an error
  * occured.

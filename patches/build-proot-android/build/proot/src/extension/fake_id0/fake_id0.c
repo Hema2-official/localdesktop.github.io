@@ -279,6 +279,15 @@ typedef struct {
 #define GROUPS_FLAGS FILTER_SYSEXIT
 #endif
 
+/* With ownership records, the chown(2) family is answered at entry
+ * (see handle_chown_enter_end()); without, EPERM is turned into
+ * success at its exit.  */
+#ifdef USERLAND
+#define CHOWN_FLAGS 0
+#else
+#define CHOWN_FLAGS FILTER_SYSEXIT
+#endif
+
 /* List of syscalls handled by this extensions.  */
 static FilteredSysnum filtered_sysnums[] = {
 #ifdef USERLAND
@@ -306,15 +315,15 @@ static FilteredSysnum filtered_sysnums[] = {
 #endif
 	{ PR_capset,		FILTER_SYSEXIT },
 	{ PR_chmod,		FILTER_SYSEXIT },
-	{ PR_chown,		FILTER_SYSEXIT },
-	{ PR_chown32,		FILTER_SYSEXIT },
+	{ PR_chown,		CHOWN_FLAGS },
+	{ PR_chown32,		CHOWN_FLAGS },
 	{ PR_chroot,		FILTER_SYSEXIT },
 	{ PR_execve,		FILTER_SYSEXIT },
 	{ PR_fchmod,		FILTER_SYSEXIT },
 	{ PR_fchmodat,		FILTER_SYSEXIT },
-	{ PR_fchown,		FILTER_SYSEXIT },
-	{ PR_fchown32,		FILTER_SYSEXIT },
-	{ PR_fchownat,		FILTER_SYSEXIT },
+	{ PR_fchown,		CHOWN_FLAGS },
+	{ PR_fchown32,		CHOWN_FLAGS },
+	{ PR_fchownat,		CHOWN_FLAGS },
 	/* fstat(2) and fstatat(2) are answered at entry (STAT_SYSCALL),
 	 * PRoot asks for the exit stage when it can't.  */
 	{ PR_fstat,		0 },
@@ -335,8 +344,8 @@ static FilteredSysnum filtered_sysnums[] = {
 	{ PR_getuid,		0 },
 	{ PR_getuid32,		0 },
 	{ PR_getsockopt,	FILTER_SYSEXIT },
-	{ PR_lchown,		FILTER_SYSEXIT },
-	{ PR_lchown32,		FILTER_SYSEXIT },
+	{ PR_lchown,		CHOWN_FLAGS },
+	{ PR_lchown32,		CHOWN_FLAGS },
 	{ PR_lstat,		FILTER_SYSEXIT },
 	{ PR_lstat64,		FILTER_SYSEXIT },
 	{ PR_mknod,		FILTER_SYSEXIT },

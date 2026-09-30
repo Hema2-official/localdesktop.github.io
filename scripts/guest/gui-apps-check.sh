@@ -9,8 +9,9 @@ if [ -z "$shell_pid" ]; then
     echo "no Plasma session running"
     exit 1
 fi
-# The session's environment (display, D-Bus, runtime dir).
-eval "$(tr '\0' '\n' < "/proc/$shell_pid/environ" | grep -E '^(DISPLAY|XAUTHORITY|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP|QT_QPA_PLATFORMTHEME|XDG_SESSION_TYPE|XDG_DATA_DIRS|XDG_CONFIG_DIRS|LD_PRELOAD|MESA_VK_WSI_DEBUG|MOZ_SHM_NO_SEALS)=' | sed "s/'/'\\\\''/g; s/=\(.*\)/='\1'/; s/^/export /")"
+# The session's environment (display, D-Bus, runtime dir, locale). The locale matters beyond
+# messages: GIMP queries all its plug-ins again (20 s) whenever it differs from the last run's.
+eval "$(tr '\0' '\n' < "/proc/$shell_pid/environ" | grep -E '^(DISPLAY|XAUTHORITY|WAYLAND_DISPLAY|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|XDG_CURRENT_DESKTOP|QT_QPA_PLATFORMTHEME|XDG_SESSION_TYPE|XDG_DATA_DIRS|XDG_CONFIG_DIRS|LD_PRELOAD|MESA_VK_WSI_DEBUG|MOZ_SHM_NO_SEALS|LANG|LANGUAGE|LC_[A-Z_]+|TZ)=' | sed "s/'/'\\\\''/g; s/=\(.*\)/='\1'/; s/^/export /")"
 
 sandbox=
 [ "$(id -u)" = 0 ] && sandbox=--no-sandbox

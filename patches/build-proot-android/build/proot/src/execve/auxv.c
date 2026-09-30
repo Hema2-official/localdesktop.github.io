@@ -27,6 +27,8 @@
 #include <sys/types.h>     /* open(2), */
 #include <sys/stat.h>      /* open(2), */
 #include <fcntl.h>         /* open(2), */
+#include <stdint.h>        /* uint*_t, */
+#include <string.h>        /* memcpy(3), memset(3), */
 
 #include "execve/auxv.h"
 #include "syscall/sysnum.h"
@@ -76,8 +78,10 @@ int add_elf_aux_vector(ElfAuxVector **vectors, word_t type, word_t value)
  */
 word_t get_elf_aux_vectors_address(const Tracee *tracee)
 {
+	word_t words[READ_WORDS_MAX];
 	word_t address;
-	word_t data;
+	size_t count;
+	size_t i;
 
 	/* Sanity check: this works only in execve sysexit.  */
 	assert(IS_IN_SYSEXIT2(tracee, PR_execve));
@@ -89,22 +93,24 @@ word_t get_elf_aux_vectors_address(const Tracee *tracee)
 	address = peek_reg(tracee, CURRENT, STACK_POINTER);
 
 	/* Read: argc */
-	data = peek_word(tracee, address);
-	if (errno != 0)
+	if (read_words(tracee, address, words, 1) != 1)
 		return 0;
 
 	/* Skip: argc, argv, 0 */
-	address += (1 + data + 1) * sizeof_word(tracee);
+	address += (1 + words[0] + 1) * sizeof_word(tracee);
 
-	/* Skip: envp, 0 */
-	do {
-		data = peek_word(tracee, address);
-		if (errno != 0)
+	/* Skip: envp, 0 (a block of words at a time) */
+	while (1) {
+		count = read_words(tracee, address, words, READ_WORDS_MAX);
+		if (count == 0)
 			return 0;
-		address += sizeof_word(tracee);
-	} while (data != 0);
 
-	return address;
+		for (i = 0; i < count; i++) {
+			if (words[i] == 0)
+				return address + (i + 1) * sizeof_word(tracee);
+		}
+		address += count * sizeof_word(tracee);
+	}
 }
 
 /**
@@ -117,7 +123,9 @@ word_t get_elf_aux_vectors_address(const Tracee *tracee)
 ElfAuxVector *fetch_elf_aux_vectors(const Tracee *tracee, word_t address)
 {
 	ElfAuxVector *vectors = NULL;
-	ElfAuxVector vector;
+	word_t words[READ_WORDS_MAX];
+	size_t count;
+	size_t i;
 	int status;
 
 	/* It is assumed the sentinel always exists.  */
@@ -127,58 +135,60 @@ ElfAuxVector *fetch_elf_aux_vectors(const Tracee *tracee, word_t address)
 	vectors[0].type  = AT_NULL;
 	vectors[0].value = 0;
 
+	/* A block of [type, value] pairs at a time.  */
 	while (1) {
-		vector.type = peek_word(tracee, address);
-		if (errno != 0)
+		count = read_words(tracee, address, words, READ_WORDS_MAX);
+		count -= count % 2;
+		if (count == 0)
 			return NULL;
-		address += sizeof_word(tracee);
 
-		if (vector.type == AT_NULL)
-			break; /* Already added.  */
+		for (i = 0; i < count; i += 2) {
+			if (words[i] == AT_NULL)
+				return vectors; /* Already added.  */
 
-		vector.value = peek_word(tracee, address);
-		if (errno != 0)
-			return NULL;
-		address += sizeof_word(tracee);
-
-		status = add_elf_aux_vector(&vectors, vector.type, vector.value);
-		if (status < 0)
-			return NULL;
+			status = add_elf_aux_vector(&vectors, words[i], words[i + 1]);
+			if (status < 0)
+				return NULL;
+		}
+		address += count * sizeof_word(tracee);
 	}
-
-	return vectors;
 }
 
 /**
  * Push ELF auxiliary @vectors to the given @address in @tracee's
- * memory.  This function returns -errno if an error occurred,
- * otherwise 0.
+ * memory, in one write.  This function returns -errno if an error
+ * occurred, otherwise 0.
  */
-int push_elf_aux_vectors(const Tracee* tracee, ElfAuxVector *vectors, word_t address)
+int push_elf_aux_vectors(Tracee *tracee, ElfAuxVector *vectors, word_t address)
 {
+	size_t word_size = sizeof_word(tracee);
+	size_t nb_vectors;
+	uint8_t *buffer;
 	size_t i;
+	int status;
 
-	for (i = 0; vectors[i].type != AT_NULL; i++) {
-		poke_word(tracee, address, vectors[i].type);
-		if (errno != 0)
-			return -errno;
-		address += sizeof_word(tracee);
+	/* Up to the sentinel, included.  */
+	for (nb_vectors = 1; vectors[nb_vectors - 1].type != AT_NULL; nb_vectors++)
+		;
 
-		poke_word(tracee, address, vectors[i].value);
-		if (errno != 0)
-			return -errno;
-		address += sizeof_word(tracee);
+	buffer = talloc_size(tracee->ctx, nb_vectors * 2 * word_size);
+	if (buffer == NULL)
+		return -ENOMEM;
+
+	for (i = 0; i < nb_vectors; i++) {
+		word_t pair[2] = { vectors[i].type, vectors[i].value };
+
+		if (word_size == sizeof(word_t))
+			memcpy(buffer + i * 2 * word_size, pair, sizeof(pair));
+		else {
+			uint32_t small_pair[2] = { (uint32_t) pair[0], (uint32_t) pair[1] };
+			memcpy(buffer + i * 2 * word_size, small_pair, sizeof(small_pair));
+		}
 	}
+	/* The sentinel's value is 0, whatever the array says.  */
+	memset(buffer + (nb_vectors * 2 - 1) * word_size, 0, word_size);
 
-	poke_word(tracee, address, AT_NULL);
-	if (errno != 0)
-		return -errno;
-	address += sizeof_word(tracee);
-
-	poke_word(tracee, address, 0);
-	if (errno != 0)
-		return -errno;
-	address += sizeof_word(tracee);
-
-	return 0;
+	status = write_data(tracee, address, buffer, nb_vectors * 2 * word_size);
+	talloc_free(buffer);
+	return status;
 }

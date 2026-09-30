@@ -140,17 +140,21 @@ int translate_and_check_exec(Tracee *tracee, char host_path[PATH_MAX], const cha
 	if (status < 0)
 		return status;
 
-	status = access(host_path, F_OK);
+	status = stat(host_path, &statl);
 	if (status < 0)
 		return -ENOENT;
 
-	status = access(host_path, X_OK);
+	/* The guest rootfs is PRoot's own files, on a partition that
+	 * allows execution: access(2) would only look at their owner's x
+	 * bit, and it costs several times what stat(2) does on some
+	 * kernels (Android's 5.4 copies the credentials for each call).
+	 * Elsewhere, like on /sdcard (mounted noexec), ask the kernel.  */
+	if (belongs_to_guestfs(tracee, host_path) && statl.st_uid == getuid())
+		status = (statl.st_mode & S_IXUSR) != 0 ? 0 : -1;
+	else
+		status = access(host_path, X_OK);
 	if (status < 0)
 		return -EACCES;
-
-	status = lstat(host_path, &statl);
-	if (status < 0)
-		return -EPERM;
 
 	return 0;
 }

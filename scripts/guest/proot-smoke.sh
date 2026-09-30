@@ -253,6 +253,37 @@ print(len(socket.if_nameindex()), socket.if_nametoindex("lo"), end="")
         *) fail "network interfaces can be listed" "$(echo "$interfaces" | tail -1)" ;;
     esac
 fi
+# faccessat(3) with flags (bash's [ -r ], coreutils' test): glibc tries faccessat2(2) first, which
+# proot answers where the kernel lacks it (Linux < 5.8). AT_SYMLINK_NOFOLLOW checks a symlink
+# itself, which allows everything; unknown flags are EINVAL before anything else.
+if command -v python3 > /dev/null; then
+    mkdir -p access && echo x > access/plain && chmod 644 access/plain && ln -s plain access/link
+    accesses=$(cd access && python3 -c '
+import ctypes, errno
+libc = ctypes.CDLL(None, use_errno=True)
+def check(path, mode, flags):
+    ctypes.set_errno(0)
+    return "0" if libc.faccessat(-100, path, mode, flags) == 0 else errno.errorcode[ctypes.get_errno()]
+print(check(b"plain", 4, 0), check(b"plain", 1, 0x200), check(b"link", 1, 0),
+      check(b"link", 1, 0x100), check(b"missing", 0, 0x100), check(b"plain", 4, 0x1))
+' 2>&1)
+    [ "$accesses" = "0 EACCES EACCES 0 ENOENT EINVAL" ] \
+        && pass "faccessat() flags behave like the kernel's" \
+        || fail "faccessat() flags behave like the kernel's" "$accesses"
+fi
+
+# chown(2): an owner alone (chown(1) passes -1 for the group) keeps the group, and only root or
+# the owner may change a file's ownership.
+touch chowned && chown "$(id -u)" chowned 2>/dev/null
+group=$(stat -c %g chowned)
+[ "$group" = "$(id -g)" ] && pass "chown of the owner alone keeps the group" \
+    || fail "chown of the owner alone keeps the group" "group $group"
+if [ "$(id -u)" != 0 ]; then
+    chown "$(id -u)" /usr/bin/env 2>/dev/null \
+        && fail "chown of someone else's file is refused" "it worked" \
+        || pass "chown of someone else's file is refused"
+fi
+
 # realpath(3) (Node's fs.realpathSync.native, Qt, Rust): Local Desktop preloads one that asks proot
 # for the whole answer (src/guest/realpath.c). It has to say what glibc's own says, through
 # symlinks, hard links (link2symlink), trailing slashes, errors and paths it leaves to glibc.

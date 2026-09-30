@@ -1,4 +1,5 @@
 #include <unistd.h>      /* get*id(2),  */
+#include <sys/stat.h>    /* lstat(2), */
 #include <linux/limits.h>
 #include <errno.h>
 
@@ -26,6 +27,15 @@ int handle_chown_enter_end(Tracee *tracee, Config *config, Reg uid_sysarg, Reg g
 #endif /* ifndef USERLAND */
 
 #ifdef USERLAND
+/* Answer the syscall with success right away: the kernel skips a voided
+ * syscall and returns the result register, so it needs no exit stop.  */
+static int answer_success(Tracee *tracee)
+{
+	set_sysnum(tracee, PR_void);
+	poke_reg(tracee, SYSARG_RESULT, 0);
+	return 0;
+}
+
 /** Handles chown, lchown, fchown, and fchownat syscalls. Changes the meta file
  *  to reflect arguments sent to the syscall if the meta file exists. See
  *  chown(2) for returned permission errors.
@@ -48,17 +58,26 @@ int handle_chown_enter_end(Tracee *tracee, Reg path_sysarg, Reg owner_sysarg,
 	if(status < 0)
 		return status;
 	// If the path exists outside the guestfs, drop the syscall.
-	else if(status == 1) {
-		set_sysnum(tracee, PR_getuid);
-		return 0;
-	}
+	else if(status == 1)
+		return answer_success(tracee);
 
 	status = get_meta_path(path, meta_path);
 	if(status < 0)
 		return status;
 
-	if(path_exists(meta_path) != 0)
-		return 0;
+	/* Without a record, the kernel's chown(2) could only change the
+	 * group to one of the app's own: root is told it worked if the
+	 * file is there, like its EPERM used to be turned into success at
+	 * the exit, and anybody else gets what the kernel says.  */
+	if(path_exists(meta_path) != 0) {
+		struct stat statl;
+
+		if(config->euid != 0)
+			return 0;
+		if(path_sysarg != IGNORE_SYSARG && lstat(path, &statl) < 0)
+			return -errno;
+		return answer_success(tracee);
+	}
 
 	status = get_fd_path(tracee, rel_path, dirfd_sysarg, CURRENT);
 	if(status < 0)
@@ -77,7 +96,10 @@ int handle_chown_enter_end(Tracee *tracee, Reg path_sysarg, Reg owner_sysarg,
 	 */
 	if((int) owner == -1)
 		owner = read_owner;
+	/* Likewise for the group: chown(1) with an owner only passes -1.  */
 	group = peek_reg(tracee, ORIGINAL, group_sysarg);
+	if((int) group == -1)
+		group = read_group;
 	if(config->euid == 0) 
 		write_meta_file(meta_path, mode, owner, group, 0, config);
 
@@ -88,11 +110,9 @@ int handle_chown_enter_end(Tracee *tracee, Reg path_sysarg, Reg owner_sysarg,
 		poke_reg(tracee, owner_sysarg, read_owner);	
 	}
 
-	else if(config->euid != read_owner) 
+	else if(config->euid != read_owner)
 		return -EPERM;
 
-	set_sysnum(tracee, PR_getuid);
-
-	return 0;
+	return answer_success(tracee);
 }
 #endif /* ifdef USERLAND */

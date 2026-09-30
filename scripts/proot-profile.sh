@@ -12,7 +12,8 @@
 #   -H HZ       stack samples per second of proot CPU time (default 1000, 0 for none)
 #   -P          also log every path the programs use, and summarize by program and directory
 #   -k DIR      keep the raw profile files in DIR
-# Environment: LOCALDESKTOP_PACKAGE (default app.polarbear.dev), LOCALDESKTOP_DEV_DIR
+# Environment: LOCALDESKTOP_PACKAGE (default app.polarbear.dev), LOCALDESKTOP_DEV_DIR,
+#              LOCALDESKTOP_DISPLAY (the display -S starts the app on, e.g. DeX's)
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -45,7 +46,8 @@ as_app sh -c "'rm -f $data/.proot-profile.*'"
 if [ -n "$session" ]; then
     printf '%s %s\n' "$hz" "$paths" | adb shell run-as "$package" sh -c "'cat > $data/.proot-profile-enable'"
     adb shell am force-stop "$package" < /dev/null
-    adb shell am start -n "$package/android.app.NativeActivity" < /dev/null > /dev/null
+    adb shell am start ${LOCALDESKTOP_DISPLAY:+--display "$LOCALDESKTOP_DISPLAY"} \
+        -n "$package/android.app.NativeActivity" < /dev/null > /dev/null
     sleep "$session"
     as_app rm -f "$data/.proot-profile-enable"
     # The tables and samples are written every 5 s.

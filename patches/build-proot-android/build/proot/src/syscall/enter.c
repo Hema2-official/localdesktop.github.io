@@ -30,6 +30,8 @@
 #include <sys/prctl.h>   /* PR_SET_DUMPABLE */
 #include <sys/ptrace.h>  /* PTRACE_SYSCALL, */
 #include <sys/stat.h>    /* S_IFLNK, */
+#include <sys/syscall.h> /* SYS_faccessat2, */
+#include <signal.h>      /* sigaction(2), SIGSYS, */
 #include <unistd.h>      /* readlink(2), */
 #include <termios.h>     /* TCSETS, TCSANOW */
 
@@ -51,6 +53,7 @@
 #include "path/binding.h"
 #include "tracee/statx.h"
 #include "arch.h"
+#include "attribute.h"
 
 /**
  * Translate @path and put the result in the @tracee's memory address
@@ -442,6 +445,98 @@ static int translate_stat(Tracee *tracee, int dir_fd, char path[PATH_MAX])
 	return answered_or_exit_stage(tracee, status);
 }
 
+#ifndef SYS_faccessat2
+#define SYS_faccessat2 439
+#endif
+
+static int faccessat2_trapped;
+
+static void note_trapped_faccessat2(int signal UNUSED)
+{
+	faccessat2_trapped = 1;
+}
+
+/**
+ * Whether the kernel has faccessat2(2), which came with Linux 5.8.  The
+ * probe is guarded like statx_allowed()'s: a seccomp policy may answer
+ * a system call it doesn't know with SIGSYS.
+ */
+static bool kernel_has_faccessat2(void)
+{
+	static int has = -1;
+
+	if (has < 0) {
+		struct sigaction trap;
+		struct sigaction previous;
+		long status;
+
+		memset(&trap, 0, sizeof(trap));
+		trap.sa_handler = note_trapped_faccessat2;
+		sigemptyset(&trap.sa_mask);
+		faccessat2_trapped = 0;
+		sigaction(SIGSYS, &trap, &previous);
+		status = syscall(SYS_faccessat2, AT_FDCWD, "/", F_OK, 0);
+		sigaction(SIGSYS, &previous, NULL);
+		has = status == 0 && !faccessat2_trapped;
+	}
+	return has;
+}
+
+/**
+ * Translate faccessat2(2), whose AT_SYMLINK_NOFOLLOW leaves a symlink at
+ * the end of the path alone.  Where the kernel doesn't have it, turn it
+ * into faccessat(2): glibc tries faccessat2(2) first for every
+ * faccessat(3), even without flags, and on ENOSYS falls back to
+ * faccessat(2), or to fstatat(2) and get*id(2), so each call used to
+ * cost two to four stops.  Under PRoot a process's real and effective
+ * ids are the same, so AT_EACCESS changes nothing; a symlink checked
+ * itself allows everything, it only has to be there.  This function
+ * returns -errno if an error occured, otherwise 0.
+ */
+static int translate_faccessat2(Tracee *tracee)
+{
+	int dir_fd = peek_reg(tracee, CURRENT, SYSARG_1);
+	int flags = peek_reg(tracee, CURRENT, SYSARG_4);
+	bool follow = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+	char host_path[PATH_MAX];
+	char path[PATH_MAX];
+	int status;
+
+	status = get_sysarg_path(tracee, path, SYSARG_2);
+	if (status < 0)
+		return status;
+
+	if (kernel_has_faccessat2())
+		return translate_path2(tracee, dir_fd, path, SYSARG_2, follow ? REGULAR : SYMLINK);
+
+	/* What glibc says to other flags on such kernels.  */
+	if ((flags & ~(AT_SYMLINK_NOFOLLOW | AT_EACCESS)) != 0)
+		return -EINVAL;
+
+	/* faccessat(2) has no AT_EMPTY_PATH either.  */
+	if (path[0] == '\0')
+		return peek_reg(tracee, CURRENT, SYSARG_2) == 0 ? -EFAULT : -ENOENT;
+
+	status = translate_path(tracee, host_path, dir_fd, path, follow);
+	if (status < 0)
+		return status;
+
+	/* The extensions look at the translated path, see
+	 * handle_access_enter_end().  */
+	status = set_sysarg_path(tracee, host_path, SYSARG_2);
+	if (status < 0)
+		return status;
+
+	if (!follow && final_component_type(host_path) == S_IFLNK) {
+		set_sysnum(tracee, PR_void);
+		poke_reg(tracee, SYSARG_RESULT, 0);
+		return 0;
+	}
+
+	set_sysnum(tracee, PR_faccessat);
+	return 0;
+}
+
 /**
  * Translate the input arguments of the current @tracee's syscall in the
  * @tracee->pid process area. This function sets @tracee->status to
@@ -827,9 +922,12 @@ int translate_syscall_enter(Tracee *tracee)
 			status = translate_path2(tracee, dirfd, path, SYSARG_2, REGULAR);
 		break;
 
+	case PR_faccessat2:
+		status = translate_faccessat2(tracee);
+		break;
+
 	case PR_fchmodat:
 	case PR_faccessat:
-	case PR_faccessat2:
 	case PR_futimesat:
 	case PR_mknodat:
 		dirfd = peek_reg(tracee, CURRENT, SYSARG_1);
