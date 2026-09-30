@@ -11,6 +11,7 @@ use crate::android::{
         },
         webview::ErrorVariant,
     },
+    guest,
     proot::launch::launch,
     session, terminal,
     utils::{
@@ -130,6 +131,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
                 }
                 handle(CentralizedEvent::Redraw, backend, event_loop);
                 launch();
+                guest::start(&self.frontend.android_app);
                 let android_app = &self.frontend.android_app;
                 session::ask_permissions(android_app);
                 session::start_service(android_app);
@@ -165,6 +167,10 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        if let WindowEvent::Focused(focused) = event {
+            // Android shows its clipboard to the focused app only.
+            guest::notify(guest::Event::Focus(focused));
+        }
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             if backend.graphic_renderer.is_none() {
                 if matches!(event, WindowEvent::CloseRequested) {

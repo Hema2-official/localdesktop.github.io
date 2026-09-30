@@ -1,6 +1,7 @@
 //! The session notification (`SessionService`) and the calls it makes back into Rust
 //! (`app.polarbear.Native`). Java sources are in `src/android/java/app/polarbear/`.
 
+use crate::android::guest;
 use crate::android::proot::{launch, ssh};
 use crate::android::terminal;
 use crate::android::utils::application_context::get_application_context;
@@ -18,7 +19,7 @@ use winit::platform::android::activity::AndroidApp;
 static APP: OnceLock<AndroidApp> = OnceLock::new();
 
 /// Load one of the app's own classes. `FindClass` on a native thread only sees the system's.
-fn app_class<'local>(
+pub(crate) fn app_class<'local>(
     env: &mut JNIEnv<'local>,
     activity: &JObject,
     name: &str,
@@ -61,7 +62,7 @@ fn with_activity(android_app: &AndroidApp, what: &str, call: impl FnOnce(&mut JN
     );
 }
 
-/// Make `Native.onAction` reach `on_action`. NativeActivity loads this library without
+/// Make the methods of `Native` reach this library. NativeActivity loads it without
 /// `System.loadLibrary`, so the JVM can't find it by symbol name.
 pub fn register_natives(android_app: &AndroidApp) {
     let _ = APP.set(android_app.clone());
@@ -69,13 +70,24 @@ pub fn register_natives(android_app: &AndroidApp) {
         let class = app_class(env, activity, "app.polarbear.Native")?;
         env.register_native_methods(
             &class,
-            &[NativeMethod {
-                name: "onAction".into(),
-                sig: "(Ljava/lang/String;)V".into(),
-                fn_ptr: on_action as *mut std::ffi::c_void,
-            }],
+            &[
+                NativeMethod {
+                    name: "onAction".into(),
+                    sig: "(Ljava/lang/String;)V".into(),
+                    fn_ptr: on_action as *mut std::ffi::c_void,
+                },
+                NativeMethod {
+                    name: "onClipboardChanged".into(),
+                    sig: "()V".into(),
+                    fn_ptr: on_clipboard_changed as *mut std::ffi::c_void,
+                },
+            ],
         )
     });
+}
+
+extern "system" fn on_clipboard_changed(_env: JNIEnv, _class: JClass) {
+    guest::notify(guest::Event::AndroidClipboard);
 }
 
 extern "system" fn on_action(mut env: JNIEnv, _class: JClass, action: JString) {

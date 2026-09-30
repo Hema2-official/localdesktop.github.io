@@ -104,3 +104,19 @@ fast_realpath = false
 ```
 
 Both take effect the next time Local Desktop starts.
+
+## Clipboard
+
+Android and the desktop share one clipboard: what you copy in an Android app can be pasted in the desktop's programs, and what you copy there in Android's apps.
+
+- Android only shows its clipboard to the app in front, so what you copied on Android reaches the desktop once Local Desktop's window is in front again. Android 12 and later may then say "Local Desktop pasted from your clipboard": that is the desktop taking your copy, when a program there reads it (Plasma's clipboard history does so right away).
+- What you copy on the desktop reaches Android when you switch to another app. Android takes up to about 500 KB of text.
+- Text and HTML for now, images later.
+- The desktop's compositor has to let clipboard managers in (`ext-data-control-v1` or `wlr-data-control`), which KWin (the Plasma preset), labwc (the Xfce preset) and sway do.
+
+To keep the two clipboards apart:
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[clipboard]
+sync = false
+```

@@ -65,6 +65,9 @@ pub struct LocalConfig {
     #[serde(default)]
     pub performance: PerformanceConfig,
 
+    #[serde(default)]
+    pub clipboard: ClipboardConfig,
+
     /// What happens if we don't assign this `#[serde(default)]` attribute?
     /// The answer: If the user omits the `[command]` group, the WHOLE config fails to parse
     /// => The default `[user]` group is applied (with `username=root`) even if the `[user]` settings are completely valid.
@@ -179,6 +182,21 @@ impl Default for PerformanceConfig {
             cpu_boost: default_cpu_boost(),
             fast_realpath: true,
         }
+    }
+}
+
+/// One clipboard for Android and the desktop: what is copied on one side can be pasted on the
+/// other. Linux programs can then read what was copied on Android while Local Desktop is in
+/// front, like programs on any desktop can.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ClipboardConfig {
+    #[serde(default = "default_true")]
+    pub sync: bool,
+}
+
+impl Default for ClipboardConfig {
+    fn default() -> Self {
+        Self { sync: true }
     }
 }
 
@@ -373,6 +391,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("ssh", &["enabled", "port", "password_login", "authorized_keys"]),
     ("graphics", &["adreno_drivers"]),
     ("performance", &["cpu_boost", "fast_realpath"]),
+    ("clipboard", &["sync"]),
     ("command", &["check", "install", "launch"]),
 ];
 
@@ -394,6 +413,7 @@ fn lenient(content: &str) -> LocalConfig {
         ssh: section(&table, "ssh"),
         graphics: section(&table, "graphics"),
         performance: section(&table, "performance"),
+        clipboard: section(&table, "clipboard"),
         command: section(&table, "command"),
         problems: Vec::new(),
     }
@@ -651,6 +671,18 @@ mod tests {
             let config = parse_config(full_config_path);
             assert!(!config.performance.fast_realpath);
             assert_eq!(config.performance.utilization_floor(), 512);
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+    }
+
+    #[test]
+    fn should_share_the_clipboard_unless_turned_off() {
+        with_config_file("[user]\nusername = \"alice\"\n", |full_config_path| {
+            assert!(parse_config(full_config_path).clipboard.sync);
+        });
+        with_config_file("[clipboard]\nsync = false\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert!(!config.clipboard.sync);
             assert!(config.problems.is_empty(), "{:?}", config.problems);
         });
     }

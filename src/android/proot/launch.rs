@@ -1,4 +1,5 @@
 use super::process::ArchProcess;
+use crate::android::guest;
 use crate::android::session;
 use crate::android::utils::application_context::{get_application_context, reload_local_config};
 use crate::core::config::ARCH_FS_ROOT;
@@ -52,6 +53,7 @@ pub fn launch() {
         log::info!("Skipping launch because the desktop session is already running");
         return;
     }
+    guest::notify(guest::Event::SessionStarting);
 
     thread::spawn(move || {
         let _guard = LaunchRunningGuard;

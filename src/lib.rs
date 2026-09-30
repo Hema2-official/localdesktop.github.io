@@ -1,4 +1,5 @@
 pub mod core {
+    pub mod clipboard;
     pub mod config;
     pub mod hard_links;
 }
@@ -6,6 +7,8 @@ pub mod core {
 #[cfg(target_os = "android")]
 pub mod android {
     pub mod accessibility;
+    pub mod clipboard;
+    pub mod guest;
 
     pub mod main;
     pub mod session;
