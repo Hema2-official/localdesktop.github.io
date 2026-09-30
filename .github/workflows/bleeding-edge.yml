@@ -66,12 +66,15 @@ jobs:
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > target/x/release/android/gradle/app/release-key.jks
           keytool -list -keystore target/x/release/android/gradle/app/release-key.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" > /dev/null
 
+      # The service type by name: AAPT refuses the hex value the in-repo packager needs, whose
+      # android.jar (API 33) predates specialUse.
       - name: Set the package, label and version
         run: |
           sed -i \
             -e "s/^\(    package:\) app\.polarbear\$/\1 $LOCALDESKTOP_PACKAGE\n    version_code: ${{ steps.version.outputs.code }}\n    version_name: \"${{ steps.version.outputs.name }}\"/" \
             -e "s/^\(      label:\) \"Local Desktop\"\$/\1 \"$LOCALDESKTOP_LABEL\"/" \
             -e 's/target_sdk_version: 33/target_sdk_version: 35/' \
+            -e 's/foreground_service_type: "0x40000000"/foreground_service_type: specialUse/' \
             manifest.yaml
           grep -q "^    package: $LOCALDESKTOP_PACKAGE\$" manifest.yaml
           grep -q "^    version_code: " manifest.yaml
