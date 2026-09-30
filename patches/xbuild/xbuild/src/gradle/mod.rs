@@ -313,7 +313,12 @@ pub fn build(env: &BuildEnv, libraries: Vec<(Target, PathBuf)>, out: &Path) -> R
             if let Some(parent) = dest_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::copy(&source_path, &dest_path)?;
+            // A directory of assets goes in whole, as the apk crate embeds it.
+            if source_path.is_dir() {
+                copy_dir_contents(&source_path, &dest_path)?;
+            } else {
+                std::fs::copy(&source_path, &dest_path)?;
+            }
         }
     }
 
