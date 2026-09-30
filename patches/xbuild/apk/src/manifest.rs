@@ -70,6 +70,8 @@ pub struct Application {
     pub theme: Option<String>,
     #[serde(rename(serialize = "android:hasCode"))]
     pub has_code: Option<bool>,
+    #[serde(rename(serialize = "android:allowBackup"))]
+    pub allow_backup: Option<bool>,
     #[serde(rename(serialize = "android:icon"))]
     pub icon: Option<String>,
     #[serde(rename(serialize = "android:label"))]
@@ -136,6 +138,8 @@ pub struct Service {
     pub enabled: Option<bool>,
     #[serde(rename(serialize = "android:exported"))]
     pub exported: Option<bool>,
+    #[serde(rename(serialize = "android:foregroundServiceType"))]
+    pub foreground_service_type: Option<String>,
     #[serde(rename(serialize = "meta-data"))]
     #[serde(default)]
     pub meta_data: Vec<MetaData>,
