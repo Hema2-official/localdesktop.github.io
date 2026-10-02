@@ -177,6 +177,40 @@ pub struct AndroidClip {
     pub kinds: Kinds,
 }
 
+/// Why Android's clip on offer on the desktop couldn't be read when a program there asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unread {
+    /// It has no text after all: its items are empty, or not text.
+    Empty,
+    /// Android gave none although the window has focus: the clipboard was cleared (Android 13
+    /// and later do that after an hour, apps can too).
+    Gone,
+    /// The window doesn't have focus, and Android only lets the app with focus read.
+    Unfocused,
+    /// Reading failed: the exception Android threw, or "JNI".
+    Failed(String),
+}
+
+impl Unread {
+    /// Whether the clip can't be read later either. Then the offer is withdrawn, or every
+    /// program on the desktop that asks for it would get nothing, and the link would ask Android
+    /// again each time.
+    pub fn lasting(&self) -> bool {
+        !matches!(self, Self::Unfocused)
+    }
+}
+
+impl std::fmt::Display for Unread {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Empty => f.write_str("it has no text"),
+            Self::Gone => f.write_str("Android gave none"),
+            Self::Unfocused => f.write_str("the window doesn't have focus"),
+            Self::Failed(what) => write!(f, "reading it failed ({what})"),
+        }
+    }
+}
+
 /// When to copy which way. The latest copy wins, wherever it was made.
 ///
 /// Android only shows its clipboard to the app whose window has focus, so its clips are looked
@@ -369,6 +403,23 @@ mod tests {
             kinds: TEXT,
         };
         assert_eq!(sync.android_clip(Some(own)), Step::Nothing);
+    }
+
+    #[test]
+    fn should_withdraw_a_clip_it_cannot_read_later_either() {
+        assert!(Unread::Empty.lasting());
+        assert!(Unread::Gone.lasting());
+        assert!(Unread::Failed("java.lang.SecurityException".into()).lasting());
+        // Android lets the window read it once it has focus again.
+        assert!(!Unread::Unfocused.lasting());
+
+        // Withdrawn, it isn't offered again when the window gets focus, only the next clip is.
+        let mut sync = Sync::new(true);
+        assert_eq!(sync.android_clip(foreign(1)), Step::OfferToDesktop(TEXT));
+        assert_eq!(sync.focus(false), Step::Nothing);
+        assert_eq!(sync.focus(true), Step::Nothing);
+        assert_eq!(sync.android_clip(foreign(1)), Step::Nothing);
+        assert_eq!(sync.android_clip(foreign(2)), Step::OfferToDesktop(TEXT));
     }
 
     #[test]

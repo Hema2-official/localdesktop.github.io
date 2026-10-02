@@ -6,13 +6,14 @@
 //!
 //! Nothing is copied before someone needs it. Android's clip goes to the desktop as an offer,
 //! and is read when a program there asks for it (Klipper does right away, for its history).
-//! The desktop's selection is read when the app's window loses focus.
+//! If Android can't give it then, the offer is withdrawn. The desktop's selection is read when
+//! the app's window loses focus.
 //!
 //! What is copied never goes to the log, only how much of it.
 
 use super::{Globals, State};
 use crate::android::clipboard::{AndroidClipboard, Content};
-use crate::core::clipboard::{self as rules, Kind, Kinds, Step, Sync};
+use crate::core::clipboard::{self as rules, Kind, Kinds, Step, Sync, Unread};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
@@ -203,6 +204,14 @@ impl Desktop {
         if self.source.as_ref() == Some(&source) {
             self.source = None;
             self.happened.push(Happened::Withdrawn);
+        }
+    }
+
+    /// Take the link's selection off the desktop. Destroying the source leaves the selection
+    /// alone if another program has made one meanwhile, as unsetting it wouldn't.
+    fn withdraw(&mut self) {
+        if let Some(source) = self.source.take() {
+            source.destroy();
         }
     }
 
@@ -480,7 +489,7 @@ impl Job {
                         self.copy_to_android(Some(&mut *desktop));
                     }
                 }
-                Happened::Asked { mime_type, pipe } => self.answer(&mime_type, pipe),
+                Happened::Asked { mime_type, pipe } => self.answer(desktop, &mime_type, pipe),
                 Happened::Withdrawn => self.offered = None,
             }
         }
@@ -576,17 +585,35 @@ impl Job {
     }
 
     /// A program on the desktop wants Android's clip.
-    fn answer(&mut self, mime_type: &str, pipe: OwnedFd) {
+    fn answer(&mut self, desktop: &mut Desktop, mime_type: &str, pipe: OwnedFd) {
         let Some(offered) = &mut self.offered else {
             return;
         };
         if offered.content.is_none() {
-            offered.content = self.android.read();
-            if offered.content.is_none() {
-                log::info!("Clipboard sharing: Android didn't let its clip be read");
-                return;
+            // Android only lets the app whose window has focus read its clipboard.
+            let read = if self.sync.focused() {
+                self.android.read()
+            } else {
+                Err(Unread::Unfocused)
+            };
+            match read {
+                Ok(content) => {
+                    self.on_android = Some(content.clone());
+                    offered.content = Some(content);
+                }
+                Err(why) if why.lasting() => {
+                    // Requests already on their way find no offer: one line per clip, however
+                    // many types and programs ask.
+                    log::info!("Clipboard sharing: took Android's clip off the desktop, {why}");
+                    desktop.withdraw();
+                    self.offered = None;
+                    return;
+                }
+                Err(why) => {
+                    log::trace!("Clipboard sharing: Android's clip can't be read now, {why}");
+                    return;
+                }
             }
-            self.on_android = offered.content.clone();
         }
         let Some(content) = &offered.content else {
             return;

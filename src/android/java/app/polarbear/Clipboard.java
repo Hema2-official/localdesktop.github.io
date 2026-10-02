@@ -1,5 +1,6 @@
 package app.polarbear;
 
+import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
@@ -34,10 +35,17 @@ final class Clipboard {
      * What is on the clipboard, without reading it: its timestamp, "own" for a clip written
      * here, "text" and "html" for what it has. Null without a clip or without access to it.
      */
+    @SuppressWarnings("deprecation")
     static String[] describe(Context context) {
+        ClipboardManager manager = manager(context);
+        boolean hasText;
         ClipDescription description;
         try {
-            description = manager(context).getPrimaryClipDescription();
+            // A text clip's type doesn't tell whether it has any: KDE Connect makes empty ones of
+            // a PC clipboard without text. hasText() looks at the first item without reading the
+            // clip. Asked first: if the access ends in between, that is no clip, not an empty one.
+            hasText = manager.hasText();
+            description = manager.getPrimaryClipDescription();
         } catch (RuntimeException e) {
             return null;
         }
@@ -47,22 +55,30 @@ final class Clipboard {
         long stamp = Build.VERSION.SDK_INT >= 26 ? description.getTimestamp() : changes;
         boolean own = LABEL.contentEquals(String.valueOf(description.getLabel()));
         boolean html = description.hasMimeType(ClipDescription.MIMETYPE_TEXT_HTML);
-        boolean text = html || description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN);
+        boolean text = html
+                || (hasText && description.hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN));
         return new String[] {
             Long.toString(stamp), own ? "own" : "", text ? "text" : "", html ? "html" : ""
         };
     }
 
-    /** The clip's text and its HTML (or null), null if there is nothing to read. */
+    /**
+     * "text", the clip's text and its HTML (or null). Or why there is nothing to read: "empty"
+     * for a clip without text, "gone" if Android gives none although the window has focus,
+     * "unfocused" if it doesn't have it, or "failed" and the exception.
+     */
     static String[] read(Context context) {
         ClipData clip;
         try {
             clip = manager(context).getPrimaryClip();
         } catch (RuntimeException e) {
-            return null;
+            return new String[] {"failed", e.getClass().getName()};
         }
-        if (clip == null || clip.getItemCount() == 0) {
-            return null;
+        if (clip == null) {
+            // Android doesn't say whether it keeps the clipboard from the app.
+            boolean focused =
+                    !(context instanceof Activity) || ((Activity) context).hasWindowFocus();
+            return new String[] {focused ? "gone" : "unfocused"};
         }
         // Several items are several things copied at once: one per line, as Android pastes them.
         StringBuilder text = new StringBuilder();
@@ -90,9 +106,9 @@ final class Clipboard {
             }
         }
         if (text.length() == 0 && !hasHtml) {
-            return null;
+            return new String[] {"empty"};
         }
-        return new String[] {text.toString(), hasHtml ? html.toString() : null};
+        return new String[] {"text", text.toString(), hasHtml ? html.toString() : null};
     }
 
     /** Make a clip of the text, and its HTML if not null. Whether Android took it. */

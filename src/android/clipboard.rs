@@ -2,7 +2,7 @@
 //! (`guest::clipboard`). What Android allows when is described there.
 
 use crate::android::session::app_class;
-use crate::core::clipboard::{AndroidClip, Kinds};
+use crate::core::clipboard::{AndroidClip, Kinds, Unread};
 use jni::errors::Result as JniResult;
 use jni::objects::{GlobalRef, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::{JNIInvokeInterface_, _jobject};
@@ -104,8 +104,8 @@ impl AndroidClipboard {
     }
 
     /// Read the clip. Android 12 and later tell the user when it is another app's.
-    pub fn read(&self) -> Option<Content> {
-        self.call("read", |env, class, context| {
+    pub fn read(&self) -> Result<Content, Unread> {
+        let fields = self.call("read", |env, class, context| {
             let fields = env
                 .call_static_method(
                     class,
@@ -114,16 +114,25 @@ impl AndroidClipboard {
                     &[context.into()],
                 )?
                 .l()?;
-            let Some(fields) = strings(env, fields)? else {
-                return Ok(None);
-            };
-            let mut fields = fields.into_iter();
-            Ok(Some(Content {
+            strings(env, fields)
+        });
+        let Some(Some(fields)) = fields else {
+            // `call` has told what went wrong.
+            return Err(Unread::Failed("JNI".into()));
+        };
+        let mut fields = fields.into_iter();
+        let what = fields.next().flatten().unwrap_or_default();
+        match what.as_str() {
+            "text" => Ok(Content {
                 text: fields.next().flatten().unwrap_or_default(),
                 html: fields.next().flatten(),
-            }))
-        })
-        .flatten()
+            }),
+            "empty" => Err(Unread::Empty),
+            "gone" => Err(Unread::Gone),
+            "unfocused" => Err(Unread::Unfocused),
+            // "failed" and the exception.
+            _ => Err(Unread::Failed(fields.next().flatten().unwrap_or(what))),
+        }
     }
 
     /// Make a clip of `content`. Whether Android took it.
