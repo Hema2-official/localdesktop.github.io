@@ -85,11 +85,13 @@ adreno_drivers = false
 
 Programs in Local Desktop run under proot, which steps in on many of their system calls. While it does, the program waits, so Android sees it as less busy than it is and gives it slower cores at a lower clock, where each of those system calls costs more. Local Desktop tells Android to count the Linux programs as busier than they look. It only makes a difference while programs are running, not when the desktop is idle.
 
+proot itself is what the programs wait for, so while it steps in on system calls in quick succession (installing packages, scanning or extracting files, Node.js tools), it also asks Android for the full clock, and lets go again after a quiet second. That takes a sixth to a third off the time such work needs with the `balanced` floor alone, as much as `max` does; the desktop's own drawing isn't affected, since it makes few system calls.
+
 | `cpu_boost` | |
 |---|---|
-| `balanced` (default) | Starting programs takes about a quarter to a third less time than with `off`. |
-| `max` | About 40 % less than `off`, at the cost of more battery while programs run. |
-| `off` | Leaves the choice of cores to Android. |
+| `balanced` (default) | Starting programs takes about a quarter to a third less time than with `off`, and proot runs at full clock while it's busy. |
+| `max` | About 40 % less than `off`. Everything runs at full clock, the desktop's drawing included, at the cost of more battery while programs run. |
+| `off` | Leaves the choice of cores and clocks to Android, for proot too. |
 
 ```toml title="/etc/localdesktop/localdesktop.toml"
 [performance]

@@ -159,7 +159,9 @@ impl Default for GraphicsConfig {
 /// How Android schedules the Linux programs. Under proot a program spends much of its time
 /// stopped while proot handles its system calls, so the scheduler sees it as less busy than it is
 /// and runs it on slower cores at a lower clock, where every system call costs more. A floor on
-/// its utilization corrects that; it only costs energy while programs are running.
+/// its utilization corrects that; it only costs energy while programs are running. Unless it's
+/// `off`, proot also raises its own floor to the maximum while it handles system calls in quick
+/// succession, since that's what the programs wait for.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PerformanceConfig {
     /// `off`, `balanced` (the default) or `max`. Kept as a string so that an unknown value falls

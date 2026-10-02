@@ -39,6 +39,7 @@
 #include "tracee/seccomp.h"
 #include "tracee/mem.h"
 #include "tracee/profile.h"
+#include "tracee/busy.h"
 #include "cli/note.h"
 #include "path/path.h"
 #include "path/binding.h"
@@ -327,6 +328,7 @@ int event_loop()
 
 	/* After the loop above, which ignores SIGPROF.  */
 	profile_init();
+	busy_init();
 
 	while (1) {
 		int tracee_status;
@@ -371,6 +373,9 @@ int event_loop()
 
 		signal = handle_tracee_event(tracee, tracee_status);
 		(void) restart_tracee(tracee, signal);
+
+		if (busy_enabled)
+			busy_note_stop();
 
 		if (profile_enabled)
 			profile_stop_end(tracee, tracee_status, was_sysenter);

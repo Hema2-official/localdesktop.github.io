@@ -232,6 +232,13 @@ impl ArchProcess {
             .env("PROOT_TMP_DIR", &context.data_dir)
             .env("PROOT_L2S_DIR", l2s_dir);
 
+        // A program waits for proot at each system call proot steps in on, so while proot handles
+        // them in quick succession it raises its own floor to the maximum, and lowers it again
+        // once it calms down (tracee/busy.c in proot). The programs keep the floor set here.
+        if utilization_floor > 0 {
+            process.env("PROOT_BUSY_BOOST", "1");
+        }
+
         // For measuring proot itself: with `files/.proot-profile-enable` present, each proot
         // writes its per-syscall stop counts to `files/.proot-profile.<pid>`, plus stack samples
         // at the rate the file starts with, and a log of the paths used if it says "paths" too.

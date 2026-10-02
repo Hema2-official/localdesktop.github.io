@@ -53,6 +53,7 @@ OBJECTS += \
 	tracee/seccomp.o        \
 	tracee/statx.o		\
 	tracee/profile.o	\
+	tracee/busy.o		\
 	ptrace/ptrace.o		\
 	ptrace/user.o		\
 	ptrace/wait.o		\
