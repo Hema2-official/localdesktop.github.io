@@ -6,6 +6,10 @@
 /// desktop's own and copy them back.
 pub const LINK_TYPE: &str = "application/x-localdesktop-clipboard";
 
+/// On the entry Plasma's clipboard history (Klipper) puts back when the clipboard was emptied:
+/// the program that had it quit, or the link withdrew its offer.
+const RESTORED_TYPE: &str = "application/x-kde-onlyReplaceEmpty";
+
 /// How much text Android gets at most, in UTF-16 units as it goes through Binder, whose
 /// transactions end at 1 MB.
 pub const ANDROID_TEXT_LIMIT: usize = 250_000;
@@ -163,6 +167,9 @@ pub enum Step {
     Nothing,
     /// Put Android's clip on the desktop, to be read when a program there asks for it.
     OfferToDesktop(Kinds),
+    /// Look at Android's clip again and offer it: a program on the desktop replaced it with an
+    /// older entry of its own.
+    OfferAgain,
     /// Read the desktop's selection and make it Android's clip.
     CopyToAndroid,
 }
@@ -217,6 +224,10 @@ impl std::fmt::Display for Unread {
 /// at when the window gets it. The desktop's selections are copied to Android when the window
 /// loses it: until then nothing on Android could paste them, and copying inside the desktop
 /// costs nothing (nor brings up Android's clipboard popup each time).
+///
+/// Not every selection on the desktop is a copy: Plasma's clipboard history (Klipper) puts back
+/// entries of its own, when it starts and when the clipboard was emptied, and those are older
+/// than Android's clip unless the desktop had a copy Android hadn't got yet.
 #[derive(Debug, Default)]
 pub struct Sync {
     focused: bool,
@@ -224,6 +235,12 @@ pub struct Sync {
     seen: Option<i64>,
     /// The desktop has a selection of its own that Android doesn't have yet.
     pending: bool,
+    /// `pending` when the desktop's selection was last emptied: Klipper puts that one back.
+    pending_when_emptied: bool,
+    /// A program on the desktop has made a selection since the session started.
+    selected: bool,
+    /// The user has pressed a key, touched or clicked on the desktop since the session started.
+    input: bool,
 }
 
 impl Sync {
@@ -263,19 +280,35 @@ impl Sync {
         }
         // Newer than whatever the desktop has.
         self.pending = false;
+        self.pending_when_emptied = false;
         Step::OfferToDesktop(clip.kinds)
+    }
+
+    /// The user has pressed a key, touched or clicked on the desktop.
+    pub fn input(&mut self) {
+        self.input = true;
     }
 
     /// The desktop's selection changed to one offering these types, or to none.
     pub fn desktop_selection<T: AsRef<str>>(&mut self, offered: Option<&[T]>) -> Step {
         let Some(offered) = offered else {
-            self.pending = false;
+            self.pending_when_emptied = std::mem::take(&mut self.pending);
             return Step::Nothing;
         };
         if is_from_link(offered) {
             return Step::Nothing;
         }
-        if text_type(offered).is_none() && html_type(offered).is_none() {
+        if !std::mem::replace(&mut self.selected, true) && !self.input {
+            // Nobody has copied anything yet: Klipper puts back the last session's entry when it
+            // starts, over whatever the clipboard has.
+            self.pending = false;
+            self.seen = None;
+            return Step::OfferAgain;
+        }
+        let restored = offered.iter().any(|it| it.as_ref() == RESTORED_TYPE);
+        if (restored && !self.pending_when_emptied)
+            || (text_type(offered).is_none() && html_type(offered).is_none())
+        {
             self.pending = false;
             return Step::Nothing;
         }
@@ -290,6 +323,9 @@ impl Sync {
     /// The session's compositor is gone, and its selection with it.
     pub fn desktop_gone(&mut self) {
         self.pending = false;
+        self.pending_when_emptied = false;
+        self.selected = false;
+        self.input = false;
     }
 
     /// Android's clip has to be looked at again, e.g. for a new desktop session to get it.
@@ -425,6 +461,7 @@ mod tests {
     #[test]
     fn should_copy_to_android_when_the_window_loses_focus() {
         let mut sync = Sync::new(true);
+        sync.input();
         assert_eq!(sync.desktop_selection(Some(&["text/plain"])), Step::Nothing);
         assert_eq!(sync.desktop_selection(Some(&["UTF8_STRING"])), Step::Nothing);
         assert_eq!(sync.focus(false), Step::CopyToAndroid);
@@ -436,6 +473,7 @@ mod tests {
     #[test]
     fn should_copy_to_android_at_once_without_focus() {
         let mut sync = Sync::new(false);
+        sync.input();
         assert_eq!(
             sync.desktop_selection(Some(&["text/plain"])),
             Step::CopyToAndroid
@@ -456,6 +494,7 @@ mod tests {
     #[test]
     fn should_let_the_latest_copy_win() {
         let mut sync = Sync::new(true);
+        sync.input();
         // Copied on the desktop, then something arrives on Android before the window loses
         // focus (another device's clipboard, say).
         assert_eq!(sync.desktop_selection(Some(&["text/plain"])), Step::Nothing);
@@ -472,6 +511,7 @@ mod tests {
     #[test]
     fn should_forget_a_selection_that_is_gone() {
         let mut sync = Sync::new(true);
+        sync.input();
         assert_eq!(sync.desktop_selection(Some(&["text/plain"])), Step::Nothing);
         assert_eq!(sync.desktop_selection(None::<&[&str]>), Step::Nothing);
         assert_eq!(sync.focus(false), Step::Nothing);
@@ -485,6 +525,60 @@ mod tests {
         assert_eq!(sync.desktop_selection(Some(&["text/plain"])), Step::Nothing);
         sync.desktop_gone();
         assert_eq!(sync.focus(false), Step::Nothing);
+    }
+
+    #[test]
+    fn should_offer_the_clip_again_over_klippers_entry_from_the_last_session() {
+        let mut sync = Sync::new(true);
+        assert_eq!(sync.android_clip(foreign(1)), Step::OfferToDesktop(TEXT));
+        // Klipper starts and puts back its latest entry, before the user did anything.
+        let entry = ["text/plain;charset=utf-8", "text/plain"];
+        assert_eq!(sync.desktop_selection(Some(&entry)), Step::OfferAgain);
+        assert_eq!(sync.android_clip(foreign(1)), Step::OfferToDesktop(TEXT));
+        assert_eq!(sync.focus(false), Step::Nothing);
+
+        // Only the first selection is taken for that: later ones are copies, with input or
+        // without (`wl-copy` over SSH).
+        assert_eq!(sync.focus(true), Step::Nothing);
+        assert_eq!(sync.desktop_selection(Some(&entry)), Step::Nothing);
+        assert_eq!(sync.focus(false), Step::CopyToAndroid);
+
+        // In the next session the user is quicker.
+        sync.desktop_gone();
+        assert_eq!(sync.focus(true), Step::Nothing);
+        sync.input();
+        assert_eq!(sync.desktop_selection(Some(&entry)), Step::Nothing);
+        assert_eq!(sync.focus(false), Step::CopyToAndroid);
+    }
+
+    #[test]
+    fn should_copy_klippers_entry_for_an_emptied_clipboard_only_if_android_lacks_it() {
+        let restored = ["text/plain;charset=utf-8", "text/plain", RESTORED_TYPE];
+        let mut sync = Sync::new(true);
+        sync.input();
+        // Copied on the desktop, then Android's newer clip was offered and taken off again (it
+        // couldn't be read): Klipper puts back the older copy, which stays on the desktop.
+        assert_eq!(sync.desktop_selection(Some(&["text/plain"])), Step::Nothing);
+        assert_eq!(sync.android_clip(foreign(1)), Step::OfferToDesktop(TEXT));
+        assert_eq!(sync.desktop_selection(None::<&[&str]>), Step::Nothing);
+        assert_eq!(sync.desktop_selection(Some(&restored)), Step::Nothing);
+        assert_eq!(sync.focus(false), Step::Nothing);
+
+        // Copied on the desktop, and the program quit before the window lost focus: Klipper puts
+        // back the copy, which Android hasn't got yet.
+        assert_eq!(sync.focus(true), Step::Nothing);
+        assert_eq!(sync.desktop_selection(Some(&["text/plain"])), Step::Nothing);
+        assert_eq!(sync.desktop_selection(None::<&[&str]>), Step::Nothing);
+        assert_eq!(sync.desktop_selection(Some(&restored)), Step::Nothing);
+        assert_eq!(sync.focus(false), Step::CopyToAndroid);
+
+        // Without focus it went to Android at once.
+        assert_eq!(
+            sync.desktop_selection(Some(&["text/plain"])),
+            Step::CopyToAndroid
+        );
+        assert_eq!(sync.desktop_selection(None::<&[&str]>), Step::Nothing);
+        assert_eq!(sync.desktop_selection(Some(&restored)), Step::Nothing);
     }
 
     #[test]

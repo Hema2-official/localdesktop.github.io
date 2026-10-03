@@ -6,6 +6,7 @@ use crate::android::{
         },
         write_guest_output_state, CentralizedEvent, TouchMode, WaylandBackend,
     },
+    guest,
 };
 use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::element::surface::{
@@ -214,6 +215,16 @@ pub fn about_to_wait(backend: &mut WaylandBackend, event_loop: &ActiveEventLoop)
 }
 
 pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop: &ActiveEventLoop) {
+    if let CentralizedEvent::Input(
+        InputEvent::Keyboard { .. }
+        | InputEvent::TouchDown { .. }
+        | InputEvent::PointerButton { .. },
+    ) = &event
+    {
+        // Copying takes one of these: the clipboard sharing tells the user's copies from what
+        // programs put on the clipboard by themselves.
+        guest::user_input();
+    }
     match event {
         CentralizedEvent::CloseRequested => {
             event_loop.exit();

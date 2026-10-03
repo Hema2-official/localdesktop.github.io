@@ -472,21 +472,28 @@ impl Job {
     }
 
     /// Act on what the compositor told.
-    pub fn dispatched(&mut self, (desktop, _): Link) {
+    pub fn dispatched(&mut self, (desktop, queue): Link) {
         for happened in std::mem::take(&mut desktop.happened) {
             match happened {
                 Happened::Selected => {
                     // Whatever was being read is no longer the selection.
                     self.stop_reading();
                     let types = desktop.selection.as_ref().map(Offer::types);
+                    if super::input() {
+                        self.sync.input();
+                    }
                     let step = if std::mem::replace(&mut desktop.met, true) {
                         self.sync.desktop_selection(types.as_deref())
                     } else {
                         // Older than what Android has: it stays on the desktop.
                         self.sync.desktop_selection(None::<&[String]>)
                     };
-                    if step == Step::CopyToAndroid {
-                        self.copy_to_android(Some(&mut *desktop));
+                    match step {
+                        Step::CopyToAndroid => self.copy_to_android(Some(&mut *desktop)),
+                        Step::OfferAgain => {
+                            self.look_at_android(Some((&mut *desktop, queue.clone())))
+                        }
+                        _ => {}
                     }
                 }
                 Happened::Asked { mime_type, pipe } => self.answer(desktop, &mime_type, pipe),

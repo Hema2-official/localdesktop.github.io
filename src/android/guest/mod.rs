@@ -55,10 +55,25 @@ struct Shared {
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
 static FOCUSED: AtomicBool = AtomicBool::new(false);
+static INPUT: AtomicBool = AtomicBool::new(false);
 
 /// Whether the app's window has focus.
 fn focused() -> bool {
     FOCUSED.load(Ordering::Acquire)
+}
+
+/// The user pressed a key, touched or clicked on the desktop. Cheap enough for each of those: no
+/// system call and no wake-up, the link only looks when the desktop's clipboard changes.
+pub fn user_input() {
+    if !INPUT.load(Ordering::Relaxed) {
+        INPUT.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Whether the user has pressed a key, touched or clicked on the desktop since the link
+/// connected to it.
+fn input() -> bool {
+    INPUT.load(Ordering::Relaxed)
 }
 
 /// Tell the link, from any thread. Doesn't wait for anything.
@@ -495,6 +510,7 @@ impl Link {
                     self.disconnect("a newer compositor is there");
                     self.session = Some(session);
                     self.tries = 0;
+                    INPUT.store(false, Ordering::Relaxed);
                     return;
                 }
                 // Not listening yet, or what a session that was killed left behind.
