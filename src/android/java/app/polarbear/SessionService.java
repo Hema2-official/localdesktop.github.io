@@ -30,6 +30,8 @@ public class SessionService extends Service {
     /** The desktop session ended by itself; its output is in EXTRA_SESSION_LOG. */
     static final String EXTRA_DESKTOP_STOPPED = "desktop_stopped";
     static final String EXTRA_SESSION_LOG = "session_log";
+    /** What the app is doing instead of the usual, such as logging the desktop out first. */
+    static final String EXTRA_STATUS = "status";
     /** What's wrong with localdesktop.toml, one problem per line. */
     static final String EXTRA_CONFIG_PROBLEMS = "config_problems";
     private static final String PROBLEMS_CHANNEL_ID = "problems";
@@ -220,20 +222,27 @@ public class SessionService extends Service {
         Notification.Builder builder = builder(this);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
         Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
-        boolean stopped = !restarting && intent.getBooleanExtra(EXTRA_DESKTOP_STOPPED, false);
+        String status = intent.getStringExtra(EXTRA_STATUS);
+        boolean busy = restarting || status != null;
+        boolean stopped = !busy && intent.getBooleanExtra(EXTRA_DESKTOP_STOPPED, false);
         String text;
-        if (restarting) {
+        if (status != null) {
+            text = status;
+        } else if (restarting) {
             text = "Restarting the desktop…";
         } else if (stopped) {
             text = "Its output is in " + intent.getStringExtra(EXTRA_SESSION_LOG);
         } else {
             text = details(intent);
         }
-        builder.setContentTitle(stopped ? "The desktop stopped" : "Local Desktop is running")
+        String title = status != null ? "Logging out of the desktop"
+                : stopped ? "The desktop stopped" : "Local Desktop is running";
+        builder.setContentTitle(title)
                 .setContentText(text)
+                .setStyle(new Notification.BigTextStyle().bigText(text))
                 .setOngoing(true)
                 .setContentIntent(PendingIntent.getActivity(this, 0, open, flags));
-        if (restarting) {
+        if (busy) {
             builder.setProgress(0, 0, true);
         }
 
@@ -244,7 +253,7 @@ public class SessionService extends Service {
                     .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
             builder.addAction(0, "Terminal", PendingIntent.getActivity(this, 1, terminal, flags));
         }
-        if (!restarting) {
+        if (!busy) {
             builder.addAction(0, "Restart desktop", PendingIntent.getService(
                     this, 2, new Intent(this, SessionService.class).setAction(ACTION_RESTART), flags));
         }

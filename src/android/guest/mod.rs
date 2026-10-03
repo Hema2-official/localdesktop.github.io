@@ -10,7 +10,10 @@
 //! has a module of its own with its Wayland event handlers, and leaves the link alone while it
 //! has nothing to do.
 
+pub mod bus;
 pub mod clipboard;
+pub mod notifications;
+pub mod screen;
 
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config::ARCH_FS_ROOT;
@@ -142,6 +145,7 @@ impl Globals {
 pub struct State {
     globals: Globals,
     pub clipboard: Option<clipboard::Desktop>,
+    pub screen: Option<screen::Desktop>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -234,6 +238,7 @@ impl Session {
                     complete: false,
                 },
                 clipboard: None,
+                screen: None,
             },
             bound: false,
             clogged: false,
@@ -246,40 +251,55 @@ impl Session {
         self.state.clipboard.as_mut().map(|it| (it, handle))
     }
 
-    /// Bind what the jobs need, once the compositor has told what it offers.
-    fn bind(&mut self, clipboard: &mut Option<clipboard::Job>) -> Result<(), Ended> {
+    /// Bind what the jobs that are on need, once the compositor has told what it offers.
+    fn bind(&mut self, jobs: &mut Jobs) -> Result<(), Ended> {
         if self.bound || !self.state.globals.complete {
             return Ok(());
         }
         self.bound = true;
         let handle = self.queue.handle();
         let seat: wl_seat::WlSeat = self.state.globals.bind(&handle, 1).ok_or(Ended::Unsuitable)?;
-        self.state.clipboard = clipboard::Desktop::bind(&self.state.globals, &seat, &handle);
-        let (Some(job), Some(desktop)) = (clipboard.as_mut(), self.state.clipboard.as_mut())
-        else {
+        if let Some(job) = jobs.clipboard() {
+            self.state.clipboard = clipboard::Desktop::bind(&self.state.globals, &seat, &handle);
+            if let Some(desktop) = self.state.clipboard.as_mut() {
+                log::info!(
+                    "Clipboard sharing: connected to the desktop at {}",
+                    self.socket.display()
+                );
+                job.connected((desktop, handle.clone()));
+            }
+        }
+        if let Some(job) = jobs.screen() {
+            let timeout = job.timeout_ms();
+            self.state.screen =
+                screen::Desktop::bind(&self.state.globals, &seat, &handle, timeout);
+            if self.state.screen.is_some() {
+                job.connected(&self.socket, timeout);
+            }
+        }
+        let notifications = jobs.notifications();
+        let watching = notifications.is_some();
+        if let Some(job) = notifications {
+            job.connected();
+        }
+        if self.state.clipboard.is_none() && self.state.screen.is_none() && !watching {
             return Err(Ended::Unsuitable);
-        };
-        log::info!(
-            "Clipboard sharing: connected to the desktop at {}",
-            self.socket.display()
-        );
-        job.connected((desktop, handle));
+        }
         Ok(())
     }
 
     /// Handle what the compositor sent, send what there is to send, and get ready to read.
-    fn pump(
-        &mut self,
-        clipboard: &mut Option<clipboard::Job>,
-    ) -> Result<ReadEventsGuard, Ended> {
+    fn pump(&mut self, jobs: &mut Jobs) -> Result<ReadEventsGuard, Ended> {
         loop {
             self.queue
                 .dispatch_pending(&mut self.state)
                 .map_err(|error| Ended::Lost(error.to_string()))?;
-            self.bind(clipboard)?;
-            if let (Some(job), Some(desktop)) = (clipboard.as_mut(), self.state.clipboard.as_mut())
-            {
+            self.bind(jobs)?;
+            if let (Some(job), Some(desktop)) = (jobs.clipboard(), self.state.clipboard.as_mut()) {
                 job.dispatched((desktop, self.queue.handle()));
+            }
+            if let (Some(job), Some(desktop)) = (jobs.screen(), self.state.screen.as_mut()) {
+                job.dispatched(desktop);
             }
             match self.connection.flush() {
                 Ok(()) => self.clogged = false,
@@ -416,6 +436,30 @@ fn poll_entry(fd: RawFd, events: i16) -> libc::pollfd {
     }
 }
 
+/// The jobs, and which of them the config turns on.
+struct Jobs {
+    clipboard: Option<clipboard::Job>,
+    clipboard_on: bool,
+    screen: Option<screen::Job>,
+    screen_on: bool,
+    notifications: Option<notifications::Job>,
+    notifications_on: bool,
+}
+
+impl Jobs {
+    fn clipboard(&mut self) -> Option<&mut clipboard::Job> {
+        self.clipboard.as_mut().filter(|_| self.clipboard_on)
+    }
+
+    fn screen(&mut self) -> Option<&mut screen::Job> {
+        self.screen.as_mut().filter(|_| self.screen_on)
+    }
+
+    fn notifications(&mut self) -> Option<&mut notifications::Job> {
+        self.notifications.as_mut().filter(|_| self.notifications_on)
+    }
+}
+
 struct Link {
     shared: &'static Shared,
     watcher: Option<Watcher>,
@@ -427,7 +471,7 @@ struct Link {
     /// When to ask a socket again that didn't answer, and how often it was asked.
     retry: Option<Instant>,
     tries: u32,
-    clipboard: Option<clipboard::Job>,
+    jobs: Jobs,
 }
 
 impl Link {
@@ -440,6 +484,8 @@ impl Link {
             libc::pthread_sigmask(libc::SIG_BLOCK, &signals, std::ptr::null_mut());
         }
         let clipboard = clipboard::Job::new(android_app);
+        let screen = screen::Job::new(android_app);
+        let notifications = notifications::Job::new(android_app);
         // Android's runtime names the threads that attach to it "Thread-<n>".
         unsafe { libc::prctl(libc::PR_SET_NAME, c"guest-link".as_ptr()) };
         Self {
@@ -450,22 +496,30 @@ impl Link {
             look: true,
             retry: None,
             tries: 0,
-            clipboard,
+            jobs: Jobs {
+                clipboard,
+                clipboard_on: false,
+                screen,
+                screen_on: false,
+                notifications,
+                notifications_on: false,
+            },
         }
-    }
-
-    /// Whether any job is turned on.
-    fn wanted(&self) -> bool {
-        self.clipboard.is_some() && get_application_context().local_config.clipboard.sync
     }
 
     fn disconnect(&mut self, why: &str) {
         if let Some(session) = self.session.take() {
             log::info!(
-                "Clipboard sharing: left the desktop at {} ({why})",
+                "Guest link: left the desktop at {} ({why})",
                 session.socket.display()
             );
-            if let Some(job) = &mut self.clipboard {
+            if let Some(job) = &mut self.jobs.clipboard {
+                job.disconnected();
+            }
+            if let Some(job) = &mut self.jobs.screen {
+                job.disconnected();
+            }
+            if let Some(job) = &mut self.jobs.notifications {
                 job.disconnected();
             }
         }
@@ -475,10 +529,18 @@ impl Link {
     fn find_session(&mut self) {
         self.look = false;
         self.retry = None;
-        let wanted = self.wanted();
-        if let Some(job) = &mut self.clipboard {
-            job.turn(wanted);
+        let config = get_application_context().local_config;
+        let jobs = &mut self.jobs;
+        jobs.clipboard_on = jobs.clipboard.is_some() && config.clipboard.sync;
+        jobs.screen_on = jobs.screen.is_some() && config.screen.sleep_when_idle;
+        jobs.notifications_on = jobs.notifications.is_some() && config.notifications.forward;
+        if let Some(job) = &mut jobs.clipboard {
+            job.turn(jobs.clipboard_on);
         }
+        if let Some(job) = &mut jobs.screen {
+            job.turn(jobs.screen_on);
+        }
+        let wanted = jobs.clipboard_on || jobs.screen_on || jobs.notifications_on;
         if !wanted {
             self.disconnect("turned off");
             self.watcher = None;
@@ -521,7 +583,7 @@ impl Link {
                     }
                 }
                 Err(error) => log::info!(
-                    "Clipboard sharing: no connection to {}: {error}",
+                    "Guest link: no connection to {}: {error}",
                     socket.display()
                 ),
             }
@@ -535,8 +597,11 @@ impl Link {
             let Some(event) = event else {
                 return;
             };
+            if let (Event::Focus(focused), Some(job)) = (event, self.jobs.notifications()) {
+                job.focus(focused);
+            }
             let desktop = self.session.as_mut().and_then(Session::clipboard);
-            match (event, &mut self.clipboard) {
+            match (event, self.jobs.clipboard()) {
                 (Event::Focus(focused), Some(job)) => job.focus(focused, desktop),
                 (Event::AndroidClipboard, Some(job)) => job.android_changed(desktop),
                 (Event::SessionStarting, _) => {
@@ -557,12 +622,12 @@ impl Link {
 
             let mut reading = None;
             if let Some(session) = &mut self.session {
-                match session.pump(&mut self.clipboard) {
+                match session.pump(&mut self.jobs) {
                     Ok(guard) => reading = Some(guard),
                     Err(Ended::Unsuitable) => {
                         let tried = (session.socket.clone(), session.created);
                         log::info!(
-                            "Clipboard sharing: the compositor at {} has no data control",
+                            "Guest link: the compositor at {} has nothing for the jobs",
                             tried.0.display()
                         );
                         self.unsuitable.push(tried);
@@ -595,15 +660,22 @@ impl Link {
                 ));
             }
             let job_entries = entries.len();
-            if let Some(job) = &self.clipboard {
+            if let Some(job) = &self.jobs.clipboard {
+                job.waits_for(&mut entries);
+            }
+            if let Some(job) = &self.jobs.notifications {
                 job.waits_for(&mut entries);
             }
 
             // Forever, unless something is under way.
-            let deadline = [self.retry, self.clipboard.as_ref().and_then(|it| it.deadline())]
-                .into_iter()
-                .flatten()
-                .min();
+            let deadline = [
+                self.retry,
+                self.jobs.clipboard.as_ref().and_then(|it| it.deadline()),
+                self.jobs.notifications.as_ref().and_then(|it| it.deadline()),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let timeout = deadline.map_or(-1, |at| {
                 at.saturating_duration_since(Instant::now()).as_millis() as i32 + 1
             });
@@ -644,13 +716,23 @@ impl Link {
                     }
                 }
             }
-            if let Some(job) = &mut self.clipboard {
-                for entry in &entries[job_entries..] {
-                    if entry.revents != 0 {
-                        job.ready(entry.fd);
-                    }
+            let now = Instant::now();
+            for entry in &entries[job_entries..] {
+                if entry.revents == 0 {
+                    continue;
                 }
-                job.expire(Instant::now());
+                if let Some(job) = &mut self.jobs.clipboard {
+                    job.ready(entry.fd);
+                }
+                if let Some(job) = &mut self.jobs.notifications {
+                    job.ready(entry.fd);
+                }
+            }
+            if let Some(job) = &mut self.jobs.clipboard {
+                job.expire(now);
+            }
+            if let Some(job) = &mut self.jobs.notifications {
+                job.expire(now);
             }
         }
     }

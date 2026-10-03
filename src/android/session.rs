@@ -18,6 +18,15 @@ use winit::platform::android::activity::AndroidApp;
 /// For calls from threads that don't have the app at hand.
 static APP: OnceLock<AndroidApp> = OnceLock::new();
 
+/// What the notification says the app is doing instead of the usual (logging out first).
+static STATUS: Mutex<Option<String>> = Mutex::new(None);
+
+/// Say in the notification what the app is doing, or go back to the usual with `None`.
+pub fn status(text: Option<String>) {
+    *STATUS.lock().unwrap() = text;
+    refresh();
+}
+
 /// Load one of the app's own classes. `FindClass` on a native thread only sees the system's.
 pub(crate) fn app_class<'local>(
     env: &mut JNIEnv<'local>,
@@ -100,7 +109,10 @@ extern "system" fn on_action(mut env: JNIEnv, _class: JClass, action: JString) {
         "restart" => {
             thread::spawn(launch::restart);
         }
-        "quit" => launch::quit(),
+        // The same: it logs the desktop out first.
+        "quit" => {
+            thread::spawn(launch::log_out_and_quit);
+        }
         _ => log::warn!("Unknown session action {action}"),
     }
 }
@@ -146,6 +158,7 @@ pub fn start_service(android_app: &AndroidApp) {
         .map_err(|error| log::error!("Failed to start the terminal server: {error}"))
         .ok();
     let login = ssh::login(&local_config);
+    let status = STATUS.lock().unwrap().clone();
 
     with_activity(android_app, "start the session service", |env, activity| {
         let class = app_class(env, activity, "app.polarbear.SessionService")?;
@@ -167,6 +180,9 @@ pub fn start_service(android_app: &AndroidApp) {
         };
         if let Some(url) = &terminal_url {
             put_string(env, "terminal_url", url)?;
+        }
+        if let Some(status) = &status {
+            put_string(env, "status", status)?;
         }
         if !local_config.problems.is_empty() {
             put_string(env, "config_problems", &local_config.problems.join("\n"))?;

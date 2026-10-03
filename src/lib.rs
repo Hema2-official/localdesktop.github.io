@@ -1,6 +1,7 @@
 pub mod core {
     pub mod clipboard;
     pub mod config;
+    pub mod dbus;
     pub mod hard_links;
 }
 
@@ -9,6 +10,8 @@ pub mod android {
     pub mod accessibility;
     pub mod clipboard;
     pub mod guest;
+    pub mod notifications;
+    pub mod screen;
 
     pub mod main;
     pub mod session;
@@ -31,6 +34,7 @@ pub mod android {
     pub mod utils {
         pub mod application_context;
         pub mod fullscreen_immersive;
+        pub mod java;
         pub mod ndk;
         pub mod webview;
     }

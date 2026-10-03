@@ -15,7 +15,10 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
 - **One clipboard** for Android and the desktop (`[clipboard] sync`).
 - **A normal user**, named on the first start (or later in `[user] username`), with `sudo`.
 - **An SSH server** (`[ssh]`), a terminal and a "restart the desktop" button in the app's
-  notification, so a broken desktop doesn't lock you out.
+  notification, so a broken desktop doesn't lock you out. Restart and Quit log the desktop out
+  first, so programs can save or ask about unsaved work; cancelling on the desktop cancels them.
+- **The desktop's notifications on Android** while the app isn't in front, and **the screen
+  turning off** after Android's timeout when nobody uses the desktop (a playing video keeps it on).
 - **The GPU** (Turnip on Qualcomm phones) for Vulkan programs, and Plasma's own drawing.
 
 The details are in the commits of the branch; the user docs in `gh-pages/docs/user/` describe

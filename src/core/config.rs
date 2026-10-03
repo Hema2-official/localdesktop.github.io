@@ -68,6 +68,12 @@ pub struct LocalConfig {
     #[serde(default)]
     pub clipboard: ClipboardConfig,
 
+    #[serde(default)]
+    pub screen: ScreenConfig,
+
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
+
     /// What happens if we don't assign this `#[serde(default)]` attribute?
     /// The answer: If the user omits the `[command]` group, the WHOLE config fails to parse
     /// => The default `[user]` group is applied (with `username=root`) even if the `[user]` settings are completely valid.
@@ -231,6 +237,40 @@ pub struct ClipboardConfig {
 impl Default for ClipboardConfig {
     fn default() -> Self {
         Self { sync: true }
+    }
+}
+
+/// Local Desktop keeps the screen on while it's in front, so that a video or a long build isn't
+/// cut short by Android's timeout.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct ScreenConfig {
+    /// Let the screen turn off after Android's timeout when nobody has used the desktop for that
+    /// long and nothing in it (a video player) asks to stay awake, as the desktop's compositor
+    /// tells; `false` keeps it on for as long as the app is in front.
+    #[serde(default = "default_true")]
+    pub sleep_when_idle: bool,
+}
+
+impl Default for ScreenConfig {
+    fn default() -> Self {
+        Self {
+            sleep_when_idle: true,
+        }
+    }
+}
+
+/// The desktop's notifications on Android while Local Desktop isn't in front (a build that
+/// finished while the phone was in a pocket). Back in front, they come off Android: the desktop
+/// keeps them in its own history.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct NotificationsConfig {
+    #[serde(default = "default_true")]
+    pub forward: bool,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self { forward: true }
     }
 }
 
@@ -427,6 +467,8 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("graphics", &["adreno_drivers"]),
     ("performance", &["cpu_boost", "fast_realpath"]),
     ("clipboard", &["sync"]),
+    ("screen", &["sleep_when_idle"]),
+    ("notifications", &["forward"]),
     ("command", &["check", "install", "launch"]),
 ];
 
@@ -449,6 +491,8 @@ fn lenient(content: &str) -> LocalConfig {
         graphics: section(&table, "graphics"),
         performance: section(&table, "performance"),
         clipboard: section(&table, "clipboard"),
+        screen: section(&table, "screen"),
+        notifications: section(&table, "notifications"),
         command: section(&table, "command"),
         problems: Vec::new(),
     }
@@ -709,6 +753,30 @@ mod tests {
         for name in ["", "Teddy", "2user", "-user", "te ddy", "tédd", "a.b", "a$b", &too_long] {
             assert!(!valid_username(name), "{name:?}");
         }
+    }
+
+    #[test]
+    fn should_let_the_screen_sleep_when_idle_unless_turned_off() {
+        with_config_file("[user]\nusername = \"alice\"\n", |full_config_path| {
+            assert!(parse_config(full_config_path).screen.sleep_when_idle);
+        });
+        with_config_file("[screen]\nsleep_when_idle = false\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert!(!config.screen.sleep_when_idle);
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+    }
+
+    #[test]
+    fn should_forward_notifications_unless_turned_off() {
+        with_config_file("[user]\nusername = \"alice\"\n", |full_config_path| {
+            assert!(parse_config(full_config_path).notifications.forward);
+        });
+        with_config_file("[notifications]\nforward = false\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert!(!config.notifications.forward);
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
     }
 
     #[test]

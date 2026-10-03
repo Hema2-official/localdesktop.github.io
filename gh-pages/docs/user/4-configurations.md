@@ -122,3 +122,26 @@ To keep the two clipboards apart:
 [clipboard]
 sync = false
 ```
+
+## Screen
+
+Local Desktop keeps the phone's screen on while it's in front, so that a video or a long build isn't cut short by Android's screen timeout. Once nobody has used the desktop for as long as that timeout, and nothing in it asks to stay awake (a playing video does, as on a PC), it lets Android turn the screen off as usual.
+
+- The desktop's compositor tells when it's idle (`ext-idle-notify-v1`), as KWin (the Plasma preset) does; with one that doesn't, the screen stays on.
+- While the phone is charging, Android's "Stay awake" developer option keeps the screen on anyway.
+
+To keep the screen on for as long as Local Desktop is in front:
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[screen]
+sleep_when_idle = false
+```
+
+## Desktop notifications
+
+While Local Desktop isn't in front (another app is, or the screen is off), the desktop's notifications show up on Android too: a build that finished while the phone was in your pocket, say. They have a channel of their own, "Desktop notifications", which Android's settings can mute. Once you're back in Local Desktop they come off Android, since the desktop keeps them in its own history. To keep them on the desktop only:
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[notifications]
+forward = false
+```
