@@ -13,7 +13,7 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
   the official app, the desktop starts three times as fast, and the file quirks that broke
   `git`, `pnpm`, `makepkg`, KWin and others are fixed.
 - **One clipboard** for Android and the desktop (`[clipboard] sync`).
-- **A normal user** made for you from `[user] username`, with `sudo`.
+- **A normal user**, named on the first start (or later in `[user] username`), with `sudo`.
 - **An SSH server** (`[ssh]`), a terminal and a "restart the desktop" button in the app's
   notification, so a broken desktop doesn't lock you out.
 - **The GPU** (Turnip on Qualcomm phones) for Vulkan programs, and Plasma's own drawing.
@@ -27,7 +27,8 @@ the settings (`4-configurations.md`) and the non-root user (`2-creating-a-non-ro
    `localdesktop-bleeding-edge-<date>-<commit>.apk`).
 2. Open it on the phone. Android asks to allow installs from that source (the browser or the
    file manager) the first time.
-3. Start **Local Desktop (bleeding edge)** and choose a desktop. The first start downloads and
+3. Start **Local Desktop (bleeding edge)**, choose a user name (or leave the field empty for
+   root) and a desktop. The first start downloads and
    installs Arch Linux and the desktop: 15–20 minutes on a good connection, with the phone
    awake and unlocked (it needs the network throughout). Allow the notification when asked: it
    keeps the setup going when the screen turns off.

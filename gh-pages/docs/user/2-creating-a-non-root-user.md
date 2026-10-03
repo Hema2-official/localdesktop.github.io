@@ -2,14 +2,14 @@
 title: Using a Non-root User
 ---
 
-Local Desktop logs in as root unless told otherwise: there is no registration form to fill in. Some programs are better off, or only work, as a normal user:
+A fresh install asks for a user name next to the choice of desktop; with the field left empty, Local Desktop logs in as root, as installs before it did. Some programs are better off, or only work, as a normal user:
 
 - Chromium and Electron-based programs like VS Code are safer without root.
 - AUR helpers like paru or yay refuse to run as root.
 
 ## Tell Local Desktop who to log in as
 
-Add the user's name to the config file (create the file if it isn't there):
+The name chosen at install time is in the config file. To change it later, or to add a user to an install that runs as root, edit the file (create it if it isn't there):
 
 ```toml title="/etc/localdesktop/localdesktop.toml"
 [user]

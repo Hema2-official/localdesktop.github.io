@@ -1,4 +1,7 @@
-use crate::android::{proot::setup::SetupMessage, session};
+use crate::android::{
+    proot::setup::{DesktopChoice, SetupMessage},
+    session,
+};
 use serde_json::json;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +39,7 @@ impl WebviewBackend {
     pub fn build(
         receiver: Receiver<SetupMessage>,
         progress: Arc<Mutex<u16>>,
-        desktop_choice: Sender<String>,
+        desktop_choice: Sender<DesktopChoice>,
     ) -> Self {
         let socket = Server::bind("127.0.0.1:0").expect("Failed to bind socket");
         let socket_port = socket.local_addr().unwrap().port();
@@ -157,7 +160,13 @@ impl WebviewBackend {
                                     serde_json::from_str(&text).unwrap_or_default();
                                 if let Some(desktop) = value["desktop"].as_str() {
                                     if question_open.swap(false, Ordering::AcqRel) {
-                                        let _ = desktop_choice.send(desktop.to_string());
+                                        let _ = desktop_choice.send(DesktopChoice {
+                                            preset: desktop.to_string(),
+                                            username: value["username"]
+                                                .as_str()
+                                                .unwrap_or_default()
+                                                .to_string(),
+                                        });
                                     }
                                 }
                             }

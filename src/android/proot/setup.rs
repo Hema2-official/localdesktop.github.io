@@ -12,8 +12,9 @@ use crate::{
     },
     core::{
         config::{
-            CommandConfig, DesktopPreset, ARCH_FS_ARCHIVE, ARCH_FS_ROOT, CONFIG_FILE,
-            DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR, PULSE_GUEST_SERVER,
+            first_config, valid_username, CommandConfig, DesktopPreset, ARCH_FS_ARCHIVE,
+            ARCH_FS_ROOT, CONFIG_FILE, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
+            PULSE_GUEST_SERVER,
         },
         hard_links,
     },
@@ -45,15 +46,25 @@ pub enum SetupMessage {
     Error(String),
     /// A stage failed and setup has stopped; the app has to be restarted.
     Failed(String),
-    /// Ask the setup page which desktop preset to install; it answers through `desktop_choice`.
+    /// Ask the setup page which desktop preset to install, and for whom; it answers through
+    /// `desktop_choice`.
     ChooseDesktop,
+}
+
+/// The setup page's answer on a fresh install.
+#[derive(Debug, Default)]
+pub struct DesktopChoice {
+    /// `xfce` or `plasma`.
+    pub preset: String,
+    /// The user to make, or empty (root).
+    pub username: String,
 }
 
 pub struct SetupOptions {
     pub android_app: AndroidApp,
     pub mpsc_sender: Sender<SetupMessage>,
     /// Set on a fresh install, where the setup page asks which desktop to install.
-    pub desktop_choice: Option<Arc<Mutex<Receiver<String>>>>,
+    pub desktop_choice: Option<Arc<Mutex<Receiver<DesktopChoice>>>>,
 }
 
 /// Setup is a process that should be done **only once** when the user installed the app.
@@ -384,8 +395,9 @@ fn generate_machine_id() -> String {
     format!("{:016x}{:016x}", nanos as u64, process::id() as u64)
 }
 
-/// On a fresh install the setup page asks which desktop to install while the rootfs downloads;
-/// write the answer to the config before `install_dependencies` reads it.
+/// On a fresh install the setup page asks which desktop to install, and the user name, while the
+/// rootfs downloads; write the answer to the config before `setup_user` and
+/// `install_dependencies` read it.
 fn apply_desktop_choice(options: &SetupOptions) -> StageOutput {
     let receiver = options.desktop_choice.clone()?;
     let config_path = Path::new(ARCH_FS_ROOT).join(CONFIG_FILE.trim_start_matches('/'));
@@ -406,24 +418,27 @@ fn apply_desktop_choice(options: &SetupOptions) -> StageOutput {
                     .unwrap_or(());
                 receiver.recv().unwrap_or_default()
             }
-            Err(TryRecvError::Disconnected) => String::new(),
+            Err(TryRecvError::Disconnected) => DesktopChoice::default(),
         };
-        let preset = if choice == "plasma" { "plasma" } else { "xfce" };
+        let preset = if choice.preset == "plasma" {
+            DesktopPreset::Plasma
+        } else {
+            DesktopPreset::Xfce
+        };
+        // The page only sends names useradd takes; anything else means root.
+        let username = choice.username.trim();
+        if !username.is_empty() && !valid_username(username) {
+            log::warn!("Ignoring the user name {username:?} from the setup page");
+        }
 
         fs::create_dir_all(config_path.parent().unwrap())
             .expect("Failed to create the config directory");
-        fs::write(
-            &config_path,
-            format!(
-                "# Local Desktop's config: {DOCS_HOME_URL}docs/user/configurations\n\
-                 [desktop]\n\
-                 # \"xfce\" or \"plasma\". Changing it installs the other desktop on the next start.\n\
-                 preset = \"{preset}\"\n"
-            ),
-        )
-        .expect("Failed to write the config");
+        fs::write(&config_path, first_config(preset, username)).expect("Failed to write the config");
         reload_local_config();
-        log::info!("Desktop preset chosen during setup: {preset}");
+        log::info!(
+            "Chosen during setup: {preset:?}, user {}",
+            get_application_context().local_config.user.username
+        );
     }))
 }
 
@@ -431,14 +446,6 @@ fn apply_desktop_choice(options: &SetupOptions) -> StageOutput {
 const SUDOERS_DROP_IN: &str = "etc/sudoers.d/localdesktop";
 const SUDOERS_RULE: &str =
     "# Written by Local Desktop: the session user can do anything.\n%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n";
-
-/// What `useradd` takes, which is also what the config has to say to be safe in a shell command.
-fn valid_username(username: &str) -> bool {
-    let mut chars = username.chars();
-    chars.next().is_some_and(|it| it.is_ascii_lowercase() || it == '_')
-        && chars.all(|it| it.is_ascii_lowercase() || it.is_ascii_digit() || it == '_' || it == '-')
-        && username.len() <= 32
-}
 
 fn user_exists(fs_root: &Path, username: &str) -> bool {
     fs::read_to_string(fs_root.join("etc/passwd"))

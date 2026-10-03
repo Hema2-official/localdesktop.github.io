@@ -75,50 +75,122 @@
             bottom: 0;
             z-index: 2;
             display: flex;
-            align-items: center;
-            justify-content: center;
+            overflow-y: auto;
+            box-sizing: border-box;
             padding: 16px;
             background-color: rgba(0, 0, 0, 0.55);
             font-family: system-ui, sans-serif;
           "
         >
+          <!-- margin: auto centers the form, and lets the overlay scroll when the keyboard
+               leaves less room than the form needs (centering would cut off its top). -->
           <div
             style="
+              box-sizing: border-box;
               width: 100%;
               max-width: 420px;
+              margin: auto;
               padding: 20px;
               border-radius: 12px;
               background-color: white;
               color: #1c1c1c;
             "
           >
-            <h2 style="margin: 0 0 6px; font-size: 20px">Choose your desktop</h2>
+            <h2 style="margin: 0 0 6px; font-size: 20px">Set up your desktop</h2>
             <p style="margin: 0 0 16px; color: #555; font-size: 14px">
-              The download continues meanwhile. You can switch later in
+              The download continues meanwhile. You can change both later in
               /etc/localdesktop/localdesktop.toml.
             </p>
+            <label
+              for="username"
+              style="display: block; margin-bottom: 6px; font-size: 15px; font-weight: 600"
+              >User name</label
+            >
+            <input
+              id="username"
+              :value="username"
+              @input="username = $event.target.value.toLowerCase().trim()"
+              @keydown.enter="done"
+              placeholder="Peanut"
+              enterkeyhint="done"
+              autocapitalize="none"
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="false"
+              maxlength="32"
+              style="
+                box-sizing: border-box;
+                width: 100%;
+                padding: 10px 12px;
+                border: 1px solid #ccc;
+                border-radius: 8px;
+                font: inherit;
+                font-size: 16px;
+              "
+            />
+            <p
+              v-if="usernameProblem"
+              style="margin: 6px 0 0; color: #b00020; font-size: 13px"
+            >
+              {{ usernameProblem }}
+            </p>
+            <p v-else style="margin: 6px 0 0; color: #555; font-size: 13px">
+              Yours for your files and programs, with sudo. Leave it empty to
+              use root.
+            </p>
+            <div style="margin-top: 16px; font-size: 15px; font-weight: 600">
+              Desktop
+            </div>
             <button
               v-for="option in desktopOptions"
               :key="option.preset"
-              @click="chooseDesktop(option.preset)"
-              style="
-                display: block;
-                width: 100%;
-                margin-top: 10px;
-                padding: 14px;
-                border: 1px solid #ccc;
-                border-radius: 10px;
-                background-color: #f6f6f6;
-                color: inherit;
-                font: inherit;
-                text-align: left;
-                cursor: pointer;
-              "
+              @click="desktop = option.preset"
+              :aria-pressed="desktop === option.preset ? 'true' : 'false'"
+              :style="{
+                display: 'block',
+                width: '100%',
+                marginTop: '10px',
+                padding: '13px',
+                border:
+                  desktop === option.preset ? '2px solid #1a73e8' : '1px solid #ccc',
+                borderRadius: '10px',
+                backgroundColor: desktop === option.preset ? '#e8f0fe' : '#f6f6f6',
+                color: 'inherit',
+                font: 'inherit',
+                textAlign: 'left',
+                cursor: 'pointer',
+              }"
             >
-              <div style="font-size: 17px; font-weight: 600">{{ option.name }}</div>
+              <div style="font-size: 17px; font-weight: 600">
+                {{ option.name }}<span
+                  v-if="desktop === option.preset"
+                  style="float: right; color: #1a73e8"
+                  >✓</span
+                >
+              </div>
               <div style="margin-top: 4px; color: #555; font-size: 14px">
                 {{ option.description }}
               </div>
+            </button>
+            <button
+              @click="done"
+              :disabled="!desktop"
+              :style="{
+                display: 'block',
+                width: '100%',
+                marginTop: '18px',
+                padding: '14px',
+                border: 'none',
+                borderRadius: '10px',
+                backgroundColor: desktop ? '#1a73e8' : '#c8c8c8',
+                color: 'white',
+                font: 'inherit',
+                fontSize: '17px',
+                fontWeight: '600',
+                cursor: desktop ? 'pointer' : 'default',
+              }"
+            >
+              Done
             </button>
           </div>
         </div>
@@ -180,6 +252,10 @@
             logCounter: 0,
             hasError: false,
             choosingDesktop: false,
+            // Empty means root.
+            username: "",
+            // The preset picked, sent with the user name by Done.
+            desktop: null,
             desktopOptions: [
               {
                 preset: "xfce",
@@ -204,13 +280,41 @@
           progressBarColor() {
             return this.hasError ? "#ff0000" : "#006400";
           },
+          // What useradd takes (valid_username in src/core/config.rs), and not one of the
+          // system's accounts (Arch Linux ARM's alarm has a known password).
+          usernameProblem() {
+            const name = this.username;
+            if (name === "" || name === "root") {
+              return null;
+            }
+            if (!/^[a-z_][a-z0-9_-]*$/.test(name) || name.length > 32) {
+              return "Lowercase letters, digits, _ and -, starting with a letter.";
+            }
+            const system = [
+              "alarm", "avahi", "bin", "colord", "cups", "daemon", "dbus", "flatpak",
+              "ftp", "geoclue", "git", "http", "mail", "nobody", "polkitd", "rtkit",
+              "saned", "sddm", "tss", "usbmux", "uuidd",
+            ];
+            if (system.includes(name) || name.startsWith("systemd-")) {
+              return `"${name}" is one of the system's accounts. Choose another name.`;
+            }
+            return null;
+          },
         },
         methods: {
           toggleView() {
             this.showFullLog = !this.showFullLog;
           },
-          chooseDesktop(preset) {
-            this.ws.send(JSON.stringify({ desktop: preset }));
+          done() {
+            if (this.usernameProblem) {
+              document.getElementById("username").focus();
+              return;
+            }
+            if (!this.desktop) {
+              return;
+            }
+            const username = this.username === "root" ? "" : this.username;
+            this.ws.send(JSON.stringify({ desktop: this.desktop, username }));
             this.choosingDesktop = false;
           },
           handleWebSocketMessage(data) {

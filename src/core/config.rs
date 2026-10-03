@@ -93,6 +93,38 @@ impl Default for UserConfig {
     }
 }
 
+/// What `useradd` takes, which is also what the config has to say to be safe in a shell command:
+/// lowercase letters, digits, `_` and `-`, starting with a letter or `_`, at most 32 of them.
+pub fn valid_username(username: &str) -> bool {
+    let mut chars = username.chars();
+    chars.next().is_some_and(|it| it.is_ascii_lowercase() || it == '_')
+        && chars.all(|it| it.is_ascii_lowercase() || it.is_ascii_digit() || it == '_' || it == '-')
+        && username.len() <= 32
+}
+
+/// The config a fresh install starts with: the desktop chosen on the setup page and the user
+/// named there, unless that's root or empty (or not a valid name, which the page doesn't send).
+pub fn first_config(preset: DesktopPreset, username: &str) -> String {
+    let preset = match preset {
+        DesktopPreset::Xfce => "xfce",
+        DesktopPreset::Plasma => "plasma",
+    };
+    let mut config = format!(
+        "# Local Desktop's config: {DOCS_HOME_URL}docs/user/configurations\n\
+         [desktop]\n\
+         # \"xfce\" or \"plasma\". Changing it installs the other desktop on the next start.\n\
+         preset = \"{preset}\"\n"
+    );
+    if username != "root" && valid_username(username) {
+        config.push_str(&format!(
+            "\n[user]\n\
+             # Who the desktop runs as, with sudo. A new name is made on the next start.\n\
+             username = \"{username}\"\n"
+        ));
+    }
+    config
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopPreset {
     Xfce,
@@ -645,6 +677,38 @@ mod tests {
             assert!(!config.graphics.adreno_drivers);
             assert!(config.problems.is_empty(), "{:?}", config.problems);
         });
+    }
+
+    #[test]
+    fn should_start_a_fresh_install_with_the_chosen_desktop_and_user() {
+        with_config_file(&first_config(DesktopPreset::Plasma, "teddy"), |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert_eq!(config.desktop.preset(), DesktopPreset::Plasma);
+            assert_eq!(config.user.username, "teddy");
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+        for username in ["", "root", "Teddy", "te ddy", "teddy'; rm -rf /"] {
+            let text = first_config(DesktopPreset::Xfce, username);
+            assert!(!text.contains("[user]"), "{username:?}");
+            with_config_file(&text, |full_config_path| {
+                let config = parse_config(full_config_path);
+                assert_eq!(config.desktop.preset(), DesktopPreset::Xfce);
+                assert_eq!(config.user.username, "root");
+                assert!(config.problems.is_empty(), "{:?}", config.problems);
+            });
+        }
+    }
+
+    #[test]
+    fn should_take_only_names_useradd_takes() {
+        let longest = "a".repeat(32);
+        for name in ["teddy", "_build", "a", "user-2", "x_y", &longest] {
+            assert!(valid_username(name), "{name:?}");
+        }
+        let too_long = "a".repeat(33);
+        for name in ["", "Teddy", "2user", "-user", "te ddy", "tédd", "a.b", "a$b", &too_long] {
+            assert!(!valid_username(name), "{name:?}");
+        }
     }
 
     #[test]
