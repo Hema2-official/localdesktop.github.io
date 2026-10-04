@@ -134,6 +134,9 @@ jobs:
       - name: Release notes
         if: github.ref_type == 'tag'
         run: |
+          # The checkout made the tag a lightweight one on the commit, whose contents are the
+          # commit's message: fetch the tag itself for its message, the notes.
+          git fetch --force --no-tags --depth=1 origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           {
             echo "**Local Desktop (bleeding edge)**, version ${{ steps.version.outputs.name }}, built from ${GITHUB_SHA::7}."
             echo
