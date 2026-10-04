@@ -193,11 +193,42 @@ fn create_egl_display(
     Ok(egl_display)
 }
 
+/// What a window's renderer leaves for the next window (`into_context`). Android destroys the
+/// window whenever the app goes to the background, but the GL context can stay: a new one each
+/// time meant compiling the shaders and uploading every texture again, and 4 more threads of the
+/// GL driver (Adreno) that never went away.
+pub struct GraphicsContext {
+    renderer: GlesRenderer,
+    display: EGLDisplay,
+}
+
+fn create_window_surface(
+    display: &EGLDisplay,
+    context: &EGLContext,
+    handle: AndroidNdkWindowHandle,
+) -> Result<EGLSurface, String> {
+    let pixel_format = context
+        .pixel_format()
+        .ok_or_else(|| "EGL context did not expose a pixel format".to_string())?;
+    unsafe {
+        EGLSurface::new(
+            display,
+            pixel_format,
+            context.config_id(),
+            AndroidNativeSurface { handle },
+        )
+    }
+    .map_err(|error| format!("Failed to create EGLSurface: {error}"))
+}
+
 /// Create a new [`WinitGraphicsBackend`], which implements the [`Renderer`]
 /// trait, from a given [`WindowAttributes`] struct, as well as given
 /// [`GlAttributes`] for further customization of the rendering pipeline and a
-/// corresponding [`WinitEventLoop`].
-pub fn bind(event_loop: &ActiveEventLoop) -> Result<WinitGraphicsBackend<GlesRenderer>, String> {
+/// corresponding [`WinitEventLoop`]. It draws with the last window's `context` if there is one.
+pub fn bind(
+    event_loop: &ActiveEventLoop,
+    context: Option<GraphicsContext>,
+) -> Result<WinitGraphicsBackend<GlesRenderer>, String> {
     #[allow(deprecated)]
     let window = Arc::new(
         event_loop
@@ -209,34 +240,32 @@ pub fn bind(event_loop: &ActiveEventLoop) -> Result<WinitGraphicsBackend<GlesRen
         .window_handle()
         .map(|handle| handle.as_raw())
         .map_err(|error| format!("Failed to get window handle: {error}"))?;
-    let (display, context, surface) = match handle {
-        RawWindowHandle::AndroidNdk(handle) => {
-            let display = create_egl_display(handle)
-                .map_err(|error| format!("Failed to create EGLDisplay: {error:?}"))?;
-
-            let context = create_egl_context(&display)?;
-            let pixel_format = context
-                .pixel_format()
-                .ok_or_else(|| "EGL context did not expose a pixel format".to_string())?;
-
-            let surface = unsafe {
-                EGLSurface::new(
-                    &display,
-                    pixel_format,
-                    context.config_id(),
-                    AndroidNativeSurface { handle },
-                )
-                .map_err(|error| format!("Failed to create EGLSurface: {error}"))?
-            };
-
-            let _ = context.unbind();
-            (display, context, surface)
-        }
-        platform => return Err(format!("Unsupported platform: {:?}", platform)),
+    let RawWindowHandle::AndroidNdk(handle) = handle else {
+        return Err(format!("Unsupported platform: {:?}", handle));
     };
 
-    let renderer = unsafe { GlesRenderer::new(context) }
-        .map_err(|error| format!("Failed to create GLES Renderer: {error}"))?;
+    let reused = context.and_then(|context| {
+        match create_window_surface(&context.display, context.renderer.egl_context(), handle) {
+            Ok(surface) => Some((context, surface)),
+            Err(error) => {
+                log::warn!("The last GL context can't draw in the new window: {error}");
+                None
+            }
+        }
+    });
+    let (GraphicsContext { renderer, display }, surface) = match reused {
+        Some(reused) => reused,
+        None => {
+            let display = create_egl_display(handle)
+                .map_err(|error| format!("Failed to create EGLDisplay: {error:?}"))?;
+            let context = create_egl_context(&display)?;
+            let surface = create_window_surface(&display, &context, handle)?;
+            let _ = context.unbind();
+            let renderer = unsafe { GlesRenderer::new(context) }
+                .map_err(|error| format!("Failed to create GLES Renderer: {error}"))?;
+            (GraphicsContext { renderer, display }, surface)
+        }
+    };
     let damage_tracking = display.supports_damage();
 
     Ok(WinitGraphicsBackend {
@@ -276,6 +305,25 @@ pub struct WinitGraphicsBackend<R> {
     window: Arc<WinitWindow>,
     damage_tracking: bool,
     bind_size: Option<Size<i32, Physical>>,
+}
+
+impl WinitGraphicsBackend<GlesRenderer> {
+    /// Let go of the window (it's gone, or going) and keep the renderer for the next one. The
+    /// context is left current on no thread: the next window can come to another thread (an
+    /// activity that takes the app over).
+    pub fn into_context(self) -> GraphicsContext {
+        let _ = self.renderer.egl_context().unbind();
+        let Self {
+            renderer,
+            _display: display,
+            egl_surface,
+            window,
+            ..
+        } = self;
+        drop(egl_surface);
+        drop(window);
+        GraphicsContext { renderer, display }
+    }
 }
 
 impl<R> WinitGraphicsBackend<R>

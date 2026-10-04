@@ -110,7 +110,7 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             }
             PolarBearBackend::Wayland(ref mut backend) => {
                 if backend.graphic_renderer.is_none() {
-                    match bind(event_loop) {
+                    match bind(event_loop, backend.graphics_context.take()) {
                         Ok(winit) => backend.graphic_renderer = Some(winit),
                         Err(error) => {
                             log::error!("Failed to initialize Wayland renderer on resume: {error}");
@@ -211,12 +211,14 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
 impl PolarBearApp {
     /// Let go of the activity's window: it's gone, or the activity is (`attach` hands the app
-    /// to the next one).
+    /// to the next one). The GL context stays for the next window.
     pub fn detach(&mut self) {
         accessibility::set_runtime_active(false);
 
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
-            backend.graphic_renderer = None;
+            if let Some(winit) = backend.graphic_renderer.take() {
+                backend.graphics_context = Some(winit.into_context());
+            }
             backend.key_counter = 0;
             backend.reset_touch_state();
             backend.pointer_pressed = false;

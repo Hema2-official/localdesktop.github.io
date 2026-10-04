@@ -74,11 +74,11 @@ When the pipeline reaches 100%, it asks the user to restart. On the next launch 
 
 This is what Local Desktop *is*: a Wayland compositor running inside the Android NDK, with an Xfce desktop running as its client inside proot, rendered back into the native activity. The `Wayland` arm of `resumed` is its entry point. On every resume it (re)creates the GPU renderer, configures the output to match the Android window, marks the runtime active, draws one frame, and launches the desktop session.
 
-The backend struct is the compositor's live state — the smithay `Compositor`, the winit GPU renderer (dropped on suspend, rebuilt on resume), the input clock, and the touch-gesture bookkeeping that turns finger gestures into pointer events.
+The backend struct is the compositor's live state — the smithay `Compositor`, the winit GPU renderer (its window and EGL surface dropped on suspend and made again on resume; the GL context and renderer stay, in `graphics_context` meanwhile), the input clock, and the touch-gesture bookkeeping that turns finger gestures into pointer events.
 
 <!--snippet file=src/android/backend/wayland/mod.rs struct=WaylandBackend-->
 
-`bind` constructs the winit + smithay GLES renderer against the activity's surface. It returns a `Result` because GPU init can fail (notably on resume races), and `resumed` degrades gracefully when it does.
+`bind` constructs the winit + smithay GLES renderer against the activity's surface, reusing the last window's GL context when there is one: a new context on every resume cost recompiled shaders, re-uploaded textures and four GL driver threads that never ended. It returns a `Result` because GPU init can fail (notably on resume races), and `resumed` degrades gracefully when it does.
 
 <!--snippet file=src/android/backend/wayland/winit_backend.rs fn=bind-->
 

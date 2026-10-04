@@ -2321,6 +2321,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         PolarBearBackend::Wayland(WaylandBackend {
             compositor: Compositor::build().expect("Failed to build compositor"),
             graphic_renderer: None,
+            graphics_context: None,
             clock: Clock::new(),
             key_counter: 0,
             guest_scale_factor: scale_factor(&android_app),

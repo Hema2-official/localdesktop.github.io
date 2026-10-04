@@ -12,7 +12,7 @@ pub use output_state::write_guest_output_state;
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
 pub use event_handler::{about_to_wait, handle};
-pub use winit_backend::{bind, WinitGraphicsBackend};
+pub use winit_backend::{bind, GraphicsContext, WinitGraphicsBackend};
 
 use smithay::{
     backend::renderer::gles::GlesRenderer,
@@ -38,6 +38,8 @@ pub enum TouchMode {
 pub struct WaylandBackend {
     pub compositor: Compositor,
     pub graphic_renderer: Option<WinitGraphicsBackend<GlesRenderer>>,
+    /// The renderer while there is no window, for the next one.
+    pub graphics_context: Option<GraphicsContext>,
     pub android_app: AndroidApp,
     pub clock: Clock<Monotonic>,
     pub key_counter: u32,
