@@ -145,6 +145,11 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppUserEvent) {
+        if let AppUserEvent::LetGo = event {
+            log::info!("Another activity takes the app over");
+            event_loop.exit();
+            return;
+        }
         let PolarBearBackend::Wayland(backend) = &mut self.backend else {
             accessibility::drain_pending_events();
             return;
@@ -199,8 +204,16 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
     }
 
     fn suspended(&mut self, event_loop: &ActiveEventLoop) {
-        accessibility::set_runtime_active(false);
         event_loop.set_control_flow(ControlFlow::Wait);
+        self.detach();
+    }
+}
+
+impl PolarBearApp {
+    /// Let go of the activity's window: it's gone, or the activity is (`attach` hands the app
+    /// to the next one).
+    pub fn detach(&mut self) {
+        accessibility::set_runtime_active(false);
 
         if let PolarBearBackend::Wayland(backend) = &mut self.backend {
             backend.graphic_renderer = None;

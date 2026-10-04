@@ -40,7 +40,7 @@ username="root"
 # try_username="teddy"
 ```
 
-So if the config didn't work, and you got stuck on a black screen, you can just restart Local Desktop, and things will go back to normal. Then you can uncomment the config and try with another value. If the config does work, you just have to remove the `try_` prefix to persist the config.
+So if the config didn't work, and you got stuck on a black screen, you can just restart the desktop from Local Desktop's notification (or quit there and open the app again), and things will go back to normal. Swiping the app out of the recent apps doesn't restart it: the desktop keeps running for when you come back. Then you can uncomment the config and try with another value. If the config does work, you just have to remove the `try_` prefix to persist the config.
 
 Some important notes:
 - This rule applies to **all** configs.

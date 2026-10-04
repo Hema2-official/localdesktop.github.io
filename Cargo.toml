@@ -101,5 +101,6 @@ xz2 = { version = "0.1.7", features = ["static"] }
 zip = { version = "0.6.3", default-features = false, features = ["deflate"] }
 
 [patch.crates-io]
+android-activity = { path = "patches/android-activity" }
 smithay = { path = "patches/smithay" }
 winit = { path = "patches/winit" }

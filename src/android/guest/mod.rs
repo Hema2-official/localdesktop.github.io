@@ -48,6 +48,8 @@ pub enum Event {
     AndroidClipboard,
     /// A desktop session is starting, maybe with another config.
     SessionStarting,
+    /// A new activity took the app over, with a window of its own.
+    Activity,
 }
 
 struct Shared {
@@ -599,6 +601,9 @@ impl Link {
             };
             if let (Event::Focus(focused), Some(job)) = (event, self.jobs.notifications()) {
                 job.focus(focused);
+            }
+            if let (Event::Activity, Some(job)) = (event, self.jobs.screen.as_mut()) {
+                job.new_window();
             }
             let desktop = self.session.as_mut().and_then(Session::clipboard);
             match (event, self.jobs.clipboard()) {

@@ -15,6 +15,8 @@ pub enum AppUserEvent {
     AccessibilityInputReady,
     /// A Wayland client sent requests or a new one is connecting.
     WaylandClientsReady,
+    /// Another activity takes the app over: leave the event loop.
+    LetGo,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -472,6 +472,16 @@ impl Compositor {
     pub fn has_client_waker(&self) -> bool {
         self.waker_ack.is_some()
     }
+
+    /// A new activity has a new event loop: wake that one from now on. The old waker stops once
+    /// it finds its loop gone, or right away if it waits for this one.
+    pub fn restart_client_waker(&mut self) {
+        let display_fd = self.display.backend().poll_fd().as_raw_fd();
+        let listener_fd = self.listener.as_fd().as_raw_fd();
+        self.waker_waiting = false;
+        self.waker_ack = accessibility::event_loop_proxy()
+            .and_then(|proxy| spawn_client_waker(display_fd, listener_fd, proxy));
+    }
 }
 
 /// Wakes the event loop when a Wayland client sent something or a new one is connecting, so the

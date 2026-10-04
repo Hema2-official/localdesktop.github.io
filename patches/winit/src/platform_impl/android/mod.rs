@@ -185,6 +185,14 @@ fn mouse_buttons(state: input::ButtonState) -> Vec<MouseButton> {
     buttons
 }
 
+impl<T: 'static> Drop for EventLoop<T> {
+    fn drop(&mut self) {
+        // Each activity of the process runs its own `android_main`, one after the other, and
+        // needs an event loop of its own.
+        crate::event_loop::EventLoopBuilder::<()>::allow_event_loop_recreation();
+    }
+}
+
 impl<T: 'static> EventLoop<T> {
     pub(crate) fn new(
         attributes: &PlatformSpecificEventLoopAttributes,
@@ -317,9 +325,11 @@ impl<T: 'static> EventLoop<T> {
                     warn!("TODO: forward onStop notification to application");
                 },
                 MainEvent::Destroy => {
-                    // XXX: maybe exit mainloop to drop things before being
-                    // killed by the OS?
-                    warn!("TODO: forward onDestroy notification to application");
+                    // Android's main thread waits in `onDestroy` until `android_main` returns,
+                    // so leave the loop. A process that lives on (a foreground service) gets
+                    // its next activity in a new `android_main`, with a new event loop.
+                    debug!("App destroyed - leaving the event loop");
+                    self.window_target.p.exit();
                 },
                 MainEvent::InsetsChanged { .. } => {
                     // XXX: how to forward this state to applications?
@@ -757,9 +767,16 @@ impl<T: 'static> EventLoop<T> {
                     // a wake up here so we can ignore the wake up if there are no events/requests.
                     // We also ignore wake ups while suspended.
                     self.pending_redraw |= self.redraw_flag.get_and_reset();
-                    if !self.running
-                        || (!self.pending_redraw && !self.user_events_receiver.has_incoming())
-                    {
+                    if !self.running {
+                        // Except for user events, without the rest of an iteration: one can
+                        // ask a paused activity to leave the loop (Local Desktop: the next
+                        // activity taking the app over).
+                        while let Ok(event) = self.user_events_receiver.try_recv() {
+                            callback(crate::event::Event::UserEvent(event), self.window_target());
+                        }
+                        return;
+                    }
+                    if !self.pending_redraw && !self.user_events_receiver.has_incoming() {
                         return;
                     }
                 },

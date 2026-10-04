@@ -135,6 +135,13 @@ impl Job {
         self.keep_on(!idle);
     }
 
+    /// A new activity took the app over; its window starts kept on (`keep_screen_on`).
+    pub fn new_window(&mut self) {
+        if !self.kept_on {
+            self.android.keep_on(false);
+        }
+    }
+
     fn keep_on(&mut self, on: bool) {
         if self.kept_on != on {
             self.kept_on = on;

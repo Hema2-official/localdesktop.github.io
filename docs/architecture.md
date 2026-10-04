@@ -15,7 +15,9 @@
 
 Local Desktop is an Android [`NativeActivity`](https://developer.android.com/ndk/reference/group/native-activity): there is no Java `main`, no `onCreate` we write. The NDK glue calls a single exported symbol, `android_main`, on a dedicated thread, and everything in this document hangs off that call.
 
-`android_main` does four things in order: wire up logging and crash reporting, capture the Android handles we need later, build the winit event loop, and hand control to it. The last two lines are the whole program in miniature — **Phase 1: Setup** decides *what* we are (installer or desktop), **Phase 2: Run** drives it forever.
+`android_main` does four things in order: wire up logging and crash reporting, capture the Android handles we need later, build the winit event loop, and hand control to it. The last two lines are the whole program in miniature — **Phase 1: Setup** decides *what* we are (installer or desktop), **Phase 2: Run** drives it until Android destroys the activity.
+
+The app outlives its activities. Swiping Local Desktop out of the recent apps destroys the activity, but the session service keeps the process, and the desktop, running. Android waits in `onDestroy` until `android_main` returns, so the event loop ends and the app is parked; the next activity (opening the app again, tapping the notification) runs `android_main` on a thread of its own and takes the parked app over (`attach`) instead of building one. Logging and the other once-per-process work happen only for the first activity.
 
 <!--snippet file=src/android/main.rs fn=android_main-->
 

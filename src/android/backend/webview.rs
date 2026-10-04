@@ -196,4 +196,9 @@ impl WebviewBackend {
             error: ErrorVariant::None,
         }
     }
+
+    /// Setup has installed everything: a restart would start the desktop.
+    pub fn finished(&self) -> bool {
+        matches!(self.error, ErrorVariant::None) && *self.progress.lock().unwrap() >= 100
+    }
 }

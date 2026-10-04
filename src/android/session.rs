@@ -10,13 +10,19 @@ use jni::errors::Result as JniResult;
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::_jobject;
 use jni::{JNIEnv, NativeMethod};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use winit::platform::android::activity::AndroidApp;
 
-/// For calls from threads that don't have the app at hand.
-static APP: OnceLock<AndroidApp> = OnceLock::new();
+/// For calls from threads that don't have the app at hand: the newest activity's. The app
+/// outlives its activities, and one that is gone still takes calls that need no window.
+static APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
+
+/// The newest activity's app, once there is one.
+pub fn current_app() -> Option<AndroidApp> {
+    APP.lock().unwrap().clone()
+}
 
 /// What the notification says the app is doing instead of the usual (logging out first).
 static STATUS: Mutex<Option<String>> = Mutex::new(None);
@@ -72,9 +78,9 @@ fn with_activity(android_app: &AndroidApp, what: &str, call: impl FnOnce(&mut JN
 }
 
 /// Make the methods of `Native` reach this library. NativeActivity loads it without
-/// `System.loadLibrary`, so the JVM can't find it by symbol name.
+/// `System.loadLibrary`, so the JVM can't find it by symbol name. Each new activity calls it.
 pub fn register_natives(android_app: &AndroidApp) {
-    let _ = APP.set(android_app.clone());
+    *APP.lock().unwrap() = Some(android_app.clone());
     with_activity(android_app, "register native methods", |env, activity| {
         let class = app_class(env, activity, "app.polarbear.Native")?;
         env.register_native_methods(
@@ -119,20 +125,20 @@ extern "system" fn on_action(mut env: JNIEnv, _class: JClass, action: JString) {
 
 /// Bring the notifications up to date, e.g. after the config was read again.
 pub fn refresh() {
-    if let Some(android_app) = APP.get() {
-        start_service(android_app);
+    if let Some(android_app) = current_app() {
+        start_service(&android_app);
     }
 }
 
 /// The desktop session ended by itself: say so in the notification, and if it didn't even
 /// start, open the terminal to look into it.
 pub fn desktop_stopped(failed_start: bool) {
-    let Some(android_app) = APP.get() else {
+    let Some(android_app) = current_app() else {
         return;
     };
-    start_service(android_app);
+    start_service(&android_app);
     if failed_start {
-        terminal::open(android_app, Some("desktop-failed"));
+        terminal::open(&android_app, Some("desktop-failed"));
     }
 }
 
@@ -271,10 +277,10 @@ pub fn setup_progress(progress: u16, message: &str, failed: bool) {
         }
         *last = Some((Instant::now(), progress));
     }
-    let Some(android_app) = APP.get() else {
+    let Some(android_app) = current_app() else {
         return;
     };
-    with_activity(android_app, "show setup progress", |env, activity| {
+    with_activity(&android_app, "show setup progress", |env, activity| {
         let class = app_class(env, activity, "app.polarbear.SessionService")?;
         let message = env.new_string(message)?;
         env.call_static_method(
