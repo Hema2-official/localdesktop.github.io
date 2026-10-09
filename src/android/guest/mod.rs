@@ -13,7 +13,9 @@
 pub mod bus;
 pub mod clipboard;
 pub mod notifications;
+pub mod power;
 pub mod screen;
+pub mod system_bus;
 
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config::ARCH_FS_ROOT;
@@ -50,6 +52,8 @@ pub enum Event {
     SessionStarting,
     /// A new activity took the app over, with a window of its own.
     Activity,
+    /// The battery's charge or plug changed.
+    Battery,
 }
 
 struct Shared {
@@ -284,7 +288,21 @@ impl Session {
         if let Some(job) = notifications {
             job.connected();
         }
-        if self.state.clipboard.is_none() && self.state.screen.is_none() && !watching {
+        let battery = jobs
+            .system_bus
+            .as_ref()
+            .and_then(|it| it.battery())
+            .cloned();
+        let power = jobs.power();
+        let standing_in = power.is_some();
+        if let Some(job) = power {
+            job.connected(battery.as_ref());
+        }
+        if self.state.clipboard.is_none()
+            && self.state.screen.is_none()
+            && !watching
+            && !standing_in
+        {
             return Err(Ended::Unsuitable);
         }
         Ok(())
@@ -446,6 +464,11 @@ struct Jobs {
     screen_on: bool,
     notifications: Option<notifications::Job>,
     notifications_on: bool,
+    /// PowerDevil's stand-in, for the battery widget.
+    power: power::Job,
+    power_on: bool,
+    /// Not the session's: it serves the guest whether a desktop runs or not.
+    system_bus: Option<system_bus::Job>,
 }
 
 impl Jobs {
@@ -459,6 +482,10 @@ impl Jobs {
 
     fn notifications(&mut self) -> Option<&mut notifications::Job> {
         self.notifications.as_mut().filter(|_| self.notifications_on)
+    }
+
+    fn power(&mut self) -> Option<&mut power::Job> {
+        Some(&mut self.power).filter(|_| self.power_on)
     }
 }
 
@@ -488,6 +515,7 @@ impl Link {
         let clipboard = clipboard::Job::new(android_app);
         let screen = screen::Job::new(android_app);
         let notifications = notifications::Job::new(android_app);
+        let system_bus = system_bus::Job::new(android_app);
         // Android's runtime names the threads that attach to it "Thread-<n>".
         unsafe { libc::prctl(libc::PR_SET_NAME, c"guest-link".as_ptr()) };
         Self {
@@ -505,6 +533,9 @@ impl Link {
                 screen_on: false,
                 notifications,
                 notifications_on: false,
+                power: power::Job::new(),
+                power_on: false,
+                system_bus,
             },
         }
     }
@@ -524,6 +555,7 @@ impl Link {
             if let Some(job) = &mut self.jobs.notifications {
                 job.disconnected();
             }
+            self.jobs.power.disconnected();
         }
     }
 
@@ -536,13 +568,18 @@ impl Link {
         jobs.clipboard_on = jobs.clipboard.is_some() && config.clipboard.sync;
         jobs.screen_on = jobs.screen.is_some() && config.screen.sleep_when_idle;
         jobs.notifications_on = jobs.notifications.is_some() && config.notifications.forward;
+        jobs.power_on = config.battery.share;
         if let Some(job) = &mut jobs.clipboard {
             job.turn(jobs.clipboard_on);
         }
         if let Some(job) = &mut jobs.screen {
             job.turn(jobs.screen_on);
         }
-        let wanted = jobs.clipboard_on || jobs.screen_on || jobs.notifications_on;
+        jobs.power.turn(jobs.power_on);
+        if let Some(job) = &mut jobs.system_bus {
+            job.turn(config.battery.share);
+        }
+        let wanted = jobs.clipboard_on || jobs.screen_on || jobs.notifications_on || jobs.power_on;
         if !wanted {
             self.disconnect("turned off");
             self.watcher = None;
@@ -605,6 +642,11 @@ impl Link {
             if let (Event::Activity, Some(job)) = (event, self.jobs.screen.as_mut()) {
                 job.new_window();
             }
+            if let (Event::Battery, Some(job)) = (event, self.jobs.system_bus.as_mut()) {
+                if let Some(battery) = job.battery_changed() {
+                    self.jobs.power.battery(battery);
+                }
+            }
             let desktop = self.session.as_mut().and_then(Session::clipboard);
             match (event, self.jobs.clipboard()) {
                 (Event::Focus(focused), Some(job)) => job.focus(focused, desktop),
@@ -648,6 +690,12 @@ impl Link {
                 }
             }
 
+            if let Some(held) = self.jobs.power.held_changed() {
+                if let Some(job) = &mut self.jobs.screen {
+                    job.hold(held);
+                }
+            }
+
             let mut entries = vec![poll_entry(self.shared.wake.as_raw_fd(), libc::POLLIN)];
             if let Some(watcher) = &self.watcher {
                 entries.push(poll_entry(watcher.inotify.as_raw_fd(), libc::POLLIN));
@@ -671,12 +719,17 @@ impl Link {
             if let Some(job) = &self.jobs.notifications {
                 job.waits_for(&mut entries);
             }
+            self.jobs.power.waits_for(&mut entries);
+            if let Some(job) = &self.jobs.system_bus {
+                job.waits_for(&mut entries);
+            }
 
             // Forever, unless something is under way.
             let deadline = [
                 self.retry,
                 self.jobs.clipboard.as_ref().and_then(|it| it.deadline()),
                 self.jobs.notifications.as_ref().and_then(|it| it.deadline()),
+                self.jobs.power.deadline(),
             ]
             .into_iter()
             .flatten()
@@ -732,6 +785,10 @@ impl Link {
                 if let Some(job) = &mut self.jobs.notifications {
                     job.ready(entry.fd);
                 }
+                self.jobs.power.ready(entry.fd);
+                if let Some(job) = &mut self.jobs.system_bus {
+                    job.ready(entry.fd, entry.revents);
+                }
             }
             if let Some(job) = &mut self.jobs.clipboard {
                 job.expire(now);
@@ -739,6 +796,7 @@ impl Link {
             if let Some(job) = &mut self.jobs.notifications {
                 job.expire(now);
             }
+            self.jobs.power.expire(now);
         }
     }
 }

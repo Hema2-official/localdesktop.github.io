@@ -1941,9 +1941,11 @@ const PLASMA_HIDDEN_AUTOSTART: &[&str] = &[
     "kaccess.desktop",
     // The wallet is off.
     "pam_kwallet_init.desktop",
-    // There is no system bus, so nothing can ask polkit for authorization.
+    // There is no polkit (the app's system bus has UPower alone), so nothing asks it for
+    // authorization.
     "polkit-kde-authentication-agent-1.desktop",
-    // Android manages power, and PowerDevil's display power-off leaves a blank screen.
+    // Android manages power, and PowerDevil's display power-off leaves a blank screen. The app
+    // stands in for it on the session bus, for the battery widget (`guest::power`).
     "powerdevil.desktop",
 ];
 

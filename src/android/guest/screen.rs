@@ -6,6 +6,9 @@
 //! when nobody has used the desktop for a while, and holds back while something inhibits idling,
 //! such as a video player. Then the app lets Android's own timeout apply, which has run out by
 //! then as well: what reaches the desktop is Android's input too.
+//!
+//! What blocks sleep over the session's bus instead, the battery widget's switch say, keeps the
+//! screen on as well (`guest::power`).
 
 use super::{Globals, State};
 use crate::android::screen::AndroidScreen;
@@ -84,6 +87,10 @@ pub struct Job {
     android: AndroidScreen,
     /// Whether the app keeps the screen on now; it does from the start.
     kept_on: bool,
+    /// What the compositor said last.
+    idle: bool,
+    /// Something on the desktop blocks sleep (`guest::power`): the screen stays on regardless.
+    held: bool,
 }
 
 impl Job {
@@ -92,12 +99,22 @@ impl Job {
         Some(Self {
             android: AndroidScreen::new(android_app)?,
             kept_on: true,
+            idle: false,
+            held: false,
         })
+    }
+
+    /// Something on the desktop blocks sleep (the battery widget's switch, a video player), or
+    /// no longer does.
+    pub fn hold(&mut self, held: bool) {
+        self.held = held;
+        self.keep_on(held || !self.idle);
     }
 
     /// Turned on or off in the config. Off keeps the screen on, as the app did before.
     pub fn turn(&mut self, on: bool) {
         if !on {
+            self.idle = false;
             self.keep_on(true);
         }
     }
@@ -120,6 +137,7 @@ impl Job {
 
     /// Without a desktop to ask, the screen stays on, as it did before.
     pub fn disconnected(&mut self) {
+        self.idle = false;
         self.keep_on(true);
     }
 
@@ -132,7 +150,8 @@ impl Job {
             "Screen: the desktop is {}",
             if idle { "idle" } else { "in use" }
         );
-        self.keep_on(!idle);
+        self.idle = idle;
+        self.keep_on(self.held || !idle);
     }
 
     /// A new activity took the app over; its window starts kept on (`keep_screen_on`).

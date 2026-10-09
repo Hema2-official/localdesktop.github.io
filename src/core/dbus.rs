@@ -1,6 +1,7 @@
-//! Just enough of D-Bus's wire format for the app to talk to the desktop session's bus: method
-//! calls with plain arguments, and reading the header and leading plain arguments of what comes
-//! back. A D-Bus library would bring its own threads and executor for these few messages.
+//! Just enough of D-Bus's wire format for the app to talk to the desktop session's bus and to
+//! answer as a bus itself (`core::bus`): messages of every kind with plain arguments, variants
+//! and dictionaries of them, and reading the header and leading plain arguments of what comes in.
+//! A D-Bus library would bring its own threads and executor for these few messages.
 //! https://dbus.freedesktop.org/doc/dbus-specification.html#message-protocol
 
 pub const METHOD_CALL: u8 = 1;
@@ -54,6 +55,34 @@ impl Message {
     }
 }
 
+/// A value the app sends in a variant or a dictionary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Bool(bool),
+    U32(u32),
+    I32(i32),
+    U64(u64),
+    I64(i64),
+    F64(f64),
+    Str(String),
+    Path(String),
+}
+
+impl Value {
+    pub fn signature(&self) -> &'static str {
+        match self {
+            Self::Bool(_) => "b",
+            Self::U32(_) => "u",
+            Self::I32(_) => "i",
+            Self::U64(_) => "t",
+            Self::I64(_) => "x",
+            Self::F64(_) => "d",
+            Self::Str(_) => "s",
+            Self::Path(_) => "o",
+        }
+    }
+}
+
 /// Writes a body (or a header), little-endian. Alignment is relative to the start, which is
 /// right for a body: the body itself starts 8-aligned.
 #[derive(Debug, Default)]
@@ -95,6 +124,20 @@ impl Writer {
         self.u32(value as u32)
     }
 
+    pub fn u64(&mut self, value: u64) -> &mut Self {
+        self.align(8);
+        self.buf.extend_from_slice(&value.to_le_bytes());
+        self
+    }
+
+    pub fn i64(&mut self, value: i64) -> &mut Self {
+        self.u64(value as u64)
+    }
+
+    pub fn f64(&mut self, value: f64) -> &mut Self {
+        self.u64(value.to_bits())
+    }
+
     /// A string or an object path.
     pub fn string(&mut self, value: &str) -> &mut Self {
         self.u32(value.len() as u32);
@@ -110,17 +153,54 @@ impl Writer {
         self
     }
 
-    /// An array of strings (`as`).
-    pub fn strings(&mut self, values: &[&str]) -> &mut Self {
+    /// An array whose elements `write` adds, of a type aligned to `alignment` (8 for structs
+    /// and dictionary entries). The padding before the first element is there even without one.
+    pub fn array(&mut self, alignment: usize, write: impl FnOnce(&mut Self)) -> &mut Self {
         self.u32(0);
         let length_at = self.buf.len() - 4;
+        self.align(alignment);
         let start = self.buf.len();
-        for value in values {
-            self.string(value);
-        }
+        write(self);
         let length = (self.buf.len() - start) as u32;
         self.buf[length_at..length_at + 4].copy_from_slice(&length.to_le_bytes());
         self
+    }
+
+    /// An array of strings (`as`) or of object paths (`ao`).
+    pub fn strings(&mut self, values: &[&str]) -> &mut Self {
+        self.array(4, |writer| {
+            for value in values {
+                writer.string(value);
+            }
+        })
+    }
+
+    pub fn value(&mut self, value: &Value) -> &mut Self {
+        match value {
+            Value::Bool(it) => self.boolean(*it),
+            Value::U32(it) => self.u32(*it),
+            Value::I32(it) => self.i32(*it),
+            Value::U64(it) => self.u64(*it),
+            Value::I64(it) => self.i64(*it),
+            Value::F64(it) => self.f64(*it),
+            Value::Str(it) | Value::Path(it) => self.string(it),
+        }
+    }
+
+    pub fn variant(&mut self, value: &Value) -> &mut Self {
+        self.signature(value.signature());
+        self.value(value)
+    }
+
+    /// A dictionary of variants (`a{sv}`).
+    pub fn dict<K: AsRef<str>>(&mut self, entries: &[(K, Value)]) -> &mut Self {
+        self.array(8, |writer| {
+            for (key, value) in entries {
+                writer.align(8);
+                writer.string(key.as_ref());
+                writer.variant(value);
+            }
+        })
     }
 
     /// A header field: a `(yv)` struct with a string, object path or signature in the variant.
@@ -135,6 +215,59 @@ impl Writer {
     }
 }
 
+/// What a message's header says, for writing one.
+#[derive(Debug, Default)]
+pub struct Fields<'a> {
+    pub path: Option<&'a str>,
+    pub interface: Option<&'a str>,
+    pub member: Option<&'a str>,
+    pub error_name: Option<&'a str>,
+    pub reply_serial: Option<u32>,
+    pub destination: Option<&'a str>,
+    pub sender: Option<&'a str>,
+    /// What `body` holds, empty for nothing.
+    pub signature: &'a str,
+}
+
+/// A message of any kind, as the bytes to send.
+pub fn message(kind: u8, flags: u8, serial: u32, fields: &Fields, body: &[u8]) -> Vec<u8> {
+    let mut header = Writer::new();
+    header
+        .byte(b'l')
+        .byte(kind)
+        .byte(flags)
+        .byte(1)
+        .u32(body.len() as u32)
+        .u32(serial)
+        .u32(0);
+    let start = header.buf.len();
+    let strings = [
+        (1, 'o', fields.path),
+        (2, 's', fields.interface),
+        (3, 's', fields.member),
+        (4, 's', fields.error_name),
+        (6, 's', fields.destination),
+        (7, 's', fields.sender),
+    ];
+    for (code, kind, value) in strings {
+        if let Some(value) = value {
+            header.field(code, kind, value);
+        }
+    }
+    if let Some(reply_serial) = fields.reply_serial {
+        header.align(8);
+        header.byte(5).signature("u").u32(reply_serial);
+    }
+    if !fields.signature.is_empty() {
+        header.field(8, 'g', fields.signature);
+    }
+    let length = (header.buf.len() - start) as u32;
+    header.buf[12..16].copy_from_slice(&length.to_le_bytes());
+    header.align(8);
+    header.buf.extend_from_slice(body);
+    header.buf
+}
+
 /// A method call, as the bytes to send. `signature` describes `body` (empty for none).
 pub fn method_call(
     serial: u32,
@@ -146,30 +279,77 @@ pub fn method_call(
     body: &[u8],
     flags: u8,
 ) -> Vec<u8> {
-    let mut header = Writer::new();
-    header
-        .byte(b'l')
-        .byte(METHOD_CALL)
-        .byte(flags)
-        .byte(1)
-        .u32(body.len() as u32)
-        .u32(serial)
-        .u32(0);
-    let start = header.buf.len();
-    header.field(1, 'o', path);
-    if !interface.is_empty() {
-        header.field(2, 's', interface);
-    }
-    header.field(3, 's', member);
-    header.field(6, 's', destination);
-    if !signature.is_empty() {
-        header.field(8, 'g', signature);
-    }
-    let length = (header.buf.len() - start) as u32;
-    header.buf[12..16].copy_from_slice(&length.to_le_bytes());
-    header.align(8);
-    header.buf.extend_from_slice(body);
-    header.buf
+    let fields = Fields {
+        path: Some(path),
+        interface: (!interface.is_empty()).then_some(interface),
+        member: Some(member),
+        destination: Some(destination),
+        signature,
+        ..Fields::default()
+    };
+    message(METHOD_CALL, flags, serial, &fields, body)
+}
+
+/// The reply to `call`, from `sender`.
+pub fn method_return(
+    serial: u32,
+    call: &Header,
+    sender: &str,
+    signature: &str,
+    body: &[u8],
+) -> Vec<u8> {
+    let fields = Fields {
+        reply_serial: Some(call.serial),
+        destination: call.sender.as_deref(),
+        sender: Some(sender),
+        signature,
+        ..Fields::default()
+    };
+    message(METHOD_RETURN, NO_REPLY_EXPECTED, serial, &fields, body)
+}
+
+/// The error `name` with `text`, in reply to `call`, from `sender`.
+pub fn error(serial: u32, call: &Header, sender: &str, name: &str, text: &str) -> Vec<u8> {
+    let mut body = Writer::new();
+    body.string(text);
+    let fields = Fields {
+        error_name: Some(name),
+        reply_serial: Some(call.serial),
+        destination: call.sender.as_deref(),
+        sender: Some(sender),
+        signature: "s",
+        ..Fields::default()
+    };
+    message(
+        ERROR,
+        NO_REPLY_EXPECTED,
+        serial,
+        &fields,
+        &body.into_bytes(),
+    )
+}
+
+/// A signal from `sender`, to everybody who listens or to `destination` alone.
+pub fn signal(
+    serial: u32,
+    sender: &str,
+    destination: Option<&str>,
+    path: &str,
+    interface: &str,
+    member: &str,
+    signature: &str,
+    body: &[u8],
+) -> Vec<u8> {
+    let fields = Fields {
+        path: Some(path),
+        interface: Some(interface),
+        member: Some(member),
+        destination,
+        sender: Some(sender),
+        signature,
+        ..Fields::default()
+    };
+    message(SIGNAL, NO_REPLY_EXPECTED, serial, &fields, body)
 }
 
 fn read_u32_at(buf: &[u8], at: usize, big_endian: bool) -> u32 {
@@ -307,6 +487,50 @@ impl Reader<'_> {
 
     pub fn boolean(&mut self) -> Result<bool, Malformed> {
         Ok(self.u32()? != 0)
+    }
+
+    pub fn u64(&mut self) -> Result<u64, Malformed> {
+        self.align(8)?;
+        let bytes: [u8; 8] = self.take(8)?.try_into().expect("8 bytes");
+        Ok(if self.big_endian {
+            u64::from_be_bytes(bytes)
+        } else {
+            u64::from_le_bytes(bytes)
+        })
+    }
+
+    pub fn f64(&mut self) -> Result<f64, Malformed> {
+        Ok(f64::from_bits(self.u64()?))
+    }
+
+    /// A variant of one of `Value`'s types.
+    pub fn variant(&mut self) -> Result<Value, Malformed> {
+        let signature = self.signature()?;
+        Ok(match signature.as_str() {
+            "b" => Value::Bool(self.boolean()?),
+            "u" => Value::U32(self.u32()?),
+            "i" => Value::I32(self.i32()?),
+            "t" => Value::U64(self.u64()?),
+            "x" => Value::I64(self.u64()? as i64),
+            "d" => Value::F64(self.f64()?),
+            "s" => Value::Str(self.string()?),
+            "o" => Value::Path(self.string()?),
+            _ => return Err(Malformed("variant of an unexpected type")),
+        })
+    }
+
+    /// A dictionary of variants (`a{sv}`).
+    pub fn dict(&mut self) -> Result<Vec<(String, Value)>, Malformed> {
+        let length = self.u32()? as usize;
+        self.align(8)?;
+        let end = self.pos + length;
+        let mut entries = Vec::new();
+        while self.pos < end {
+            self.align(8)?;
+            let key = self.string()?;
+            entries.push((key, self.variant()?));
+        }
+        Ok(entries)
     }
 
     /// A string or an object path. Invalid UTF-8 is replaced rather than refused.

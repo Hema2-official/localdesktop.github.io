@@ -1,13 +1,17 @@
 pub mod core {
+    pub mod bus;
     pub mod clipboard;
     pub mod config;
     pub mod dbus;
     pub mod hard_links;
+    pub mod power_management;
+    pub mod upower;
 }
 
 #[cfg(target_os = "android")]
 pub mod android {
     pub mod accessibility;
+    pub mod battery;
     pub mod clipboard;
     pub mod guest;
     pub mod notifications;

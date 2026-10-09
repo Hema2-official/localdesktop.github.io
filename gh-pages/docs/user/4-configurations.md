@@ -128,6 +128,7 @@ sync = false
 Local Desktop keeps the phone's screen on while it's in front, so that a video or a long build isn't cut short by Android's screen timeout. Once nobody has used the desktop for as long as that timeout, and nothing in it asks to stay awake (a playing video does, as on a PC), it lets Android turn the screen off as usual.
 
 - The desktop's compositor tells when it's idle (`ext-idle-notify-v1`), as KWin (the Plasma preset) does; with one that doesn't, the screen stays on.
+- Blocking sleep in Plasma's battery widget keeps the screen on as well (see [Battery](#battery)).
 - While the phone is charging, Android's "Stay awake" developer option keeps the screen on anyway.
 
 To keep the screen on for as long as Local Desktop is in front:
@@ -144,4 +145,20 @@ While Local Desktop isn't in front (another app is, or the screen is off), the d
 ```toml title="/etc/localdesktop/localdesktop.toml"
 [notifications]
 forward = false
+```
+
+## Battery
+
+The desktop's battery widgets show the phone's battery: Plasma's "Power & Battery" in the system tray, and other programs that ask UPower for it, as Xfce's power manager and browsers do. Local Desktop answers for UPower on the desktop's system bus (`/run/dbus/system_bus_socket`) with the charge, whether the phone is charging, the time until full, the temperature and the battery's health; on Android 12 and later also Android's estimate of the time until empty.
+
+- The battery's health is an estimate: what the battery holds when full, going by Android's charge counter, against its capacity when new in the phone's power profile. It comes closest after a good charge, and may be a few percent off the phone's own figure.
+- In Plasma, Local Desktop also stands in for PowerDevil, Plasma's power manager, which the Plasma preset leaves out since Android manages the phone's power. The widget's "Manually Block Sleep and Screen Locking" switch keeps the phone's screen on, and so does any program that blocks sleep or the screen saver (video players do).
+- Power profiles aren't there: the widget suggests installing power-profiles-daemon, which can't work here, since Android keeps the kernel's power settings to itself.
+- The system bus has UPower alone, so programs that need other system services (NetworkManager, logind, polkit) still find none. If the rootfs runs a system bus of its own, Local Desktop leaves the place to it.
+
+To keep the battery to Android:
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[battery]
+share = false
 ```

@@ -96,6 +96,11 @@ pub fn register_natives(android_app: &AndroidApp) {
                     sig: "()V".into(),
                     fn_ptr: on_clipboard_changed as *mut std::ffi::c_void,
                 },
+                NativeMethod {
+                    name: "onBatteryChanged".into(),
+                    sig: "()V".into(),
+                    fn_ptr: on_battery_changed as *mut std::ffi::c_void,
+                },
             ],
         )
     });
@@ -103,6 +108,10 @@ pub fn register_natives(android_app: &AndroidApp) {
 
 extern "system" fn on_clipboard_changed(_env: JNIEnv, _class: JClass) {
     guest::notify(guest::Event::AndroidClipboard);
+}
+
+extern "system" fn on_battery_changed(_env: JNIEnv, _class: JClass) {
+    guest::notify(guest::Event::Battery);
 }
 
 extern "system" fn on_action(mut env: JNIEnv, _class: JClass, action: JString) {

@@ -12,4 +12,7 @@ final class Native {
 
     /** Android's clipboard has something new (see Clipboard.watch). */
     static native void onClipboardChanged();
+
+    /** The battery's charge or plug changed (see Battery.watch). */
+    static native void onBatteryChanged();
 }

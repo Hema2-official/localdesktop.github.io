@@ -130,8 +130,12 @@ fn malformed(error: dbus::Malformed) -> io::Error {
 pub struct Bus {
     stream: UnixStream,
     serial: u32,
+    /// Its unique name, from the bus's hello.
+    name: String,
     /// What was read and doesn't make a whole message yet.
     buffer: Vec<u8>,
+    /// What is to be written, once the socket takes it (`queue`).
+    output: Vec<u8>,
 }
 
 impl Bus {
@@ -142,11 +146,51 @@ impl Bus {
         let mut bus = Self {
             stream,
             serial: 0,
+            name: String::new(),
             buffer: Vec::new(),
+            output: Vec::new(),
         };
         bus.authenticate()?;
-        bus.call(BUS, BUS_PATH, BUS, "Hello", "", &[])?;
+        let hello = bus.call(BUS, BUS_PATH, BUS, "Hello", "", &[])?;
+        bus.name = hello.arguments().string().map_err(malformed)?;
         Ok(bus)
+    }
+
+    /// The unique name the bus gave the connection.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn next_serial(&mut self) -> u32 {
+        self.serial += 1;
+        self.serial
+    }
+
+    /// Send a whole message once the socket takes it, after `set_nonblocking`.
+    pub fn queue(&mut self, message: &[u8]) -> io::Result<()> {
+        self.output.extend_from_slice(message);
+        self.flush()
+    }
+
+    /// Write what is queued, as far as the socket takes it.
+    pub fn flush(&mut self) -> io::Result<()> {
+        while !self.output.is_empty() {
+            match self.stream.write(&self.output) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(written) => {
+                    self.output.drain(..written);
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether something waits for the socket to take it.
+    pub fn wants_write(&self) -> bool {
+        !self.output.is_empty()
     }
 
     fn read_line(&mut self) -> io::Result<String> {
@@ -193,9 +237,9 @@ impl Bus {
         body: &[u8],
         flags: u8,
     ) -> io::Result<u32> {
-        self.serial += 1;
+        let serial = self.next_serial();
         let message = dbus::method_call(
-            self.serial,
+            serial,
             destination,
             path,
             interface,
@@ -205,7 +249,7 @@ impl Bus {
             flags,
         );
         self.stream.write_all(&message)?;
-        Ok(self.serial)
+        Ok(serial)
     }
 
     /// Call a method and wait for its reply. An error reply is an error.

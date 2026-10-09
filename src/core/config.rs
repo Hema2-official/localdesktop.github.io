@@ -74,6 +74,9 @@ pub struct LocalConfig {
     #[serde(default)]
     pub notifications: NotificationsConfig,
 
+    #[serde(default)]
+    pub battery: BatteryConfig,
+
     /// What happens if we don't assign this `#[serde(default)]` attribute?
     /// The answer: If the user omits the `[command]` group, the WHOLE config fails to parse
     /// => The default `[user]` group is applied (with `username=root`) even if the `[user]` settings are completely valid.
@@ -274,6 +277,21 @@ impl Default for NotificationsConfig {
     }
 }
 
+/// Android's battery on the desktop: its battery widget shows the phone's charge, which Android's
+/// status bar doesn't while Local Desktop fills the screen. The app answers as UPower on the
+/// guest's system bus, where every desktop's battery widget looks.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct BatteryConfig {
+    #[serde(default = "default_true")]
+    pub share: bool,
+}
+
+impl Default for BatteryConfig {
+    fn default() -> Self {
+        Self { share: true }
+    }
+}
+
 impl PerformanceConfig {
     /// The minimum utilization (out of 1024) the scheduler assumes for the Linux programs.
     pub fn utilization_floor(&self) -> u32 {
@@ -469,6 +487,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("clipboard", &["sync"]),
     ("screen", &["sleep_when_idle"]),
     ("notifications", &["forward"]),
+    ("battery", &["share"]),
     ("command", &["check", "install", "launch"]),
 ];
 
@@ -493,6 +512,7 @@ fn lenient(content: &str) -> LocalConfig {
         clipboard: section(&table, "clipboard"),
         screen: section(&table, "screen"),
         notifications: section(&table, "notifications"),
+        battery: section(&table, "battery"),
         command: section(&table, "command"),
         problems: Vec::new(),
     }
@@ -775,6 +795,18 @@ mod tests {
         with_config_file("[notifications]\nforward = false\n", |full_config_path| {
             let config = parse_config(full_config_path);
             assert!(!config.notifications.forward);
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+    }
+
+    #[test]
+    fn should_share_the_battery_unless_turned_off() {
+        with_config_file("[user]\nusername = \"alice\"\n", |full_config_path| {
+            assert!(parse_config(full_config_path).battery.share);
+        });
+        with_config_file("[battery]\nshare = false\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert!(!config.battery.share);
             assert!(config.problems.is_empty(), "{:?}", config.problems);
         });
     }
