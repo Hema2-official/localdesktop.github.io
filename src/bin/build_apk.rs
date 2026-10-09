@@ -1198,6 +1198,8 @@ pub mod apk {
             pub intent_filters: Vec<IntentFilter>,
             #[serde(rename(serialize = "android:colorMode"))]
             pub color_mode: Option<String>,
+            #[serde(rename(serialize = "android:theme"))]
+            pub theme: Option<String>,
         }
 
         /// Android [service element](https://developer.android.com/guide/topics/manifest/service-element).

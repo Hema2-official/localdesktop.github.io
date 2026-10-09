@@ -5,6 +5,7 @@ pub mod core {
     pub mod dbus;
     pub mod hard_links;
     pub mod power_management;
+    pub mod sharing;
     pub mod upower;
 }
 

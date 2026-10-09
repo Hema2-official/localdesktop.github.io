@@ -101,6 +101,11 @@ pub fn register_natives(android_app: &AndroidApp) {
                     sig: "()V".into(),
                     fn_ptr: on_battery_changed as *mut std::ffi::c_void,
                 },
+                NativeMethod {
+                    name: "onShared".into(),
+                    sig: "()V".into(),
+                    fn_ptr: on_shared as *mut std::ffi::c_void,
+                },
             ],
         )
     });
@@ -112,6 +117,10 @@ extern "system" fn on_clipboard_changed(_env: JNIEnv, _class: JClass) {
 
 extern "system" fn on_battery_changed(_env: JNIEnv, _class: JClass) {
     guest::notify(guest::Event::Battery);
+}
+
+extern "system" fn on_shared(_env: JNIEnv, _class: JClass) {
+    guest::notify(guest::Event::Shared);
 }
 
 extern "system" fn on_action(mut env: JNIEnv, _class: JClass, action: JString) {

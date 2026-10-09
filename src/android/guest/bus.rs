@@ -262,8 +262,55 @@ impl Bus {
         signature: &str,
         body: &[u8],
     ) -> io::Result<Message> {
+        self.call_within(
+            CALL_TIMEOUT,
+            destination,
+            path,
+            interface,
+            member,
+            signature,
+            body,
+        )
+    }
+
+    /// `call`, waiting up to `timeout` for the reply: for a method whose program the bus has to
+    /// start first.
+    pub fn call_within(
+        &mut self,
+        timeout: Duration,
+        destination: &str,
+        path: &str,
+        interface: &str,
+        member: &str,
+        signature: &str,
+        body: &[u8],
+    ) -> io::Result<Message> {
+        self.stream.set_read_timeout(Some(timeout))?;
+        let reply = self.reply_to(
+            timeout,
+            destination,
+            path,
+            interface,
+            member,
+            signature,
+            body,
+        );
+        self.stream.set_read_timeout(Some(CALL_TIMEOUT))?;
+        reply
+    }
+
+    fn reply_to(
+        &mut self,
+        timeout: Duration,
+        destination: &str,
+        path: &str,
+        interface: &str,
+        member: &str,
+        signature: &str,
+        body: &[u8],
+    ) -> io::Result<Message> {
         let serial = self.send(destination, path, interface, member, signature, body, 0)?;
-        let deadline = Instant::now() + CALL_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         loop {
             let message = self.read_message(deadline)?;
             if message.header.reply_serial != Some(serial) {

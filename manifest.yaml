@@ -33,6 +33,31 @@ android:
           window_soft_input_mode: adjustResize
           # Keep the page (and the terminal session in it) when the phone rotates or a keyboard attaches
           config_changes: "orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
+        - name: app.polarbear.ShareActivity # Files and links from other apps, for the desktop
+          # No label of its own: share sheets show the app's, which differs between builds
+          exported: true
+          # See-through: it only shows a progress dialog, and only when copying takes a while
+          theme: "@android:style/Theme.Translucent.NoTitleBar"
+          # One copy per share: rotating the phone mustn't start it again
+          config_changes: "orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
+          intent_filters:
+            - actions:
+                - android.intent.action.SEND
+                - android.intent.action.SEND_MULTIPLE
+              categories:
+                - android.intent.category.DEFAULT
+              data:
+                - mime_type: "*/*"
+            # "Open with"
+            - actions:
+                - android.intent.action.VIEW
+              categories:
+                - android.intent.category.DEFAULT
+              data:
+                - scheme: content
+                  mime_type: "*/*"
+                - scheme: file
+                  mime_type: "*/*"
       services:
         - name: app.polarbear.SessionService
           exported: false

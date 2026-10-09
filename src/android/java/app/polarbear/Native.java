@@ -15,4 +15,7 @@ final class Native {
 
     /** The battery's charge or plug changed (see Battery.watch). */
     static native void onBatteryChanged();
+
+    /** Another app shared something with the desktop (see ShareActivity). */
+    static native void onShared();
 }

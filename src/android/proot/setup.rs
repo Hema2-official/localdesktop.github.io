@@ -6,6 +6,7 @@ use crate::{
             wayland::{Compositor, TouchMode, WaylandBackend},
             webview::{ErrorVariant, WebviewBackend},
         },
+        guest::shared,
         session,
         utils::application_context::{get_application_context, reload_local_config},
         utils::ndk::{density_dpi, long_press_timeout_ms, scale_factor, time_zone, touch_slop_px},
@@ -1368,6 +1369,47 @@ exec "$@"
     None
 }
 
+/// "Open with" and "Share" from Android (`guest::shared`): the session's D-Bus starts this helper
+/// when the app asks for its name, so that what it opens runs in the session.
+fn setup_open_from_android(_: &SetupOptions) -> StageOutput {
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    write_executable(
+        &fs_root.join(shared::OPEN_HELPER.trim_start_matches('/')),
+        &format!(
+            r#"#!/bin/sh
+# Opens what Android handed Local Desktop ("Open with", "Share"). The app leaves each target in
+# the spool and has the session's D-Bus start this script ({service}), so it runs in the
+# session, with its environment, and what it opens stays there. It doesn't take the name: the
+# bus starts it anew each time.
+spool="${{XDG_RUNTIME_DIR:-/tmp}}/{spool}"
+for request in "$spool"/*; do
+    [ -f "$request" ] || continue
+    target=$(cat "$request")
+    rm -f "$request"
+    xdg-open "$target" </dev/null &
+done
+# A failure on purpose: the bus takes a clean exit for a service that went to the background,
+# and waits for the name until it gives up (two minutes), with every request in between.
+exit 1
+"#,
+            service = shared::OPEN_SERVICE,
+            spool = shared::SPOOL
+        ),
+    );
+    let services = fs_root.join("usr/share/dbus-1/services");
+    let _ = fs::create_dir_all(&services);
+    fs::write(
+        services.join(format!("{}.service", shared::OPEN_SERVICE)),
+        format!(
+            "[D-BUS Service]\nName={}\nExec={}\n",
+            shared::OPEN_SERVICE,
+            shared::OPEN_HELPER
+        ),
+    )
+    .expect("Failed to write the D-Bus service that opens shares");
+    None
+}
+
 /// The realpath(3) that asks proot for the whole answer (src/guest/realpath.c), as the APK has it
 /// and where the rootfs gets it.
 const FAST_REALPATH_ASSET: &str = "guest/librealpath.so";
@@ -2245,6 +2287,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_firefox_config),        // Step 8. Setup Firefox config
         Box::new(setup_fake_bwrap), // Step 9. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
         Box::new(setup_chromium_no_sandbox), // Step 10. Make Chromium/Electron apps launchable without a terminal
+        Box::new(setup_open_from_android),   // Step 10b. Open what Android shares, in the session
         Box::new(setup_onboard_signal_fix), // Step 11. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
         Box::new(setup_xfce_wayland),       // Step 12. Setup Xfce Wayland launch and HiDPI scaling
         Box::new(setup_plasma),             // Step 13. Setup the Plasma launcher and defaults

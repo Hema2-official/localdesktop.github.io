@@ -15,6 +15,7 @@ pub mod clipboard;
 pub mod notifications;
 pub mod power;
 pub mod screen;
+pub mod shared;
 pub mod system_bus;
 
 use crate::android::utils::application_context::get_application_context;
@@ -54,6 +55,8 @@ pub enum Event {
     Activity,
     /// The battery's charge or plug changed.
     Battery,
+    /// Another app shared something with the desktop.
+    Shared,
 }
 
 struct Shared {
@@ -263,6 +266,8 @@ impl Session {
             return Ok(());
         }
         self.bound = true;
+        // Shares that came while there was no desktop.
+        shared::look();
         let handle = self.queue.handle();
         let seat: wl_seat::WlSeat = self.state.globals.bind(&handle, 1).ok_or(Ended::Unsuitable)?;
         if let Some(job) = jobs.clipboard() {
@@ -646,6 +651,9 @@ impl Link {
                 if let Some(battery) = job.battery_changed() {
                     self.jobs.power.battery(battery);
                 }
+            }
+            if let Event::Shared | Event::SessionStarting = event {
+                shared::look();
             }
             let desktop = self.session.as_mut().and_then(Session::clipboard);
             match (event, self.jobs.clipboard()) {
