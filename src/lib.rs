@@ -5,6 +5,7 @@ pub mod core {
     pub mod dbus;
     pub mod hard_links;
     pub mod power_management;
+    pub mod power_profiles;
     pub mod sharing;
     pub mod upower;
 }
@@ -16,6 +17,7 @@ pub mod android {
     pub mod clipboard;
     pub mod guest;
     pub mod notifications;
+    pub mod power_profile;
     pub mod screen;
 
     pub mod main;

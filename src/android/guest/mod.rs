@@ -18,6 +18,7 @@ pub mod screen;
 pub mod shared;
 pub mod system_bus;
 
+use crate::android::power_profile;
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config::ARCH_FS_ROOT;
 use std::collections::VecDeque;
@@ -701,6 +702,21 @@ impl Link {
             if let Some(held) = self.jobs.power.held_changed() {
                 if let Some(job) = &mut self.jobs.screen {
                     job.hold(held);
+                }
+            }
+            // A power profile picked in the battery widget, or by a program on the system bus.
+            let picked = [
+                self.jobs.power.requested_profile(),
+                self.jobs
+                    .system_bus
+                    .as_mut()
+                    .and_then(system_bus::Job::requested_profile),
+            ];
+            for profile in picked.into_iter().flatten() {
+                power_profile::apply(profile);
+                self.jobs.power.profile(profile);
+                if let Some(job) = &mut self.jobs.system_bus {
+                    job.profile(profile);
                 }
             }
 

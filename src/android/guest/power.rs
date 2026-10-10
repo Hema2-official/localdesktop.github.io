@@ -8,9 +8,11 @@
 //! it. One that starts later finds them taken: `[battery] share = false` makes way for it.
 
 use super::bus::{self, Bus};
+use crate::android::power_profile;
 use crate::core::bus::{Service, Signal};
 use crate::core::dbus::{self, Message, Writer};
 use crate::core::power_management::PowerManagement;
+use crate::core::power_profiles::Profile;
 use crate::core::upower::AndroidBattery;
 use std::io;
 use std::os::fd::RawFd;
@@ -79,6 +81,7 @@ impl Job {
                 if let Some(battery) = &self.battery {
                     self.power.battery(battery);
                 }
+                self.power.profile(power_profile::current());
                 self.connection = Some(connection);
                 // Calls that came while the names were being taken.
                 self.pump();
@@ -101,6 +104,17 @@ impl Job {
     pub fn battery(&mut self, battery: &AndroidBattery) {
         self.battery = Some(battery.clone());
         let signals = self.power.battery(battery);
+        self.emit(&signals);
+    }
+
+    /// The power profile the widget asked for since the last look.
+    pub fn requested_profile(&mut self) -> Option<Profile> {
+        self.power.requested_profile()
+    }
+
+    /// `profile` is in effect now.
+    pub fn profile(&mut self, profile: Profile) {
+        let signals = self.power.profile(profile);
         self.emit(&signals);
     }
 

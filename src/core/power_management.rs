@@ -3,13 +3,15 @@
 //! screen), but Plasma's system tray shows the widget only while PowerDevil's service is on the
 //! session bus.
 //!
-//! The battery itself comes from UPower (`core::upower`); here are the remaining time and the
-//! inhibitions. Blocking sleep, with the widget's switch or by any program through
-//! `org.freedesktop.PowerManagement.Inhibit`, keeps Android's screen on: a phone left alone sleeps
-//! when its screen goes off.
+//! The battery itself comes from UPower (`core::upower`); here are the remaining time, the
+//! inhibitions and the power profile. Blocking sleep, with the widget's switch or by any program
+//! through `org.freedesktop.PowerManagement.Inhibit`, keeps Android's screen on: a phone left
+//! alone sleeps when its screen goes off. The widget's power profiles (`core::power_profiles`)
+//! set the CPU boost.
 
 use super::bus::{self, errors, fail, invalid_args, reply, Reply, Service, Signal};
 use super::dbus::{Message, Writer};
+use super::power_profiles::Profile;
 use super::upower::AndroidBattery;
 use std::collections::BTreeMap;
 
@@ -18,20 +20,23 @@ const POLICY_AGENT: &str = "org.kde.Solid.PowerManagement.PolicyAgent";
 const BUTTONS: &str = "org.kde.Solid.PowerManagement.Actions.HandleButtonEvents";
 const FDO: &str = "org.freedesktop.PowerManagement";
 const INHIBIT: &str = "org.freedesktop.PowerManagement.Inhibit";
+const PROFILE: &str = "org.kde.Solid.PowerManagement.Actions.PowerProfile";
 
 const SOLID_PATH: &str = "/org/kde/Solid/PowerManagement";
 const POLICY_AGENT_PATH: &str = "/org/kde/Solid/PowerManagement/PolicyAgent";
 const BUTTONS_PATH: &str = "/org/kde/Solid/PowerManagement/Actions/HandleButtonEvents";
 const FDO_PATH: &str = "/org/freedesktop/PowerManagement";
 const INHIBIT_PATH: &str = "/org/freedesktop/PowerManagement/Inhibit";
+const PROFILE_PATH: &str = "/org/kde/Solid/PowerManagement/Actions/PowerProfile";
 
 /// The objects and the interface of each, as PowerDevil has them.
-const OBJECTS: [(&str, &str); 5] = [
+const OBJECTS: [(&str, &str); 6] = [
     (SOLID_PATH, SOLID),
     (POLICY_AGENT_PATH, POLICY_AGENT),
     (BUTTONS_PATH, BUTTONS),
     (FDO_PATH, FDO),
     (INHIBIT_PATH, INHIBIT),
+    (PROFILE_PATH, PROFILE),
 ];
 
 /// What a program asked for when it blocked sleep.
@@ -50,6 +55,9 @@ pub struct PowerManagement {
     remaining_ms: u64,
     inhibitions: BTreeMap<u32, Inhibition>,
     cookie: u32,
+    profile: Profile,
+    /// The profile the widget asked for, until the app puts it in effect (`profile`).
+    requested_profile: Option<Profile>,
     /// What the calls since the last look have to tell everybody.
     signals: Vec<Signal>,
 }
@@ -96,6 +104,28 @@ impl PowerManagement {
         let before = self.inhibited();
         self.inhibitions.retain(|_, it| it.owner != owner);
         self.inhibition_changed(before);
+    }
+
+    /// The profile the widget asked for since the last look.
+    pub fn requested_profile(&mut self) -> Option<Profile> {
+        self.requested_profile.take()
+    }
+
+    /// `profile` is in effect now: what to tell the desktop.
+    pub fn profile(&mut self, profile: Profile) -> Vec<Signal> {
+        if profile == self.profile {
+            return Vec::new();
+        }
+        self.profile = profile;
+        // The profile in the config is the one in effect.
+        ["currentProfileChanged", "configuredProfileChanged"]
+            .into_iter()
+            .map(|member| {
+                signal(PROFILE_PATH, PROFILE, member, "s", |body| {
+                    body.string(profile.name());
+                })
+            })
+            .collect()
     }
 
     /// What the calls since the last look have to tell everybody.
@@ -312,6 +342,37 @@ impl Service for PowerManagement {
                 errors::NOT_SUPPORTED,
                 "Android decides when the phone sleeps",
             ),
+            (PROFILE_PATH, PROFILE, "profileChoices") => reply("as", |body| {
+                body.strings(&Profile::ALL.map(Profile::name));
+            }),
+            (PROFILE_PATH, PROFILE, "currentProfile" | "configuredProfile") => {
+                let profile = self.profile;
+                reply("s", |body| {
+                    body.string(profile.name());
+                })
+            }
+            (PROFILE_PATH, PROFILE, "setProfile") => {
+                let name = args.string().map_err(invalid_args)?;
+                let Some(profile) = Profile::from_name(&name) else {
+                    return fail(errors::INVALID_ARGS, format!("No such profile '{name}'"));
+                };
+                self.requested_profile = Some(profile);
+                reply("", no)
+            }
+            // Nothing holds performance back here.
+            (PROFILE_PATH, PROFILE, "performanceInhibitedReason" | "performanceDegradedReason") => {
+                reply("s", |body| {
+                    body.string("");
+                })
+            }
+            (PROFILE_PATH, PROFILE, "profileHolds") => reply("aa{sv}", |body| {
+                body.array(4, |_| {});
+            }),
+            (PROFILE_PATH, PROFILE, "holdProfile") => fail(
+                errors::NOT_SUPPORTED,
+                "Holding a profile isn't supported; set the profile instead",
+            ),
+            (PROFILE_PATH, PROFILE, "releaseProfile") => fail(errors::INVALID_ARGS, "No such hold"),
             (_, interface, member) => fail(
                 errors::UNKNOWN_METHOD,
                 format!("Unknown method '{member}' or interface '{interface}'."),
@@ -541,6 +602,47 @@ mod tests {
         assert!(
             xml.contains("<node name=\"PolicyAgent\"/>")
                 && xml.contains("<node name=\"Actions\"/>")
+        );
+    }
+
+    #[test]
+    fn should_switch_profiles_through_the_app() {
+        let mut power = PowerManagement::new();
+        let choices = call(":1.5", PROFILE_PATH, PROFILE, "profileChoices", |_| {}, "");
+        let (signature, body) = power.call(&choices).unwrap();
+        assert_eq!(signature, "as");
+        assert!(String::from_utf8_lossy(&body).contains("power-saver"));
+        let current = call(":1.5", PROFILE_PATH, PROFILE, "currentProfile", |_| {}, "");
+        assert!(power.call(&current).unwrap().1.ends_with(b"balanced\0"));
+
+        // The widget asks; the app puts it in effect, then the widget hears of it.
+        let set = |name: &str| {
+            call(
+                ":1.5",
+                PROFILE_PATH,
+                PROFILE,
+                "setProfile",
+                |body| {
+                    body.string(name);
+                },
+                "s",
+            )
+        };
+        assert_eq!(power.call(&set("performance")).unwrap().0, "");
+        assert_eq!(power.requested_profile(), Some(Profile::Performance));
+        assert_eq!(power.requested_profile(), None);
+        assert!(power.call(&current).unwrap().1.ends_with(b"balanced\0"));
+        let signals = power.profile(Profile::Performance);
+        let members: Vec<&str> = signals.iter().map(|it| it.member.as_str()).collect();
+        assert_eq!(
+            members,
+            ["currentProfileChanged", "configuredProfileChanged"]
+        );
+        assert!(power.profile(Profile::Performance).is_empty());
+        assert!(power.call(&current).unwrap().1.ends_with(b"performance\0"));
+        assert_eq!(
+            power.call(&set("turbo")).unwrap_err().0,
+            errors::INVALID_ARGS
         );
     }
 }

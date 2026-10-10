@@ -137,6 +137,17 @@ pub fn reload_local_config() {
     }
 }
 
+/// Go by `cpu_boost` from now on, as the config file says now (`android::power_profile`).
+pub fn set_cpu_boost(cpu_boost: &str) {
+    if let Some(context) = APPLICATION_CONTEXT
+        .write()
+        .expect("Failed to write application context")
+        .as_mut()
+    {
+        context.local_config.performance.cpu_boost = cpu_boost.into();
+    }
+}
+
 pub fn get_application_context() -> ApplicationContext {
     return APPLICATION_CONTEXT
         .read()

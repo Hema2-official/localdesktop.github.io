@@ -562,6 +562,77 @@ fn describe(text: &str, error: &toml::de::Error) -> String {
     }
 }
 
+/// The config `content` with `key = value` (`value` in TOML) in `[section]`: the key's first line
+/// there replaced, with any comment after the old value kept; or the key added under the section's
+/// header; or the section added at the end. The rest stays as it was.
+pub fn with_value(content: &str, section: &str, key: &str, value: &str) -> String {
+    let mut out = String::with_capacity(content.len() + key.len() + value.len() + 16);
+    let mut current = None;
+    let mut header_end = None;
+    let mut replaced = false;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if let Some(name) = table_name(trimmed) {
+            current = Some(name);
+            out.push_str(line);
+            if name == section && header_end.is_none() {
+                header_end = Some(out.len());
+            }
+            continue;
+        }
+        let ours = !replaced && current == Some(section);
+        if let Some((_, old)) = trimmed
+            .split_once('=')
+            .filter(|it| ours && it.0.trim() == key)
+        {
+            let ending = &line[line.trim_end_matches(['\r', '\n']).len()..];
+            out.push_str(&format!("{key} = {value}{}{ending}", comment_after(old)));
+            replaced = true;
+            continue;
+        }
+        out.push_str(line);
+    }
+    if replaced {
+        return out;
+    }
+    let line = format!("{key} = {value}\n");
+    match header_end {
+        Some(at) if out[..at].ends_with('\n') => out.insert_str(at, &line),
+        // The header is the last line, without a line break.
+        Some(_) => out.push_str(&format!("\n{line}")),
+        None => {
+            if !out.is_empty() {
+                out.push_str(if out.ends_with('\n') { "\n" } else { "\n\n" });
+            }
+            out.push_str(&format!("[{section}]\n{line}"));
+        }
+    }
+    out
+}
+
+/// The table a `[name]` header line starts.
+fn table_name(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('[').filter(|it| !it.starts_with('['))?;
+    let (name, after) = rest.split_once(']')?;
+    let after = after.trim();
+    (after.is_empty() || after.starts_with('#')).then(|| name.trim())
+}
+
+/// The comment after a value (`"max"  # fast`), as " # fast", or nothing.
+fn comment_after(value: &str) -> String {
+    let value = value.trim();
+    let end = match value.strip_prefix('"') {
+        Some(rest) => rest.find('"').map_or(value.len(), |at| at + 2),
+        None => value.find('#').unwrap_or(value.len()),
+    };
+    let rest = value[end..].trim();
+    if rest.starts_with('#') {
+        format!(" {rest}")
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,5 +973,44 @@ mod tests {
                 );
             },
         );
+    }
+
+    #[test]
+    fn should_set_a_value_where_it_belongs() {
+        let config = "[user]\nusername = \"alice\"\n\n[performance]\n# cpu_boost = \"off\"\n\
+                      try_cpu_boost = \"off\"\ncpu_boost = \"max\"  # fast\nfast_realpath = true\n";
+        // Its line, with its comment; not the commented one, nor the try_ one.
+        assert_eq!(
+            with_value(config, "performance", "cpu_boost", "\"balanced\""),
+            config.replace(
+                "cpu_boost = \"max\"  # fast",
+                "cpu_boost = \"balanced\" # fast"
+            )
+        );
+        // Under the section's header, where it hasn't the key.
+        let without = "[performance]\nfast_realpath = false\n";
+        assert_eq!(
+            with_value(without, "performance", "cpu_boost", "\"off\""),
+            "[performance]\ncpu_boost = \"off\"\nfast_realpath = false\n"
+        );
+        assert_eq!(
+            with_value("[performance]", "performance", "cpu_boost", "\"off\""),
+            "[performance]\ncpu_boost = \"off\"\n"
+        );
+        // A section of its own at the end, and a key of the same name elsewhere left alone.
+        let elsewhere = "[user]\nusername = \"alice\"\n[other]\ncpu_boost = 1";
+        assert_eq!(
+            with_value(elsewhere, "performance", "cpu_boost", "\"max\""),
+            format!("{elsewhere}\n\n[performance]\ncpu_boost = \"max\"\n")
+        );
+        assert_eq!(
+            with_value("", "performance", "cpu_boost", "\"max\""),
+            "[performance]\ncpu_boost = \"max\"\n"
+        );
+        // What comes out parses, with the value.
+        let written = with_value(without, "performance", "cpu_boost", "\"max\"");
+        with_config_file(&written, |full_config_path| {
+            assert_eq!(parse_config(full_config_path).performance.cpu_boost, "max");
+        });
     }
 }

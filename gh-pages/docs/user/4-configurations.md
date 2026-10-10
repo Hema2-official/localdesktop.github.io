@@ -98,6 +98,8 @@ proot itself is what the programs wait for, so while it steps in on system calls
 cpu_boost = "max"
 ```
 
+Plasma's battery widget switches it too: its power profiles stand for the boost, Power Save for `off`, Balanced for `balanced` and Performance for `max`, and so does `powerprofilesctl`. A profile picked there is saved here and applies to the running programs at once; proot's own boost follows at the next start.
+
 Programs also turn paths into their full, canonical form with `realpath()`, some of them a lot: Node.js tools such as Vite do it for every file they load. glibc's version checks each part of the path in turn, and proot steps in for every one of them. Local Desktop loads a `realpath()` into every program (through `/etc/ld.so.preload`) that asks proot for the whole answer at once. That makes it three to four times faster, and Vite's first page loads about 15 % sooner; in return, starting a program takes about a quarter of a millisecond longer. To use glibc's own:
 
 ```toml title="/etc/localdesktop/localdesktop.toml"
@@ -153,8 +155,8 @@ The desktop's battery widgets show the phone's battery: Plasma's "Power & Batter
 
 - The battery's health is an estimate: what the battery holds when full, going by Android's charge counter, against its capacity when new in the phone's power profile. It comes closest after a good charge, and may be a few percent off the phone's own figure.
 - In Plasma, Local Desktop also stands in for PowerDevil, Plasma's power manager, which the Plasma preset leaves out since Android manages the phone's power. The widget's "Manually Block Sleep and Screen Locking" switch keeps the phone's screen on, and so does any program that blocks sleep or the screen saver (video players do).
-- Power profiles aren't there: the widget suggests installing power-profiles-daemon, which can't work here, since Android keeps the kernel's power settings to itself.
-- The system bus has UPower alone, so programs that need other system services (NetworkManager, logind, polkit) still find none. If the rootfs runs a system bus of its own, Local Desktop leaves the place to it.
+- The widget's power profiles set the CPU boost (see [Performance](#performance)).
+- The system bus has UPower and power profiles alone, so programs that need other system services (NetworkManager, logind, polkit) still find none. If the rootfs runs a system bus of its own, Local Desktop leaves the place to it.
 
 To keep the battery to Android:
 
