@@ -561,6 +561,8 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
     let mpsc_sender = mpsc_sender.clone();
     return Some(thread::spawn(move || {
         const MAX_INSTALL_ATTEMPTS: usize = 10;
+        // Files the last attempt found in its way, to overwrite in the next one.
+        let in_the_way = Arc::new(Mutex::new(Vec::<String>::new()));
 
         // Install dependencies until `check` succeeds.
         for attempt in 1..=MAX_INSTALL_ATTEMPTS {
@@ -614,11 +616,28 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
                     broken.clear();
                 }
             }
+            // A transaction killed midway can leave files that no package owns: those of a package
+            // it was extracting, or one moving between two packages it was upgrading. pacman then
+            // refuses every attempt with "exists in filesystem", so the next one overwrites exactly
+            // those files, where `install` is a single pacman command (as the presets' are).
+            let single_pacman = install.contains("pacman ") && !install.contains([';', '&', '|']);
+            let overwrite: String = std::mem::take(&mut *in_the_way.lock().unwrap())
+                .iter()
+                .filter(|_| single_pacman)
+                .map(|path| format!(" --overwrite '{}'", path.replace('\'', "'\\''")))
+                .collect();
+            if !overwrite.is_empty() {
+                log::warn!("Installing over files an interrupted install left:{overwrite}");
+            }
             let sender = mpsc_sender.clone();
+            let found = in_the_way.clone();
             ArchProcess {
-                command: install.clone(),
+                command: format!("{install}{overwrite}"),
                 user: None,
                 log: Some(Arc::new(move |it| {
+                    if let Some(path) = file_in_the_way(&it) {
+                        found.lock().unwrap().push(path);
+                    }
                     sender
                         .send(SetupMessage::Progress(it))
                         .expect("Failed to send log message");
@@ -655,6 +674,14 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
             }
         }
     }));
+}
+
+/// The path in pacman's "package: /path exists in filesystem" (there may be " (owned by …)"
+/// after it), the conflict that refuses a whole transaction.
+fn file_in_the_way(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once(": /")?;
+    let (path, _) = rest.split_once(" exists in filesystem")?;
+    Some(format!("/{path}"))
 }
 
 /// Packages whose entry in pacman's local database lacks `desc` or `files`, as `(directory,
