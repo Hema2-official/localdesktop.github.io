@@ -3,7 +3,9 @@
 # own package (app.polarbear.edge) with its own Linux system, and next to the dev build.
 #
 # Every push to the branch builds an APK you can download from the run. A tag named
-# bleeding-edge-<anything> also publishes it as a GitHub release.
+# bleeding-edge-<anything> also publishes it as a GitHub release, with the VR support bundle for
+# headsets (scripts/build-xr-bundle.sh) that the APK names: headsets download it instead of
+# building it themselves.
 #
 # The APK is signed with the fork's own key, so that updates install over each other. The key
 # comes from the repository secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
@@ -34,7 +36,36 @@ env:
   LOCALDESKTOP_LABEL: Local Desktop (bleeding edge)
 
 jobs:
+  # Built natively on an arm64 runner, in the Arch Linux the app installs.
+  xr-bundle:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      file: ${{ steps.bundle.outputs.file }}
+      sha256: ${{ steps.bundle.outputs.sha256 }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the VR support bundle
+        id: bundle
+        run: |
+          file="localdesktop-xr-${GITHUB_REF_NAME}.tar.xz"
+          sudo env XR_BUNDLE_WORK="$RUNNER_TEMP/xr-bundle" scripts/build-xr-bundle.sh "out/$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "out/$file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: xr-bundle
+          path: out/${{ steps.bundle.outputs.file }}
+          if-no-files-found: error
+
   build:
+    # Without a bundle too (not a release, or its build failed): headsets then build it.
+    needs: xr-bundle
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
 
     steps:
@@ -115,6 +146,20 @@ jobs:
         working-directory: patches/xbuild
         run: cargo install --path xbuild
 
+      - name: Get the VR support bundle
+        if: needs.xr-bundle.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: xr-bundle
+          path: out
+
+      # Where the release will have it, and its checksum, for the APK.
+      - name: Name the bundle in the APK
+        if: needs.xr-bundle.result == 'success'
+        run: |
+          echo "LOCALDESKTOP_XR_BUNDLE_URL=https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${{ needs.xr-bundle.outputs.file }}" >> "$GITHUB_ENV"
+          echo "LOCALDESKTOP_XR_BUNDLE_SHA256=${{ needs.xr-bundle.outputs.sha256 }}" >> "$GITHUB_ENV"
+
       - name: Build APK
         run: x build --release --platform=android --arch=arm64 --format=apk
 
@@ -153,4 +198,5 @@ jobs:
           tag_name: ${{ github.ref_name }}
           body_path: notes.md
           prerelease: true
-          files: out/${{ steps.version.outputs.file }}
+          # The APK, and the bundle when there is one.
+          files: out/*
