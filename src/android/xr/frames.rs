@@ -35,10 +35,27 @@ struct BufferDesc {
 }
 
 const FORMAT_R8G8B8A8_UNORM: u32 = 1;
-/// CPU access keeps the layout linear (no UBWC), which Linux can describe to its driver.
+/// CPU access keeps the layout linear, which Linux can describe to its driver.
 const USAGE_CPU_READ_RARELY: u64 = 2;
 const USAGE_GPU_SAMPLED_IMAGE: u64 = 1 << 8;
 const USAGE_GPU_FRAMEBUFFER: u64 = 1 << 9;
+/// The first vendor bit, which Qualcomm's gralloc takes as a request to compress the buffer the
+/// way the GPU compresses its own (its GRALLOC_USAGE_PRIVATE_ALLOC_UBWC); it compresses nothing
+/// it isn't asked to, and nothing the CPU may touch.
+const USAGE_VENDOR_UBWC: u64 = 1 << 28;
+/// Compressed buffers take half the memory traffic of linear ones, in the frames' two copies.
+/// They need gralloc to say which layout it chose, which Qualcomm's does; with another, the
+/// buffers are linear.
+const USAGE_COMPRESSED: u64 = USAGE_GPU_SAMPLED_IMAGE | USAGE_GPU_FRAMEBUFFER | USAGE_VENDOR_UBWC;
+const USAGE_LINEAR: u64 = USAGE_GPU_SAMPLED_IMAGE | USAGE_GPU_FRAMEBUFFER | USAGE_CPU_READ_RARELY;
+
+/// A flattened GraphicBuffer, as `AHardwareBuffer_sendHandleToUnixSocket` sends it: 13 words
+/// (the magic, size, stride, format, layers, usage, id, generation, the native handle's counts),
+/// then the native handle's ints. Qualcomm's gralloc begins those with its magic and its flags.
+const GRAPHIC_BUFFER_MAGICS: [u32; 2] = [0x4742_3031, 0x4742_4652]; // "GB01", "GBFR"
+const GRAPHIC_BUFFER_HANDLE_INTS: usize = 13;
+const QCOM_HANDLE_MAGIC: u32 = 0x676d_736d; // "gmsm"
+const QCOM_FLAG_UBWC: u32 = 0x0800_0000;
 
 /// Tells the offers of one set of buffers from those of the next.
 static OFFERS: AtomicU64 = AtomicU64::new(0);
@@ -129,6 +146,8 @@ pub struct Frames {
     pub width: u32,
     pub height: u32,
     stride: u32,
+    /// Whether gralloc compressed the buffers (UBWC) rather than laying them out linearly.
+    compressed: bool,
     pub views: Vec<ViewArea>,
     refresh_rate: f32,
     pub buffers: Vec<Buffer>,
@@ -162,24 +181,32 @@ impl Frames {
             .unwrap_or(0);
         let height = views.iter().map(|view| view.height).max().unwrap_or(0);
         let ndk = Ndk::load().context("looking up AHardwareBuffer")?;
-        let desc = BufferDesc {
+        let mut desc = BufferDesc {
             width,
             height,
             layers: 1,
             format: FORMAT_R8G8B8A8_UNORM,
-            usage: USAGE_GPU_SAMPLED_IMAGE | USAGE_GPU_FRAMEBUFFER | USAGE_CPU_READ_RARELY,
+            usage: USAGE_COMPRESSED,
             ..Default::default()
         };
         let mut buffers: Vec<Buffer> = Vec::with_capacity(count);
         let mut stride = 0;
+        let mut compressed = false;
         let release_all = |buffers: &[Buffer]| {
             for buffer in buffers {
                 unsafe { (ndk.release)(buffer.hardware_buffer) };
             }
         };
-        for _ in 0..count {
+        while buffers.len() < count {
             let mut hardware_buffer = ptr::null_mut();
             let status = unsafe { (ndk.allocate)(&desc, &mut hardware_buffer) };
+            if status != 0 && desc.usage == USAGE_COMPRESSED {
+                // A gralloc that refuses the vendor bit: linear ones, then.
+                release_all(&buffers);
+                buffers.clear();
+                desc.usage = USAGE_LINEAR;
+                continue;
+            }
             if status != 0 {
                 release_all(&buffers);
                 bail!("allocating a {width}x{height} buffer: error {status}");
@@ -187,7 +214,7 @@ impl Frames {
             let mut actual = BufferDesc::default();
             unsafe { (ndk.describe)(hardware_buffer, &mut actual) };
             stride = actual.stride * 4;
-            let dma_buf = match dma_buf_of(&ndk, hardware_buffer) {
+            let (dma_buf, layout) = match dma_buf_of(&ndk, hardware_buffer) {
                 Ok(it) => it,
                 Err(error) => {
                     unsafe { (ndk.release)(hardware_buffer) };
@@ -195,12 +222,34 @@ impl Frames {
                     return Err(error.context("taking a buffer's dma-buf"));
                 }
             };
+            let this_compressed = match layout {
+                Some(it) => it,
+                None if desc.usage == USAGE_LINEAR => false,
+                None => {
+                    // Gralloc doesn't say which layout it chose: start again with linear ones.
+                    unsafe { (ndk.release)(hardware_buffer) };
+                    release_all(&buffers);
+                    buffers.clear();
+                    desc.usage = USAGE_LINEAR;
+                    continue;
+                }
+            };
+            if !buffers.is_empty() && this_compressed != compressed {
+                unsafe { (ndk.release)(hardware_buffer) };
+                release_all(&buffers);
+                bail!("gralloc compressed some of the buffers and not others");
+            }
+            compressed = this_compressed;
             buffers.push(Buffer {
                 hardware_buffer,
                 dma_buf,
                 held: false,
             });
         }
+        log::info!(
+            "Immersive mode: {count} buffers of {width}x{height}, {}",
+            if compressed { "compressed" } else { "linear" }
+        );
         let channel = match protocol::channel() {
             Ok((ours, theirs)) => {
                 let mut frames = Self {
@@ -208,6 +257,7 @@ impl Frames {
                     width,
                     height,
                     stride,
+                    compressed,
                     views,
                     refresh_rate,
                     buffers,
@@ -238,7 +288,11 @@ impl Frames {
             self.stride,
             protocol::DRM_FORMAT_ABGR8888,
             self.views.len() as u32,
-            0,
+            if self.compressed {
+                protocol::IMMERSIVE_COMPRESSED
+            } else {
+                0
+            },
         ] {
             message.u32(value);
         }
@@ -470,19 +524,31 @@ impl Drop for Frames {
     }
 }
 
-/// The dma-buf behind an AHardwareBuffer. Android's public way to share one sends its native
-/// handle over a socket; its first descriptor is the buffer's memory, the rest (metadata) aren't
-/// needed.
-fn dma_buf_of(ndk: &Ndk, hardware_buffer: *mut c_void) -> Result<OwnedFd> {
+/// The dma-buf behind an AHardwareBuffer, and whether gralloc compressed it (UBWC) where it says.
+/// Android's public way to share one sends its native handle over a socket; its first descriptor
+/// is the buffer's memory, the rest (metadata) aren't needed.
+fn dma_buf_of(ndk: &Ndk, hardware_buffer: *mut c_void) -> Result<(OwnedFd, Option<bool>)> {
     let (receiver, sender) = protocol::channel()?;
     let status = unsafe { (ndk.send_handle)(hardware_buffer, sender.as_raw_fd()) };
     if status != 0 {
         bail!("AHardwareBuffer_sendHandleToUnixSocket: error {status}");
     }
     let mut handle = [0u8; 4096];
-    let (_, mut fds) = protocol::receive(&receiver, &mut handle)?;
+    let (size, mut fds) = protocol::receive(&receiver, &mut handle)?;
     if fds.is_empty() {
         bail!("the handle came without descriptors");
     }
-    Ok(fds.remove(0))
+    let word = |index: usize| {
+        handle
+            .get(index * 4..index * 4 + 4)
+            .filter(|_| index * 4 + 4 <= size)
+            .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
+    };
+    let ints = GRAPHIC_BUFFER_HANDLE_INTS;
+    let qualcomm = word(0).is_some_and(|magic| GRAPHIC_BUFFER_MAGICS.contains(&magic))
+        && word(11).is_some_and(|count| count >= 2)
+        && word(ints) == Some(QCOM_HANDLE_MAGIC);
+    let compressed =
+        qualcomm.then(|| word(ints + 1).is_some_and(|flags| flags & QCOM_FLAG_UBWC != 0));
+    Ok((fds.remove(0), compressed))
 }

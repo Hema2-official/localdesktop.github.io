@@ -139,9 +139,13 @@ destroy_images(struct ld_target *ldt)
 	ldt->base.images = NULL;
 }
 
+//! As drm_fourcc.h has them: linear, and Qualcomm's compressed layout (UBWC).
+#define DRM_MODIFIER_LINEAR 0ull
+#define DRM_MODIFIER_QCOM_COMPRESSED ((5ull << 56) | 1ull)
+
 /*!
- * One of the app's buffers as an image: linear, with the app's row pitch. Takes @p fd, the
- * buffer's dma-buf.
+ * One of the app's buffers as an image: linear or compressed, as the app says, with its row
+ * pitch. Takes @p fd, the buffer's dma-buf.
  */
 static VkResult
 import_buffer(struct ld_target *ldt,
@@ -157,10 +161,11 @@ import_buffer(struct ld_target *ldt,
 	VkImageView view = VK_NULL_HANDLE;
 	VkResult ret;
 
+	bool compressed = (description->flags & LD_IMMERSIVE_COMPRESSED) != 0;
 	VkSubresourceLayout plane = {.offset = 0, .rowPitch = description->stride};
 	VkImageDrmFormatModifierExplicitCreateInfoEXT modifier = {
 	    .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
-	    .drmFormatModifier = 0, // DRM_FORMAT_MOD_LINEAR
+	    .drmFormatModifier = compressed ? DRM_MODIFIER_QCOM_COMPRESSED : DRM_MODIFIER_LINEAR,
 	    .drmFormatModifierPlaneCount = 1,
 	    .pPlaneLayouts = &plane,
 	};
@@ -444,8 +449,9 @@ target_create_images(struct comp_target *ct,
 	ldt->base.present_load_op = VK_ATTACHMENT_LOAD_OP_CLEAR;
 	ldt->base.surface_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 
-	COMP_INFO(ct->c, "Rendering into the app's %u buffers of %ux%u (%s)", description->buffer_count,
-	          description->width, description->height, format == VK_FORMAT_R8G8B8A8_SRGB ? "sRGB" : "UNORM");
+	COMP_INFO(ct->c, "Rendering into the app's %u buffers of %ux%u (%s, %s)", description->buffer_count,
+	          description->width, description->height, format == VK_FORMAT_R8G8B8A8_SRGB ? "sRGB" : "UNORM",
+	          (description->flags & LD_IMMERSIVE_COMPRESSED) != 0 ? "compressed" : "linear");
 }
 
 static bool

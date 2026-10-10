@@ -33,7 +33,7 @@
 
 #define LD_SOCKET_PATH "/tmp/localdesktop-xr.sock"
 #define LD_PROTOCOL_MAGIC 0x52584c44u // "LDXR"
-#define LD_PROTOCOL_VERSION 6u
+#define LD_PROTOCOL_VERSION 7u
 
 #define LD_MAX_BUFFERS 8
 #define LD_MAX_VIEWS 2
@@ -103,6 +103,12 @@ enum ld_button
 #define LD_HELLO_PASSTHROUGH 1u
 
 /*!
+ * In @ref ld_immersive::flags: the buffers are compressed the way the GPU compresses its own
+ * (Qualcomm's UBWC, the DRM_FORMAT_MOD_QCOM_COMPRESSED modifier); else they are linear.
+ */
+#define LD_IMMERSIVE_COMPRESSED 1u
+
+/*!
  * In @ref ld_frame::flags: show the frame over the surroundings, blended by its alpha. The
  * colours are premultiplied by it.
  */
@@ -163,7 +169,8 @@ struct ld_immersive
 	uint32_t stride;
 	uint32_t drm_format;
 	uint32_t view_count;
-	uint32_t reserved;
+	//! LD_IMMERSIVE_* bits.
+	uint32_t flags;
 	struct
 	{
 		//! The view's rectangle in each buffer, also the size to render it at.

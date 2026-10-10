@@ -22,7 +22,7 @@ use std::ptr;
 pub const SOCKET: &str = "tmp/localdesktop-xr.sock";
 
 pub const MAGIC: u32 = 0x5258_4c44; // "LDXR"
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 pub const FRAME: u32 = 1;
 pub const RELEASE: u32 = 2;
 pub const TRACKING: u32 = 3;
@@ -58,6 +58,8 @@ pub const STATE_VISIBLE: u32 = 1;
 pub const STATE_FOCUSED: u32 = 2;
 /// The headset can show its surroundings behind immersive mode.
 pub const HELLO_PASSTHROUGH: u32 = 1;
+/// The buffers are compressed the way the GPU compresses its own (Qualcomm's UBWC); else linear.
+pub const IMMERSIVE_COMPRESSED: u32 = 1;
 /// Show the frame over the surroundings, blended by its alpha, which its colours are
 /// premultiplied by.
 pub const FRAME_ALPHA_BLEND: u32 = 1;
