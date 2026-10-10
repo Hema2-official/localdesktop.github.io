@@ -22,9 +22,13 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
 - **The desktop's notifications on Android** while the app isn't in front, and **the screen
   turning off** after Android's timeout when nobody uses the desktop (a playing video keeps it on).
 - **The phone's battery in the desktop's battery widgets** (`[battery] share`), with Plasma's
-  switch to block sleep keeping the phone's screen on.
+  switch to block sleep keeping the phone's screen on, and its power profiles switching the CPU
+  boost (`[performance] cpu_boost`).
 - **Sharing from Android's apps**: Local Desktop is in the share sheet and in "Open with"; files
   land in the desktop's Downloads folder and open there, links in the desktop's browser.
+- **The other way round**: the `localdesktop` command opens links with Android's apps, Android's
+  settings for the app and its terminal, and restarts the desktop; Android apps (`.apk`, `.xapk`,
+  `.apks`) install from the file manager, with Android asking first.
 - **The GPU** (Turnip on Qualcomm phones) for Vulkan programs, and Plasma's own drawing.
 
 The details are in the commits of the branch; the user docs in `gh-pages/docs/user/` describe

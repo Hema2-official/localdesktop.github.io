@@ -17,7 +17,7 @@ use crate::{
             ARCH_FS_ROOT, CONFIG_FILE, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
             PULSE_GUEST_SERVER,
         },
-        hard_links,
+        control, hard_links,
     },
 };
 use pathdiff::diff_paths;
@@ -1485,6 +1485,118 @@ exit 1
     None
 }
 
+/// "Install on Android" for apps, in the file manager's "Open with": the only program for them,
+/// so also what opening one does.
+const INSTALL_ENTRY: &str = "[Desktop Entry]
+Type=Application
+Name=Install on Android
+Comment=Install the app on the phone; Android asks first
+Icon=application-vnd.android.package-archive
+Exec=localdesktop install %f
+MimeType=application/vnd.android.package-archive;application/xapk-package-archive;
+NoDisplay=true
+Terminal=false
+";
+/// Until the app has settings of its own: Android's for it.
+const SETTINGS_ENTRY: &str = "[Desktop Entry]
+Type=Application
+Name=Local Desktop Settings
+GenericName=Android settings for Local Desktop
+Comment=Local Desktop's permissions, battery use and storage on Android
+Icon=smartphone
+Exec=localdesktop open-settings
+Categories=Settings;
+Terminal=false
+";
+/// Bundles of split APKs, which shared-mime-info doesn't know.
+const BUNDLE_TYPE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/xapk-package-archive">
+    <comment>Android app bundle</comment>
+    <icon name="application-vnd.android.package-archive"/>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.xapk"/>
+    <glob pattern="*.apks"/>
+  </mime-type>
+</mime-info>
+"#;
+
+/// `localdesktop`, the command that asks Android for things (`guest::control`), with "Install on
+/// Android" for apps and Android's settings for the app in the desktop's menus.
+fn setup_localdesktop_command(_: &SetupOptions) -> StageOutput {
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    write_executable(
+        &fs_root.join("usr/local/bin/localdesktop"),
+        &format!(
+            r#"#!/bin/sh
+# Asks Local Desktop, the Android app this Linux runs in, to do something on Android's side.
+pipe={pipe}
+usage() {{
+    cat >&2 <<'EOF'
+Usage: localdesktop COMMAND
+  open-url URL      open a web or mail link with Android's apps
+  install FILE      install an Android app (.apk, .xapk, .apks); Android asks first
+  open-settings     open Android's settings for Local Desktop
+  open-terminal     open Local Desktop's terminal
+  restart-desktop   log out of the desktop and start it again
+EOF
+    exit 2
+}}
+send() {{
+    case "$1" in
+        *'
+'*) echo "localdesktop: no line breaks, please" >&2; exit 2 ;;
+    esac
+    if [ ! -p "$pipe" ]; then
+        echo "localdesktop: Local Desktop isn't listening at $pipe" >&2
+        exit 1
+    fi
+    printf '%s\n' "$1" | timeout 5 tee "$pipe" > /dev/null || {{
+        echo "localdesktop: Local Desktop didn't take it" >&2
+        exit 1
+    }}
+}}
+case "$1" in
+    open-url) [ $# -eq 2 ] || usage; send "open-url $2" ;;
+    install)
+        [ $# -eq 2 ] || usage
+        file=$(realpath -e -- "$2") || exit 1
+        send "install $file" ;;
+    open-settings | open-terminal | restart-desktop) [ $# -eq 1 ] || usage; send "$1" ;;
+    *) usage ;;
+esac
+"#,
+            pipe = control::PIPE
+        ),
+    );
+    let applications = fs_root.join("usr/share/applications");
+    let _ = fs::create_dir_all(&applications);
+    for (name, entry) in [
+        ("localdesktop-install.desktop", INSTALL_ENTRY),
+        ("localdesktop-settings.desktop", SETTINGS_ENTRY),
+    ] {
+        fs::write(applications.join(name), entry).expect("Failed to write a desktop entry");
+    }
+    // The file manager knows the bundle type once its cache has it.
+    let bundle_type = fs_root.join("usr/share/mime/packages/localdesktop.xml");
+    if fs::read_to_string(&bundle_type).ok().as_deref() != Some(BUNDLE_TYPE) {
+        let written = fs::write(&bundle_type, BUNDLE_TYPE);
+        let updated = written.is_ok()
+            && ArchProcess {
+                command: "update-mime-database /usr/share/mime".into(),
+                user: None,
+                log: None,
+            }
+            .run()
+            .status
+            .success();
+        if !updated {
+            log::warn!("The MIME type for Android app bundles isn't in the cache");
+        }
+    }
+    None
+}
+
 /// The realpath(3) that asks proot for the whole answer (src/guest/realpath.c), as the APK has it
 /// and where the rootfs gets it.
 const FAST_REALPATH_ASSET: &str = "guest/librealpath.so";
@@ -2364,6 +2476,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_fake_bwrap), // Step 9. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
         Box::new(setup_chromium_no_sandbox), // Step 10. Make Chromium/Electron apps launchable without a terminal
         Box::new(setup_open_from_android),   // Step 10b. Open what Android shares, in the session
+        Box::new(setup_localdesktop_command), // Step 10c. The desktop asks Android: links, apps to install
         Box::new(setup_onboard_signal_fix), // Step 11. Wrap Onboard to survive proot fstat/signal.set_wakeup_fd failure
         Box::new(setup_xfce_wayland),       // Step 12. Setup Xfce Wayland launch and HiDPI scaling
         Box::new(setup_plasma),             // Step 13. Setup the Plasma launcher and defaults

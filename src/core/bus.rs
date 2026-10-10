@@ -87,6 +87,24 @@ pub struct Signal {
     pub args: Vec<String>,
 }
 
+/// `PropertiesChanged` for `changed` properties of `interface` at `path`.
+pub fn properties_changed<K: AsRef<str>>(
+    path: &str,
+    interface: &str,
+    changed: &[(K, Value)],
+) -> Signal {
+    let mut body = Writer::new();
+    body.string(interface).dict(changed).strings(&[]);
+    Signal {
+        path: path.into(),
+        interface: PROPERTIES.into(),
+        member: "PropertiesChanged".into(),
+        signature: "sa{sv}as".into(),
+        body: body.into_bytes(),
+        args: vec![interface.into()],
+    }
+}
+
 /// Where a connection is: the byte that starts it, the authentication lines, then messages.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 enum Stage {

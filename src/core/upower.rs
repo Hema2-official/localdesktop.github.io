@@ -238,7 +238,7 @@ impl UPower {
             if interface == DEVICE {
                 changed.push(("UpdateTime", Value::U64(self.updated)));
             }
-            signals.push(properties_changed(path, interface, &changed));
+            signals.push(bus::properties_changed(path, interface, &changed));
         }
         signals
     }
@@ -389,7 +389,7 @@ impl UPower {
         }
     }
 
-    fn introspect(&self, path: &str) -> Option<String> {
+    pub fn introspect(&self, path: &str) -> Option<String> {
         let objects = self.objects();
         let children: &[&str] = match path {
             "/" => &["org"],
@@ -557,19 +557,6 @@ fn device_signal(member: &str, device: &str) -> Signal {
         signature: "o".into(),
         body: body.into_bytes(),
         args: vec![device.into()],
-    }
-}
-
-fn properties_changed(path: &str, interface: &str, changed: &Properties) -> Signal {
-    let mut body = Writer::new();
-    body.string(interface).dict(changed).strings(&[]);
-    Signal {
-        path: path.into(),
-        interface: bus::PROPERTIES.into(),
-        member: "PropertiesChanged".into(),
-        signature: "sa{sv}as".into(),
-        body: body.into_bytes(),
-        args: vec![interface.into()],
     }
 }
 

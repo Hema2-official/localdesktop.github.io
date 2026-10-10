@@ -192,6 +192,21 @@ impl Writer {
         self.value(value)
     }
 
+    /// An entry of a dictionary of variants (`{sv}`), whose value of type `signature` `write`
+    /// adds: for values `Value` has no room for, such as arrays.
+    pub fn entry(
+        &mut self,
+        key: &str,
+        signature: &str,
+        write: impl FnOnce(&mut Self),
+    ) -> &mut Self {
+        self.align(8);
+        self.string(key);
+        self.signature(signature);
+        write(self);
+        self
+    }
+
     /// A dictionary of variants (`a{sv}`).
     pub fn dict<K: AsRef<str>>(&mut self, entries: &[(K, Value)]) -> &mut Self {
         self.array(8, |writer| {

@@ -12,6 +12,7 @@
 
 pub mod bus;
 pub mod clipboard;
+pub mod control;
 pub mod notifications;
 pub mod power;
 pub mod screen;
@@ -19,6 +20,7 @@ pub mod shared;
 pub mod system_bus;
 pub mod xr;
 
+use crate::android::power_profile;
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config::ARCH_FS_ROOT;
 use std::collections::VecDeque;
@@ -477,6 +479,8 @@ struct Jobs {
     power_on: bool,
     /// Not the session's: it serves the guest whether a desktop runs or not.
     system_bus: Option<system_bus::Job>,
+    /// Not the session's either: the `localdesktop` command.
+    control: Option<control::Job>,
     /// Monado's control connection, on headsets; the desktop doesn't matter to it either.
     xr: Option<xr::Job>,
 }
@@ -526,6 +530,7 @@ impl Link {
         let screen = screen::Job::new(android_app);
         let notifications = notifications::Job::new(android_app);
         let system_bus = system_bus::Job::new(android_app);
+        let control = control::Job::new(android_app);
         let xr = xr::Job::new(android_app);
         // Android's runtime names the threads that attach to it "Thread-<n>".
         unsafe { libc::prctl(libc::PR_SET_NAME, c"guest-link".as_ptr()) };
@@ -547,6 +552,7 @@ impl Link {
                 power: power::Job::new(),
                 power_on: false,
                 system_bus,
+                control,
                 xr,
             },
         }
@@ -590,6 +596,9 @@ impl Link {
         jobs.power.turn(jobs.power_on);
         if let Some(job) = &mut jobs.system_bus {
             job.turn(config.battery.share);
+        }
+        if let Some(job) = &mut jobs.control {
+            job.open();
         }
         if let Some(job) = &mut jobs.xr {
             job.listen();
@@ -716,6 +725,21 @@ impl Link {
                     job.hold(held);
                 }
             }
+            // A power profile picked in the battery widget, or by a program on the system bus.
+            let picked = [
+                self.jobs.power.requested_profile(),
+                self.jobs
+                    .system_bus
+                    .as_mut()
+                    .and_then(system_bus::Job::requested_profile),
+            ];
+            for profile in picked.into_iter().flatten() {
+                power_profile::apply(profile);
+                self.jobs.power.profile(profile);
+                if let Some(job) = &mut self.jobs.system_bus {
+                    job.profile(profile);
+                }
+            }
 
             let mut entries = vec![poll_entry(self.shared.wake.as_raw_fd(), libc::POLLIN)];
             if let Some(watcher) = &self.watcher {
@@ -742,6 +766,9 @@ impl Link {
             }
             self.jobs.power.waits_for(&mut entries);
             if let Some(job) = &self.jobs.system_bus {
+                job.waits_for(&mut entries);
+            }
+            if let Some(job) = &self.jobs.control {
                 job.waits_for(&mut entries);
             }
             if let Some(job) = &self.jobs.xr {
@@ -813,6 +840,9 @@ impl Link {
                 self.jobs.power.ready(entry.fd);
                 if let Some(job) = &mut self.jobs.system_bus {
                     job.ready(entry.fd, entry.revents);
+                }
+                if let Some(job) = &mut self.jobs.control {
+                    job.ready(entry.fd);
                 }
                 if let Some(job) = &mut self.jobs.xr {
                     job.ready(entry.fd);

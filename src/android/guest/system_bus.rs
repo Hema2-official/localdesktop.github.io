@@ -1,5 +1,6 @@
 //! The guest's system bus, which the app serves itself (`core::bus`), with Android's battery on it
-//! as UPower (`core::upower`) for the desktop's battery widget.
+//! as UPower (`core::upower`) for the desktop's battery widget, and power-profiles-daemon's service
+//! (`core::power_profiles`) for its power profiles.
 //!
 //! Its socket is where every program looks for the system bus, `/run/dbus/system_bus_socket` in
 //! the rootfs, which programs under proot reach like any socket of the guest's. The app makes it
@@ -9,9 +10,12 @@
 
 use super::poll_entry;
 use crate::android::battery::Battery;
-use crate::core::bus::Bus;
+use crate::android::power_profile;
+use crate::core::bus::{self, reply, Bus, Reply, Service};
 use crate::core::config::ARCH_FS_ROOT;
-use crate::core::upower::{AndroidBattery, UPower};
+use crate::core::dbus::Message;
+use crate::core::power_profiles::{self, PowerProfiles, Profile};
+use crate::core::upower::{self, AndroidBattery, UPower};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -37,7 +41,39 @@ struct Served {
     listener: UnixListener,
     clients: BTreeMap<u32, UnixStream>,
     next: u32,
-    bus: Bus<UPower>,
+    bus: Bus<Services>,
+}
+
+/// What the bus has: UPower, and power-profiles-daemon's service, whose object is in UPower's tree.
+struct Services {
+    upower: UPower,
+    profiles: PowerProfiles,
+}
+
+impl Service for Services {
+    fn names(&self) -> &'static [&'static str] {
+        &[upower::NAME, power_profiles::NAME]
+    }
+
+    fn call(&mut self, call: &Message) -> Reply {
+        let header = &call.header;
+        let path = header.path.as_deref().unwrap_or_default();
+        if path == power_profiles::PATH {
+            return self.profiles.call(call);
+        }
+        let introspect = header.interface.as_deref() == Some(bus::INTROSPECTABLE)
+            && header.member.as_deref() == Some("Introspect");
+        let parent = power_profiles::PATH.rsplit_once('/').map(|it| it.0);
+        match self.upower.introspect(path) {
+            Some(xml) if introspect && Some(path) == parent => {
+                let xml = xml.replace("</node>", "  <node name=\"PowerProfiles\"/>\n</node>");
+                reply("s", |body| {
+                    body.string(&xml);
+                })
+            }
+            _ => self.upower.call(call),
+        }
+    }
 }
 
 impl Job {
@@ -84,7 +120,8 @@ impl Job {
         if let Some(battery) = &self.last {
             upower.update(battery.clone(), now());
         }
-        let bus = Bus::new(guid(), std::process::id(), upower);
+        let profiles = PowerProfiles::new(power_profile::current());
+        let bus = Bus::new(guid(), std::process::id(), Services { upower, profiles });
         self.served = Some(Served {
             path,
             listener,
@@ -118,13 +155,30 @@ impl Job {
             battery.percentage(),
             battery.state()
         );
-        let signals = served.bus.service().update(battery.clone(), now());
+        let signals = served.bus.service().upower.update(battery.clone(), now());
         for signal in &signals {
             served.bus.emit(signal);
         }
         served.flush();
         self.last = Some(battery);
         self.last.as_ref()
+    }
+
+    /// The power profile a program asked for since the last look.
+    pub fn requested_profile(&mut self) -> Option<Profile> {
+        self.served.as_mut()?.bus.service().profiles.requested()
+    }
+
+    /// `profile` is in effect now.
+    pub fn profile(&mut self, profile: Profile) {
+        let Some(served) = &mut self.served else {
+            return;
+        };
+        let signals = served.bus.service().profiles.set(profile);
+        for signal in &signals {
+            served.bus.emit(signal);
+        }
+        served.flush();
     }
 
     pub fn waits_for(&self, entries: &mut Vec<libc::pollfd>) {

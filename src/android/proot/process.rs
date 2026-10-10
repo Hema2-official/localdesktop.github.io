@@ -12,12 +12,14 @@ use winit::platform::android::activity::AndroidApp;
 
 pub type Log = Arc<dyn Fn(String) + Send + Sync>;
 
-/// Ask the scheduler to treat this process, and every process it starts, as needing at least
-/// `floor` (out of 1024) of a core's capacity when it runs: see `PerformanceConfig`. On an S21 FE,
-/// `dolphin --version` took 555 ms without it, 388 ms with `balanced` and 318 ms with `max`. The
-/// kernel ignores it where it doesn't support clamping.
-fn set_utilization_floor(floor: u32) {
+/// Ask the scheduler to treat `thread` (0 for the calling one), and every thread and process it
+/// starts, as needing at least `floor` (out of 1024) of a core's capacity when it runs: see
+/// `PerformanceConfig`. On an S21 FE, `dolphin --version` took 555 ms without it, 388 ms with
+/// `balanced` and 318 ms with `max`. The kernel ignores it where it doesn't support clamping.
+/// Whether the kernel took it.
+pub fn set_utilization_floor(thread: libc::pid_t, floor: u32) -> bool {
     #[repr(C)]
+    #[derive(Default)]
     struct SchedAttr {
         size: u32,
         policy: u32,
@@ -33,20 +35,31 @@ fn set_utilization_floor(floor: u32) {
     const SCHED_FLAG_KEEP_POLICY: u64 = 0x08;
     const SCHED_FLAG_KEEP_PARAMS: u64 = 0x10;
     const SCHED_FLAG_UTIL_CLAMP_MIN: u64 = 0x20;
-    let attr = SchedAttr {
-        size: std::mem::size_of::<SchedAttr>() as u32,
-        policy: 0,
-        flags: SCHED_FLAG_KEEP_POLICY | SCHED_FLAG_KEEP_PARAMS | SCHED_FLAG_UTIL_CLAMP_MIN,
-        nice: 0,
-        priority: 0,
-        runtime: 0,
-        deadline: 0,
-        period: 0,
-        util_min: floor.min(1024),
-        util_max: 1024,
-    };
+    let size = std::mem::size_of::<SchedAttr>() as u32;
+    let mut attr = SchedAttr::default();
+    // The thread's own nice value goes back with it: the kernel weighs the one it is given even
+    // when told to keep the thread's, and refuses a lower one than the thread chose (Mesa's
+    // background threads run at 19).
     unsafe {
-        libc::syscall(libc::SYS_sched_setattr, 0, &attr as *const SchedAttr, 0);
+        libc::syscall(
+            libc::SYS_sched_getattr,
+            thread,
+            &mut attr as *mut SchedAttr,
+            size,
+            0,
+        )
+    };
+    attr.size = size;
+    attr.flags = SCHED_FLAG_KEEP_POLICY | SCHED_FLAG_KEEP_PARAMS | SCHED_FLAG_UTIL_CLAMP_MIN;
+    attr.util_min = floor.min(1024);
+    attr.util_max = 1024;
+    unsafe {
+        libc::syscall(
+            libc::SYS_sched_setattr,
+            thread,
+            &attr as *const SchedAttr,
+            0,
+        ) == 0
     }
 }
 
@@ -219,7 +232,7 @@ impl ArchProcess {
                     }
                 }
                 if utilization_floor > 0 {
-                    set_utilization_floor(utilization_floor);
+                    set_utilization_floor(0, utilization_floor);
                 }
                 Ok(())
             });
