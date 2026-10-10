@@ -1,7 +1,7 @@
 From f20bf74d887da3397d03a78a3c7ec6d065d79573 Mon Sep 17 00:00:00 2001
 From: Hema2 <49586027+Hema2-official@users.noreply.github.com>
 Date: Sat, 10 Oct 2026 12:48:44 +0200
-Subject: [PATCH] Hook in the Local Desktop driver
+Subject: [PATCH 1/2] Hook in the Local Desktop driver
 
 Builds drv_localdesktop (src/xrt/drivers/localdesktop), its builder and
 its compositor target when XRT_BUILD_DRIVER_LOCALDESKTOP is on, puts the

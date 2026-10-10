@@ -108,17 +108,20 @@ ld_hmd_create(struct ld_link *link)
 	hmd->base.tracking_origin->type = XRT_TRACKING_TYPE_OTHER;
 	snprintf(hmd->base.tracking_origin->name, XRT_TRACKING_NAME_LEN, "Local Desktop stage");
 
-	// Frames go into the app's buffers, with the views side by side: the buffer is the screen.
+	/*
+	 * Frames go into buffers the app lends in immersive mode, with the views side by side: the
+	 * buffer is the screen. Its layout until then comes from the app's description of the
+	 * headset; the compositor's target updates it from the buffers.
+	 */
 	struct xrt_hmd_parts *parts = hmd->base.hmd;
-	parts->screens[0].w_pixels = (int)hello->width;
-	parts->screens[0].h_pixels = (int)hello->height;
-	parts->screens[0].nominal_frame_interval_ns = (uint64_t)(U_TIME_1S_IN_NS / hello->refresh_rate);
+	uint32_t x = 0;
+	uint32_t height = 0;
 	parts->view_count = hello->view_count;
 	for (uint32_t i = 0; i < hello->view_count; i++) {
 		parts->views[i].display.w_pixels = hello->views[i].width;
 		parts->views[i].display.h_pixels = hello->views[i].height;
-		parts->views[i].viewport.x_pixels = hello->views[i].x;
-		parts->views[i].viewport.y_pixels = hello->views[i].y;
+		parts->views[i].viewport.x_pixels = x;
+		parts->views[i].viewport.y_pixels = 0;
 		parts->views[i].viewport.w_pixels = hello->views[i].width;
 		parts->views[i].viewport.h_pixels = hello->views[i].height;
 		parts->views[i].rot = u_device_rotation_ident;
@@ -128,7 +131,14 @@ ld_hmd_create(struct ld_link *link)
 		    .angle_up = hello->views[i].fov.up,
 		    .angle_down = hello->views[i].fov.down,
 		};
+		x += hello->views[i].width;
+		if (hello->views[i].height > height) {
+			height = hello->views[i].height;
+		}
 	}
+	parts->screens[0].w_pixels = (int)x;
+	parts->screens[0].h_pixels = (int)height;
+	parts->screens[0].nominal_frame_interval_ns = (uint64_t)(U_TIME_1S_IN_NS / hello->refresh_rate);
 	parts->blend_modes[0] = XRT_BLEND_MODE_OPAQUE;
 	parts->blend_mode_count = 1;
 

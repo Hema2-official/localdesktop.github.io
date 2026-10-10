@@ -5,8 +5,9 @@
  * @brief  Target that renders into the buffers Local Desktop's immersive mode lends.
  *
  * The app shows each frame in an OpenXR session on the headset's own runtime, with the poses it
- * was rendered for, so the headset's compositor reprojects it and corrects for the lenses. See
- * @ref drv_localdesktop.
+ * was rendered for, so the headset's compositor reprojects it and corrects for the lenses. It
+ * lends new buffers each time it enters immersive mode, and enters it when the compositor's
+ * session begins. See @ref drv_localdesktop.
  *
  * @ingroup comp_main
  */
@@ -54,6 +55,8 @@ struct ld_target
 	//! The app's buffers, as images; @ref comp_target::images points here.
 	struct comp_target_image images[LD_MAX_BUFFERS];
 	VkDeviceMemory memories[LD_MAX_BUFFERS];
+	//! Which of the app's buffers they are.
+	uint64_t generation;
 
 	//! The image between acquire and present, -1 for none.
 	int64_t acquired;
@@ -97,18 +100,25 @@ destroy_images(struct ld_target *ldt)
 	ldt->base.images = NULL;
 }
 
-//! One of the app's buffers as an image: linear, with the app's row pitch.
+/*!
+ * One of the app's buffers as an image: linear, with the app's row pitch. Takes @p fd, the
+ * buffer's dma-buf.
+ */
 static VkResult
-import_buffer(struct ld_target *ldt, uint32_t index, VkFormat format, VkImageUsageFlags usage)
+import_buffer(struct ld_target *ldt,
+              const struct ld_immersive *description,
+              uint32_t index,
+              int fd,
+              VkFormat format,
+              VkImageUsageFlags usage)
 {
 	struct vk_bundle *vk = get_vk(ldt);
-	const struct ld_hello *hello = ld_link_hello(ldt->link);
 	VkImage image = VK_NULL_HANDLE;
 	VkDeviceMemory memory = VK_NULL_HANDLE;
 	VkImageView view = VK_NULL_HANDLE;
 	VkResult ret;
 
-	VkSubresourceLayout plane = {.offset = 0, .rowPitch = hello->stride};
+	VkSubresourceLayout plane = {.offset = 0, .rowPitch = description->stride};
 	VkImageDrmFormatModifierExplicitCreateInfoEXT modifier = {
 	    .sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
 	    .drmFormatModifier = 0, // DRM_FORMAT_MOD_LINEAR
@@ -125,7 +135,7 @@ import_buffer(struct ld_target *ldt, uint32_t index, VkFormat format, VkImageUsa
 	    .pNext = &external,
 	    .imageType = VK_IMAGE_TYPE_2D,
 	    .format = format,
-	    .extent = {hello->width, hello->height, 1},
+	    .extent = {description->width, description->height, 1},
 	    .mipLevels = 1,
 	    .arrayLayers = 1,
 	    .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -137,14 +147,13 @@ import_buffer(struct ld_target *ldt, uint32_t index, VkFormat format, VkImageUsa
 	ret = vk->vkCreateImage(vk->device, &image_info, NULL, &image);
 	if (ret != VK_SUCCESS) {
 		COMP_ERROR(ldt->base.c, "vkCreateImage for buffer %u: %s", index, vk_result_string(ret));
+		close(fd);
 		return ret;
 	}
 
 	VkMemoryRequirements requirements;
 	vk->vkGetImageMemoryRequirements(vk->device, image, &requirements);
 
-	// Vulkan takes the descriptor it imports; the link keeps its own.
-	int fd = dup(ld_link_dma_buf(ldt->link, index));
 	VkMemoryFdPropertiesKHR fd_properties = {.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR};
 	ret = ldt->vkGetMemoryFdPropertiesKHR(vk->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, fd,
 	                                      &fd_properties);
@@ -172,6 +181,7 @@ import_buffer(struct ld_target *ldt, uint32_t index, VkFormat format, VkImageUsa
 	    .allocationSize = requirements.size,
 	    .memoryTypeIndex = (uint32_t)(ffs((int)types) - 1),
 	};
+	// Takes the descriptor when it succeeds.
 	ret = vk->vkAllocateMemory(vk->device, &allocate, NULL, &memory);
 	if (ret != VK_SUCCESS) {
 		COMP_ERROR(ldt->base.c, "Importing buffer %u: %s", index, vk_result_string(ret));
@@ -295,7 +305,10 @@ target_init_post_vulkan(struct comp_target *ct, uint32_t preferred_width, uint32
 static bool
 target_check_ready(struct comp_target *ct)
 {
-	return true; // The buffers came with the link.
+	struct ld_target *ldt = ld_target(ct);
+
+	// Ready once immersive mode has lent buffers; until it lends newer ones, frames go nowhere.
+	return ld_link_has_buffers(ldt->link);
 }
 
 static bool
@@ -304,18 +317,49 @@ target_is_shared_presentable_image(struct comp_target *ct)
 	return false;
 }
 
+/*!
+ * The views' places in the buffers and their fields of view, as immersive mode has them: the
+ * app's guess of the headset may have been off.
+ */
+static void
+update_views(struct ld_target *ldt, const struct ld_immersive *description)
+{
+	struct xrt_hmd_parts *parts = ldt->base.c->xdev->hmd;
+
+	for (uint32_t i = 0; i < description->view_count && i < parts->view_count; i++) {
+		parts->views[i].viewport.x_pixels = description->views[i].x;
+		parts->views[i].viewport.y_pixels = description->views[i].y;
+		parts->views[i].viewport.w_pixels = description->views[i].width;
+		parts->views[i].viewport.h_pixels = description->views[i].height;
+		parts->distortion.fov[i] = (struct xrt_fov){
+		    .angle_left = description->views[i].fov.left,
+		    .angle_right = description->views[i].fov.right,
+		    .angle_up = description->views[i].fov.up,
+		    .angle_down = description->views[i].fov.down,
+		};
+	}
+	parts->screens[0].w_pixels = (int)description->width;
+	parts->screens[0].h_pixels = (int)description->height;
+}
+
 static void
 target_create_images(struct comp_target *ct,
                      const struct comp_target_create_images_info *create_info,
                      struct vk_bundle_queue *present_queue)
 {
 	struct ld_target *ldt = ld_target(ct);
-	const struct ld_hello *hello = ld_link_hello(ldt->link);
 
 	assert(ldt->has_init_vulkan);
 	(void)present_queue;
 
 	destroy_images(ldt);
+
+	struct ld_buffers buffers;
+	if (!ld_link_get_buffers(ldt->link, &buffers)) {
+		COMP_ERROR(ct->c, "Immersive mode has lent no buffers yet");
+		return;
+	}
+	const struct ld_immersive *description = &buffers.description;
 
 	/*
 	 * The buffers hold R, G, B, A bytes, sRGB-encoded: by the format on the graphics path, by the
@@ -330,28 +374,39 @@ target_create_images(struct comp_target *ct,
 	}
 	if (format == VK_FORMAT_UNDEFINED) {
 		COMP_ERROR(ct->c, "The compositor takes neither R8G8B8A8_SRGB nor R8G8B8A8_UNORM");
+	}
+
+	// Each import takes its dma-buf; what isn't imported is closed.
+	uint32_t imported = 0;
+	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
+		int fd = buffers.dma_bufs[i];
+		bool importing = format != VK_FORMAT_UNDEFINED && i < description->buffer_count && imported == i;
+		if (importing &&
+		    import_buffer(ldt, description, i, fd, format, create_info->image_usage) == VK_SUCCESS) {
+			imported++;
+		} else if (!importing && fd >= 0) {
+			close(fd);
+		}
+	}
+	if (imported < description->buffer_count) {
+		ldt->base.image_count = imported;
+		destroy_images(ldt);
 		return;
 	}
 
-	for (uint32_t i = 0; i < hello->buffer_count; i++) {
-		if (import_buffer(ldt, i, format, create_info->image_usage) != VK_SUCCESS) {
-			ldt->base.image_count = i;
-			destroy_images(ldt);
-			return;
-		}
-	}
-
-	ldt->base.image_count = hello->buffer_count;
+	update_views(ldt, description);
+	ldt->generation = buffers.generation;
+	ldt->base.image_count = description->buffer_count;
 	ldt->base.images = ldt->images;
-	ldt->base.width = hello->width;
-	ldt->base.height = hello->height;
+	ldt->base.width = description->width;
+	ldt->base.height = description->height;
 	ldt->base.format = format;
 	ldt->base.final_layout = VK_IMAGE_LAYOUT_GENERAL;
 	ldt->base.present_load_op = VK_ATTACHMENT_LOAD_OP_CLEAR;
 	ldt->base.surface_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 
-	COMP_INFO(ct->c, "Rendering into the app's %u buffers of %ux%u (%s)", hello->buffer_count, hello->width,
-	          hello->height, format == VK_FORMAT_R8G8B8A8_SRGB ? "sRGB" : "UNORM");
+	COMP_INFO(ct->c, "Rendering into the app's %u buffers of %ux%u (%s)", description->buffer_count,
+	          description->width, description->height, format == VK_FORMAT_R8G8B8A8_SRGB ? "sRGB" : "UNORM");
 }
 
 static bool
@@ -368,7 +423,10 @@ target_acquire(struct comp_target *ct, uint32_t *out_index)
 	assert(ldt->acquired < 0);
 
 	uint32_t index = 0;
-	ld_link_acquire(ldt->link, &index);
+	if (ld_link_acquire(ldt->link, ldt->generation, &index) == LD_ACQUIRE_CHANGED) {
+		// Immersive mode lent newer buffers.
+		return VK_ERROR_OUT_OF_DATE_KHR;
+	}
 
 	ldt->acquired = index;
 	*out_index = index;
@@ -419,7 +477,7 @@ target_present(struct comp_target *ct,
 
 	// Turnip flushes its caches at the end of every command buffer, so the app reads the frame
 	// once the sync file signals; the image needs no queue family transfer.
-	ld_link_present(ldt->link, index, fence, c->frame.rendering.predicted_display_time_ns,
+	ld_link_present(ldt->link, ldt->generation, index, fence, c->frame.rendering.predicted_display_time_ns,
 	                (uint32_t)c->xdev->hmd->view_count, c->base.frame_params.poses, c->base.frame_params.fovs);
 
 	if (fence >= 0) {
@@ -520,6 +578,15 @@ target_set_title(struct comp_target *ct, const char *title)
 	// No-op
 }
 
+static void
+target_set_session_running(struct comp_target *ct, bool running)
+{
+	struct ld_target *ldt = ld_target(ct);
+
+	// The app enters immersive mode while apps run sessions.
+	ld_link_set_session_running(ldt->link, running);
+}
+
 static xrt_result_t
 target_get_refresh_rates(struct comp_target *ct, uint32_t *out_count, float *out_rates)
 {
@@ -596,6 +663,7 @@ target_create(struct comp_compositor *c, struct ld_link *link)
 	ldt->base.update_timings = target_update_timings;
 	ldt->base.info_gpu = target_info_gpu;
 	ldt->base.set_title = target_set_title;
+	ldt->base.set_session_running = target_set_session_running;
 	ldt->base.get_refresh_rates = target_get_refresh_rates;
 	ldt->base.get_current_refresh_rate = target_get_current_refresh_rate;
 	ldt->base.queue_supports_present = target_queue_supports_present;
@@ -642,10 +710,9 @@ factory_create_target(const struct comp_target_factory *ctf, struct comp_composi
 static const char *optional_device_extensions[] = {
     VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
     VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
-    // What VK_EXT_image_drm_format_modifier needs on the compositor's Vulkan 1.0 instance.
+    // What else VK_EXT_image_drm_format_modifier needs on the compositor's Vulkan 1.0 instance,
+    // besides image_format_list and maintenance1, which the compositor asks for itself.
     VK_KHR_BIND_MEMORY_2_EXTENSION_NAME,
-    VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME,
-    VK_KHR_MAINTENANCE_1_EXTENSION_NAME,
     VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,
 };
 

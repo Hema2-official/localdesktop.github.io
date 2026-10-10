@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BSL-1.0
 /*!
  * @file
- * @brief  The connection to Local Desktop's immersive mode: buffers, tracking and frames.
+ * @brief  The connection to Local Desktop: the headset, immersive mode, tracking and frames.
  * @ingroup drv_localdesktop
  */
 
@@ -19,6 +19,7 @@
 #include "util/u_time.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -53,18 +54,29 @@ DEBUG_GET_ONCE_LOG_OPTION(ld_log, "LOCALDESKTOP_LOG", U_LOGGING_INFO)
 
 struct ld_link
 {
-	int fd;
+	//! The control connection.
+	int control;
 	struct ld_hello hello;
-	int dma_bufs[LD_MAX_BUFFERS];
 
 	pthread_t thread;
 
 	//! Protects everything below.
 	pthread_mutex_t mutex;
-	//! Signalled when a buffer comes back and when the app goes away.
+	//! Signalled when a buffer comes back and when immersive mode starts or ends.
 	pthread_cond_t cond;
 
+	//! The control connection is up.
 	bool connected;
+	//! What the app was told last.
+	bool session_running;
+
+	//! Immersive mode's channel, -1 while it's off.
+	int channel;
+	//! The newest buffers, which stay until newer ones come.
+	struct ld_immersive immersive;
+	int dma_bufs[LD_MAX_BUFFERS];
+	uint64_t generation;
+
 	bool has_tracking;
 	struct ld_tracking tracking;
 
@@ -94,7 +106,7 @@ static ssize_t
 receive(int sock, void *data, size_t size, int *fds, uint32_t max, uint32_t *out_count)
 {
 	union {
-		char buffer[CMSG_SPACE(sizeof(int) * LD_MAX_BUFFERS)];
+		char buffer[CMSG_SPACE(sizeof(int) * (1 + LD_MAX_BUFFERS))];
 		struct cmsghdr align;
 	} control;
 	struct iovec iov = {.iov_base = data, .iov_len = size};
@@ -106,7 +118,7 @@ receive(int sock, void *data, size_t size, int *fds, uint32_t max, uint32_t *out
 	};
 
 	*out_count = 0;
-	ssize_t received = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+	ssize_t received = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
 	if (received < 0) {
 		return received;
 	}
@@ -130,7 +142,7 @@ receive(int sock, void *data, size_t size, int *fds, uint32_t max, uint32_t *out
 	return received;
 }
 
-//! One message, with @p fd (unless it's -1) as SCM_RIGHTS.
+//! One message, with @p fd (unless it's -1) as SCM_RIGHTS; never waits for room.
 static bool
 send_message(int sock, const void *data, size_t size, int fd)
 {
@@ -152,12 +164,23 @@ send_message(int sock, const void *data, size_t size, int fd)
 		memcpy(CMSG_DATA(c), &fd, sizeof(int));
 	}
 
-	while (sendmsg(sock, &msg, MSG_NOSIGNAL) < 0) {
+	while (sendmsg(sock, &msg, MSG_NOSIGNAL | MSG_DONTWAIT) < 0) {
 		if (errno != EINTR) {
 			return false;
 		}
 	}
 	return true;
+}
+
+static void
+close_all(int *fds, uint32_t count)
+{
+	for (uint32_t i = 0; i < count; i++) {
+		if (fds[i] >= 0) {
+			close(fds[i]);
+			fds[i] = -1;
+		}
+	}
 }
 
 static struct xrt_pose
@@ -195,12 +218,125 @@ relation_from(const struct ld_head_sample *sample)
 	};
 }
 
+static bool
+check_hello(const struct ld_hello *hello)
+{
+	if (hello->magic != LD_PROTOCOL_MAGIC) {
+		LD_ERROR("Local Desktop didn't describe the headset");
+		return false;
+	}
+	if (hello->version != LD_PROTOCOL_VERSION) {
+		LD_ERROR("Local Desktop speaks protocol version %u, this driver %u", hello->version,
+		         LD_PROTOCOL_VERSION);
+		return false;
+	}
+	if (hello->view_count == 0 || hello->view_count > LD_MAX_VIEWS) {
+		LD_ERROR("%u views", hello->view_count);
+		return false;
+	}
+	for (uint32_t i = 0; i < hello->view_count; i++) {
+		if (hello->views[i].width == 0 || hello->views[i].height == 0) {
+			LD_ERROR("View %u has no size", i);
+			return false;
+		}
+	}
+	if (hello->refresh_rate <= 0.0f || hello->refresh_rate_count > LD_MAX_REFRESH_RATES) {
+		LD_ERROR("Refresh rate %.1f Hz, %u choices", hello->refresh_rate, hello->refresh_rate_count);
+		return false;
+	}
+	return true;
+}
+
+static bool
+check_immersive(const struct ld_immersive *immersive, uint32_t fd_count)
+{
+	if (immersive->drm_format != LD_DRM_FORMAT_ABGR8888 || immersive->width == 0 || immersive->height == 0 ||
+	    immersive->stride < immersive->width * 4) {
+		LD_ERROR("Unusable buffers: %ux%u, %u bytes per row, format 0x%08x", immersive->width,
+		         immersive->height, immersive->stride, immersive->drm_format);
+		return false;
+	}
+	if (immersive->buffer_count == 0 || immersive->buffer_count > LD_MAX_BUFFERS ||
+	    immersive->buffer_count + 1 != fd_count) {
+		LD_ERROR("%u buffers, %u descriptors", immersive->buffer_count, fd_count);
+		return false;
+	}
+	if (immersive->view_count == 0 || immersive->view_count > LD_MAX_VIEWS) {
+		LD_ERROR("%u views", immersive->view_count);
+		return false;
+	}
+	for (uint32_t i = 0; i < immersive->view_count; i++) {
+		uint64_t right = (uint64_t)immersive->views[i].x + immersive->views[i].width;
+		uint64_t bottom = (uint64_t)immersive->views[i].y + immersive->views[i].height;
+		if (immersive->views[i].width == 0 || immersive->views[i].height == 0 || right > immersive->width ||
+		    bottom > immersive->height) {
+			LD_ERROR("View %u lies outside the buffers", i);
+			return false;
+		}
+	}
+	return true;
+}
+
 
 /*
  *
- * The reader thread.
+ * Immersive mode.
  *
  */
+
+//! Immersive mode started: its channel and buffers replace those of the last.
+static void
+install_channel(struct ld_link *link, const struct ld_immersive *immersive, int *fds)
+{
+	int channel = fds[0];
+	fcntl(channel, F_SETFL, fcntl(channel, F_GETFL) | O_NONBLOCK);
+
+	pthread_mutex_lock(&link->mutex);
+	if (link->channel >= 0) {
+		close(link->channel);
+	}
+	close_all(link->dma_bufs, LD_MAX_BUFFERS);
+	close_all(link->release_fences, LD_MAX_BUFFERS);
+	link->channel = channel;
+	link->immersive = *immersive;
+	for (uint32_t i = 0; i < immersive->buffer_count; i++) {
+		link->dma_bufs[i] = fds[1 + i];
+	}
+	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
+		link->lent[i] = false;
+		link->acquired[i] = false;
+	}
+	link->next_buffer = 0;
+	link->generation++;
+	pthread_cond_broadcast(&link->cond);
+	pthread_mutex_unlock(&link->mutex);
+
+	LD_INFO("Immersive mode: %u buffers of %ux%u, %u views of %ux%u at %.1f Hz", immersive->buffer_count,
+	        immersive->width, immersive->height, immersive->view_count, immersive->views[0].width,
+	        immersive->views[0].height, immersive->refresh_rate);
+}
+
+//! Immersive mode ended: every buffer is ours again, and frames go nowhere until it's back.
+static void
+drop_channel(struct ld_link *link)
+{
+	pthread_mutex_lock(&link->mutex);
+	bool had_channel = link->channel >= 0;
+	if (had_channel) {
+		close(link->channel);
+		link->channel = -1;
+	}
+	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
+		link->lent[i] = false;
+	}
+	close_all(link->release_fences, LD_MAX_BUFFERS);
+	pthread_cond_broadcast(&link->cond);
+	pthread_mutex_unlock(&link->mutex);
+
+	if (had_channel) {
+		LD_INFO("Immersive mode ended");
+	}
+}
 
 static void
 take_release(struct ld_link *link, const struct ld_release *release, int fence)
@@ -216,67 +352,127 @@ take_release(struct ld_link *link, const struct ld_release *release, int fence)
 	pthread_mutex_unlock(&link->mutex);
 }
 
-static void *
-run_reader(void *ptr)
-{
-	struct ld_link *link = (struct ld_link *)ptr;
 
+/*
+ *
+ * The reader thread.
+ *
+ */
+
+//! What came on the control connection; false once it's gone.
+static bool
+read_control(struct ld_link *link)
+{
+	union {
+		uint32_t type;
+		struct ld_immersive immersive;
+		uint8_t bytes[MAX_MESSAGE_SIZE];
+	} message;
+	int fds[1 + LD_MAX_BUFFERS];
+	uint32_t fd_count = 0;
+
+	ssize_t size = receive(link->control, &message, sizeof(message), fds, 1 + LD_MAX_BUFFERS, &fd_count);
+	if (size < 0 && (errno == EINTR || errno == EAGAIN)) {
+		return true;
+	}
+	// The app closing the connection with messages unread resets it.
+	if (size == 0 || (size < 0 && errno == ECONNRESET)) {
+		LD_INFO("Local Desktop closed the connection");
+		return false;
+	}
+	if (size < 0) {
+		LD_ERROR("Reading from Local Desktop: %s", strerror(errno));
+		return false;
+	}
+
+	if (size == sizeof(message.immersive) && message.type == LD_MESSAGE_IMMERSIVE &&
+	    check_immersive(&message.immersive, fd_count)) {
+		install_channel(link, &message.immersive, fds);
+		return true;
+	}
+
+	LD_WARN("Unexpected message from Local Desktop: %zd bytes, type %u", size, size >= 4 ? message.type : 0);
+	close_all(fds, fd_count);
+	return true;
+}
+
+//! What came on immersive mode's channel.
+static void
+read_channel(struct ld_link *link, int channel)
+{
 	union {
 		uint32_t type;
 		struct ld_tracking tracking;
 		struct ld_release release;
 		uint8_t bytes[MAX_MESSAGE_SIZE];
 	} message;
+	int fd = -1;
+	uint32_t fd_count = 0;
+
+	ssize_t size = receive(channel, &message, sizeof(message), &fd, 1, &fd_count);
+	if (size < 0 && (errno == EINTR || errno == EAGAIN)) {
+		return;
+	}
+	if (size <= 0) {
+		if (size < 0 && errno != ECONNRESET) {
+			LD_ERROR("Reading immersive mode's channel: %s", strerror(errno));
+		}
+		drop_channel(link);
+		return;
+	}
+
+	if (size == sizeof(message.tracking) && message.type == LD_MESSAGE_TRACKING) {
+		pthread_mutex_lock(&link->mutex);
+		link->tracking = message.tracking;
+		link->has_tracking = true;
+		pthread_mutex_unlock(&link->mutex);
+	} else if (size == sizeof(message.release) && message.type == LD_MESSAGE_RELEASE &&
+	           message.release.buffer < LD_MAX_BUFFERS) {
+		take_release(link, &message.release, fd_count > 0 ? fd : -1);
+		fd_count = 0;
+	} else {
+		LD_WARN("Unexpected message in immersive mode: %zd bytes, type %u", size, size >= 4 ? message.type : 0);
+	}
+
+	if (fd_count > 0) {
+		close(fd);
+	}
+}
+
+static void *
+run_reader(void *ptr)
+{
+	struct ld_link *link = (struct ld_link *)ptr;
 
 	for (;;) {
-		int fd = -1;
-		uint32_t fd_count = 0;
-		ssize_t size = receive(link->fd, &message, sizeof(message), &fd, 1, &fd_count);
-		if (size < 0 && errno == EINTR) {
-			continue;
-		}
-		// The app closing the connection with frames unread resets it.
-		if (size == 0 || (size < 0 && errno == ECONNRESET)) {
+		// Only this thread changes the channel, so it stays open while this polls it.
+		pthread_mutex_lock(&link->mutex);
+		int channel = link->channel;
+		pthread_mutex_unlock(&link->mutex);
+
+		struct pollfd fds[2] = {
+		    {.fd = link->control, .events = POLLIN},
+		    {.fd = channel, .events = POLLIN},
+		};
+		if (poll(fds, channel >= 0 ? 2 : 1, -1) < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			LD_ERROR("Waiting for Local Desktop: %s", strerror(errno));
 			break;
 		}
-		if (size < 0) {
-			LD_ERROR("Reading from the app: %s", strerror(errno));
+		if (fds[0].revents != 0 && !read_control(link)) {
 			break;
 		}
-
-		if (size == sizeof(message.tracking) && message.type == LD_MESSAGE_TRACKING) {
-			pthread_mutex_lock(&link->mutex);
-			link->tracking = message.tracking;
-			link->has_tracking = true;
-			pthread_mutex_unlock(&link->mutex);
-		} else if (size == sizeof(message.release) && message.type == LD_MESSAGE_RELEASE &&
-		           message.release.buffer < link->hello.buffer_count) {
-			take_release(link, &message.release, fd);
-			fd = -1;
-		} else {
-			LD_WARN("Unexpected message from the app: %zd bytes, type %u", size,
-			        size >= 4 ? message.type : 0);
-		}
-
-		if (fd >= 0) {
-			close(fd);
+		if (channel >= 0 && fds[1].revents != 0) {
+			read_channel(link, channel);
 		}
 	}
 
-	// Every buffer is ours again; frames rendered into them go nowhere.
 	pthread_mutex_lock(&link->mutex);
 	link->connected = false;
-	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
-		link->lent[i] = false;
-		if (link->release_fences[i] >= 0) {
-			close(link->release_fences[i]);
-			link->release_fences[i] = -1;
-		}
-	}
-	pthread_cond_broadcast(&link->cond);
 	pthread_mutex_unlock(&link->mutex);
-
-	LD_INFO("The app left immersive mode");
+	drop_channel(link);
 	return NULL;
 }
 
@@ -292,47 +488,6 @@ ld_link_available(void)
 {
 	struct stat st;
 	return stat(LD_SOCKET_PATH, &st) == 0 && S_ISSOCK(st.st_mode);
-}
-
-static bool
-check_hello(const struct ld_hello *hello, uint32_t fd_count)
-{
-	if (hello->magic != LD_PROTOCOL_MAGIC) {
-		LD_ERROR("The app didn't describe the headset");
-		return false;
-	}
-	if (hello->version != LD_PROTOCOL_VERSION) {
-		LD_ERROR("The app speaks protocol version %u, this driver %u", hello->version, LD_PROTOCOL_VERSION);
-		return false;
-	}
-	if (hello->drm_format != LD_DRM_FORMAT_ABGR8888 || hello->width == 0 || hello->height == 0 ||
-	    hello->stride < hello->width * 4) {
-		LD_ERROR("Unusable buffers: %ux%u, %u bytes per row, format 0x%08x", hello->width, hello->height,
-		         hello->stride, hello->drm_format);
-		return false;
-	}
-	if (hello->buffer_count == 0 || hello->buffer_count > LD_MAX_BUFFERS || hello->buffer_count != fd_count) {
-		LD_ERROR("%u buffers, %u dma-bufs", hello->buffer_count, fd_count);
-		return false;
-	}
-	if (hello->view_count == 0 || hello->view_count > LD_MAX_VIEWS) {
-		LD_ERROR("%u views", hello->view_count);
-		return false;
-	}
-	for (uint32_t i = 0; i < hello->view_count; i++) {
-		uint64_t right = (uint64_t)hello->views[i].x + hello->views[i].width;
-		uint64_t bottom = (uint64_t)hello->views[i].y + hello->views[i].height;
-		if (hello->views[i].width == 0 || hello->views[i].height == 0 || right > hello->width ||
-		    bottom > hello->height) {
-			LD_ERROR("View %u lies outside the buffers", i);
-			return false;
-		}
-	}
-	if (hello->refresh_rate <= 0.0f || hello->refresh_rate_count > LD_MAX_REFRESH_RATES) {
-		LD_ERROR("Refresh rate %.1f Hz, %u choices", hello->refresh_rate, hello->refresh_rate_count);
-		return false;
-	}
-	return true;
 }
 
 struct ld_link *
@@ -352,7 +507,8 @@ ld_link_create(void)
 	}
 
 	struct ld_link *link = U_TYPED_CALLOC(struct ld_link);
-	link->fd = fd;
+	link->control = fd;
+	link->channel = -1;
 	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
 		link->dma_bufs[i] = -1;
 		link->release_fences[i] = -1;
@@ -361,15 +517,17 @@ ld_link_create(void)
 	// The app describes the headset as soon as it takes the connection.
 	struct pollfd readable = {.fd = fd, .events = POLLIN};
 	uint32_t fd_count = 0;
+	int unexpected[1];
 	ssize_t size = -1;
 	if (poll(&readable, 1, HELLO_TIMEOUT_MS) == 1) {
-		size = receive(fd, &link->hello, sizeof(link->hello), link->dma_bufs, LD_MAX_BUFFERS, &fd_count);
+		size = receive(fd, &link->hello, sizeof(link->hello), unexpected, 1, &fd_count);
+		close_all(unexpected, fd_count);
 	}
 	if (size != sizeof(link->hello)) {
-		LD_ERROR("The app didn't describe the headset (%zd bytes)", size);
+		LD_ERROR("Local Desktop didn't describe the headset (%zd bytes)", size);
 		goto error;
 	}
-	if (!check_hello(&link->hello, fd_count)) {
+	if (!check_hello(&link->hello)) {
 		goto error;
 	}
 
@@ -389,16 +547,12 @@ ld_link_create(void)
 	}
 
 	const struct ld_hello *hello = &link->hello;
-	LD_INFO("Headset: %u views of %ux%u at %.1f Hz; %u buffers of %ux%u", hello->view_count,
-	        hello->views[0].width, hello->views[0].height, hello->refresh_rate, hello->buffer_count,
-	        hello->width, hello->height);
+	LD_INFO("Headset: %u views of %ux%u at %.1f Hz", hello->view_count, hello->views[0].width,
+	        hello->views[0].height, hello->refresh_rate);
 
 	return link;
 
 error:
-	for (uint32_t i = 0; i < fd_count; i++) {
-		close(link->dma_bufs[i]);
-	}
 	close(fd);
 	free(link);
 	return NULL;
@@ -412,19 +566,13 @@ ld_link_destroy(struct ld_link **link_ptr)
 		return;
 	}
 
-	// Ends the reader's wait for a message.
-	shutdown(link->fd, SHUT_RDWR);
+	// Ends the reader's wait.
+	shutdown(link->control, SHUT_RDWR);
 	pthread_join(link->thread, NULL);
 
-	close(link->fd);
-	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
-		if (link->dma_bufs[i] >= 0) {
-			close(link->dma_bufs[i]);
-		}
-		if (link->release_fences[i] >= 0) {
-			close(link->release_fences[i]);
-		}
-	}
+	close(link->control);
+	close_all(link->dma_bufs, LD_MAX_BUFFERS);
+	close_all(link->release_fences, LD_MAX_BUFFERS);
 	pthread_cond_destroy(&link->cond);
 	pthread_mutex_destroy(&link->mutex);
 
@@ -438,10 +586,51 @@ ld_link_hello(struct ld_link *link)
 	return &link->hello;
 }
 
-int
-ld_link_dma_buf(struct ld_link *link, uint32_t index)
+bool
+ld_link_get_buffers(struct ld_link *link, struct ld_buffers *out_buffers)
 {
-	return index < link->hello.buffer_count ? link->dma_bufs[index] : -1;
+	pthread_mutex_lock(&link->mutex);
+	bool has_buffers = link->generation > 0;
+	if (has_buffers) {
+		out_buffers->generation = link->generation;
+		out_buffers->description = link->immersive;
+		for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
+			out_buffers->dma_bufs[i] = link->dma_bufs[i] >= 0 ? dup(link->dma_bufs[i]) : -1;
+		}
+	}
+	pthread_mutex_unlock(&link->mutex);
+	return has_buffers;
+}
+
+bool
+ld_link_has_buffers(struct ld_link *link)
+{
+	pthread_mutex_lock(&link->mutex);
+	bool has_buffers = link->generation > 0;
+	pthread_mutex_unlock(&link->mutex);
+	return has_buffers;
+}
+
+void
+ld_link_set_session_running(struct ld_link *link, bool running)
+{
+	struct ld_session session = {.type = LD_MESSAGE_SESSION, .running = running};
+
+	pthread_mutex_lock(&link->mutex);
+	bool changed = link->connected && link->session_running != running;
+	if (changed && !send_message(link->control, &session, sizeof(session), -1)) {
+		LD_ERROR("Telling Local Desktop about the session: %s", strerror(errno));
+		changed = false;
+	}
+	if (changed) {
+		link->session_running = running;
+	}
+	pthread_mutex_unlock(&link->mutex);
+
+	if (changed) {
+		LD_INFO(running ? "Apps run OpenXR sessions: asking for immersive mode"
+		                : "No OpenXR sessions left: immersive mode may end");
+	}
 }
 
 void
@@ -492,7 +681,7 @@ ld_link_get_head(struct ld_link *link, int64_t at_timestamp_ns, struct xrt_space
 		m_predict_relation(&relation, time_ns_to_s(delta_ns), out_relation);
 	}
 
-	// The app stopped sending (the headset's asleep, say): this is only the last known pose.
+	// The app stopped sending (immersive mode ended, say): this is only the last known pose.
 	if (os_monotonic_get_ns() - samples[count - 1].time_ns > STALE_TRACKING_NS) {
 		out_relation->relation_flags &= ~(XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
 		                                  XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
@@ -530,14 +719,17 @@ ld_link_get_timing(struct ld_link *link,
 	return has_tracking;
 }
 
-bool
-ld_link_acquire(struct ld_link *link, uint32_t *out_index)
+enum ld_acquire_result
+ld_link_acquire(struct ld_link *link, uint64_t generation, uint32_t *out_index)
 {
-	uint32_t count = link->hello.buffer_count;
-	uint32_t index = count;
-
 	pthread_mutex_lock(&link->mutex);
+	uint32_t count = link->immersive.buffer_count;
+	uint32_t index = count;
 	for (;;) {
+		if (generation != link->generation) {
+			pthread_mutex_unlock(&link->mutex);
+			return LD_ACQUIRE_CHANGED;
+		}
 		for (uint32_t n = 0; n < count && index == count; n++) {
 			uint32_t i = (link->next_buffer + n) % count;
 			if (!link->lent[i] && !link->acquired[i]) {
@@ -555,7 +747,6 @@ ld_link_acquire(struct ld_link *link, uint32_t *out_index)
 			LD_DEBUG("Waiting for the app to give a buffer back");
 		}
 	}
-	bool connected = link->connected;
 	link->acquired[index] = true;
 	link->next_buffer = (index + 1) % count;
 	int fence = link->release_fences[index];
@@ -572,11 +763,12 @@ ld_link_acquire(struct ld_link *link, uint32_t *out_index)
 	}
 
 	*out_index = index;
-	return connected;
+	return LD_ACQUIRE_OK;
 }
 
 bool
 ld_link_present(struct ld_link *link,
+                uint64_t generation,
                 uint32_t index,
                 int render_fence,
                 int64_t display_time_ns,
@@ -584,7 +776,7 @@ ld_link_present(struct ld_link *link,
                 const struct xrt_pose *poses,
                 const struct xrt_fov *fovs)
 {
-	if (index >= link->hello.buffer_count) {
+	if (index >= LD_MAX_BUFFERS) {
 		return false;
 	}
 
@@ -598,23 +790,16 @@ ld_link_present(struct ld_link *link,
 		frame.views[i].fov = fov_to(&fovs[i]);
 	}
 
+	// Sent under the lock, so that the reader can't close the channel meanwhile.
 	pthread_mutex_lock(&link->mutex);
-	bool connected = link->connected;
 	link->acquired[index] = false;
-	// Lent before it's sent: the app may give it back before sending returns.
-	link->lent[index] = connected;
-	frame.number = ++link->frame_number;
+	bool sent = generation == link->generation && link->channel >= 0;
+	if (sent) {
+		frame.number = ++link->frame_number;
+		sent = send_message(link->channel, &frame, sizeof(frame), render_fence);
+		// The app may give it back as soon as the lock is let go.
+		link->lent[index] = sent;
+	}
 	pthread_mutex_unlock(&link->mutex);
-
-	if (!connected) {
-		return false;
-	}
-	if (!send_message(link->fd, &frame, sizeof(frame), render_fence)) {
-		LD_ERROR("Sending a frame to the app: %s", strerror(errno));
-		pthread_mutex_lock(&link->mutex);
-		link->lent[index] = false;
-		pthread_mutex_unlock(&link->mutex);
-		return false;
-	}
-	return true;
+	return sent;
 }

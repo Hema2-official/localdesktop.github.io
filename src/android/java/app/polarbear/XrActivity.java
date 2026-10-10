@@ -3,6 +3,7 @@ package app.polarbear;
 import android.app.Activity;
 import android.app.NativeActivity;
 import android.app.PendingIntent;
+import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
 
@@ -26,6 +27,21 @@ public class XrActivity extends Activity {
     private static native void nativeStart(Activity activity);
 
     private static native void nativeStop();
+
+    /** Enter immersive mode, for Linux apps that run OpenXR sessions (src/android/guest/xr.rs). */
+    static void enter(Activity activity) {
+        Context context = activity.getApplicationContext();
+        context.startActivity(new Intent(context, XrActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+    }
+
+    /** Leave immersive mode for the desktop's panel, once those apps are done. */
+    static void leave(Activity activity) {
+        Context context = activity.getApplicationContext();
+        context.startActivity(new Intent(context, XrActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra(EXTRA_TO, "panel"));
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {

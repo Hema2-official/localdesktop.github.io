@@ -17,6 +17,7 @@ pub mod power;
 pub mod screen;
 pub mod shared;
 pub mod system_bus;
+pub mod xr;
 
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config::ARCH_FS_ROOT;
@@ -57,6 +58,8 @@ pub enum Event {
     Battery,
     /// Another app shared something with the desktop.
     Shared,
+    /// Immersive mode has a channel and buffers for Monado.
+    Immersive,
 }
 
 struct Shared {
@@ -474,6 +477,8 @@ struct Jobs {
     power_on: bool,
     /// Not the session's: it serves the guest whether a desktop runs or not.
     system_bus: Option<system_bus::Job>,
+    /// Monado's control connection, on headsets; the desktop doesn't matter to it either.
+    xr: Option<xr::Job>,
 }
 
 impl Jobs {
@@ -521,6 +526,7 @@ impl Link {
         let screen = screen::Job::new(android_app);
         let notifications = notifications::Job::new(android_app);
         let system_bus = system_bus::Job::new(android_app);
+        let xr = xr::Job::new(android_app);
         // Android's runtime names the threads that attach to it "Thread-<n>".
         unsafe { libc::prctl(libc::PR_SET_NAME, c"guest-link".as_ptr()) };
         Self {
@@ -541,6 +547,7 @@ impl Link {
                 power: power::Job::new(),
                 power_on: false,
                 system_bus,
+                xr,
             },
         }
     }
@@ -583,6 +590,9 @@ impl Link {
         jobs.power.turn(jobs.power_on);
         if let Some(job) = &mut jobs.system_bus {
             job.turn(config.battery.share);
+        }
+        if let Some(job) = &mut jobs.xr {
+            job.listen();
         }
         let wanted = jobs.clipboard_on || jobs.screen_on || jobs.notifications_on || jobs.power_on;
         if !wanted {
@@ -654,6 +664,9 @@ impl Link {
             }
             if let Event::Shared | Event::SessionStarting = event {
                 shared::look();
+            }
+            if let (Event::Immersive, Some(job)) = (event, self.jobs.xr.as_mut()) {
+                job.offered();
             }
             let desktop = self.session.as_mut().and_then(Session::clipboard);
             match (event, self.jobs.clipboard()) {
@@ -731,6 +744,9 @@ impl Link {
             if let Some(job) = &self.jobs.system_bus {
                 job.waits_for(&mut entries);
             }
+            if let Some(job) = &self.jobs.xr {
+                job.waits_for(&mut entries);
+            }
 
             // Forever, unless something is under way.
             let deadline = [
@@ -738,6 +754,7 @@ impl Link {
                 self.jobs.clipboard.as_ref().and_then(|it| it.deadline()),
                 self.jobs.notifications.as_ref().and_then(|it| it.deadline()),
                 self.jobs.power.deadline(),
+                self.jobs.xr.as_ref().and_then(|it| it.deadline()),
             ]
             .into_iter()
             .flatten()
@@ -797,6 +814,9 @@ impl Link {
                 if let Some(job) = &mut self.jobs.system_bus {
                     job.ready(entry.fd, entry.revents);
                 }
+                if let Some(job) = &mut self.jobs.xr {
+                    job.ready(entry.fd);
+                }
             }
             if let Some(job) = &mut self.jobs.clipboard {
                 job.expire(now);
@@ -805,6 +825,9 @@ impl Link {
                 job.expire(now);
             }
             self.jobs.power.expire(now);
+            if let Some(job) = &mut self.jobs.xr {
+                job.expire(now);
+            }
         }
     }
 }

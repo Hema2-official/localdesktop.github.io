@@ -10,6 +10,8 @@
 
 #include "xrt/xrt_defines.h"
 
+#include "ld_protocol.h"
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -25,7 +27,6 @@ extern "C" {
  * Android app shows on the headset's own runtime. See @ref ld_protocol.h.
  */
 
-struct ld_hello;
 struct xrt_device;
 
 /*!
@@ -35,14 +36,34 @@ struct xrt_device;
 struct ld_link;
 
 /*!
- * Whether the app is listening, which it does while it's in immersive mode.
+ * The buffers of the newest immersive mode, to render into.
+ * @ingroup drv_localdesktop
+ */
+struct ld_buffers
+{
+	//! Counts the times immersive mode handed over buffers.
+	uint64_t generation;
+	struct ld_immersive description;
+	//! Duplicates, the caller's to close.
+	int dma_bufs[LD_MAX_BUFFERS];
+};
+
+enum ld_acquire_result
+{
+	LD_ACQUIRE_OK,
+	//! Newer buffers came: render into those.
+	LD_ACQUIRE_CHANGED,
+};
+
+/*!
+ * Whether the app is listening, which it does on headsets.
  * @ingroup drv_localdesktop
  */
 bool
 ld_link_available(void);
 
 /*!
- * Connect to the app and take the headset's description and the buffers; NULL if that fails.
+ * Connect to the app and take the headset's description; NULL if that fails.
  * @ingroup drv_localdesktop
  */
 struct ld_link *
@@ -55,18 +76,32 @@ void
 ld_link_destroy(struct ld_link **link_ptr);
 
 /*!
- * The app's description of the headset and its buffers.
+ * The app's description of the headset.
  * @ingroup drv_localdesktop
  */
 const struct ld_hello *
 ld_link_hello(struct ld_link *link);
 
 /*!
- * A buffer's dma-buf, which stays the link's.
+ * The buffers of the newest immersive mode; false before the first.
  * @ingroup drv_localdesktop
  */
-int
-ld_link_dma_buf(struct ld_link *link, uint32_t index);
+bool
+ld_link_get_buffers(struct ld_link *link, struct ld_buffers *out_buffers);
+
+/*!
+ * Whether immersive mode has handed over buffers yet.
+ * @ingroup drv_localdesktop
+ */
+bool
+ld_link_has_buffers(struct ld_link *link);
+
+/*!
+ * Tell the app whether apps run OpenXR sessions, so immersive mode should be on.
+ * @ingroup drv_localdesktop
+ */
+void
+ld_link_set_session_running(struct ld_link *link, bool running);
 
 /*!
  * The head's pose at a time, from the app's newest predictions.
@@ -94,20 +129,22 @@ ld_link_get_timing(struct ld_link *link,
                    int64_t *out_latch_time_ns);
 
 /*!
- * Wait for a buffer the app doesn't hold, and until it's done reading it. Once the app is gone,
- * every buffer is free; false then.
+ * Wait for a buffer of @p generation the app doesn't hold, and until it's done reading it. While
+ * immersive mode is off, every buffer is free, and frames go nowhere.
  * @ingroup drv_localdesktop
  */
-bool
-ld_link_acquire(struct ld_link *link, uint32_t *out_index);
+enum ld_acquire_result
+ld_link_acquire(struct ld_link *link, uint64_t generation, uint32_t *out_index);
 
 /*!
  * Hand an acquired buffer to the app, with a sync file that signals once it's rendered (-1 for
- * none; it stays the caller's), and the display time and views it was rendered for.
+ * none; it stays the caller's), and the display time and views it was rendered for. False when
+ * the frame goes nowhere.
  * @ingroup drv_localdesktop
  */
 bool
 ld_link_present(struct ld_link *link,
+                uint64_t generation,
                 uint32_t index,
                 int render_fence,
                 int64_t display_time_ns,

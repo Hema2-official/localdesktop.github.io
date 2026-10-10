@@ -4,10 +4,13 @@
 //!
 //! The session shows the frames Monado in Linux renders into buffers it lends it (`frames`),
 //! each with the poses it was rendered for, and a slowly pulsing colour while there are none.
-//! Monado gets the head's tracking from it every display frame.
+//! Monado gets the head's tracking from it every display frame. The guest link enters immersive
+//! mode when Monado asks for it, and hands it the buffers (`guest::xr`).
 
 mod frames;
+pub mod protocol;
 
+use crate::android::guest;
 use anyhow::{anyhow, bail, Context, Result};
 use glow::HasContext;
 use jni::objects::{GlobalRef, JClass, JObject};
@@ -69,9 +72,11 @@ pub extern "system" fn Java_app_polarbear_XrActivity_nativeStart(
     let spawned = thread::Builder::new().name("openxr".into()).spawn({
         let stop = stop.clone();
         move || {
+            guest::xr::set_immersive(true);
             if let Err(error) = run(&vm, &activity, &stop) {
                 log::error!("Immersive mode failed: {error:#}");
             }
+            guest::xr::set_immersive(false);
         }
     });
     match spawned {
@@ -293,8 +298,7 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
         )?;
 
         if transport.is_none() && !transport_failed {
-            let (refresh_rate, refresh_rates) = refresh_rates(&instance, &session, period);
-            match lend_buffers(&mut gl, &eyes, &eye_views, refresh_rate, refresh_rates) {
+            match lend_buffers(&instance, &session, &mut gl, &eyes, &eye_views, period) {
                 Ok(it) => transport = Some(it),
                 Err(error) => {
                     log::warn!("Immersive mode: no frames from Linux: {error:#}");
@@ -426,17 +430,18 @@ fn drop_frames(transport: &mut Option<frames::Frames>) {
     }
 }
 
-/// Buffers for the views side by side, each at its swapchain's size, lent from a socket in the
-/// rootfs.
+/// Buffers for the views side by side, each at its swapchain's size, for Monado; and the headset
+/// as it is, for the next Monado's start.
 fn lend_buffers(
+    instance: &xr::Instance,
+    session: &xr::Session<xr::OpenGlEs>,
     gl: &mut Gl,
     eyes: &[Eye],
     eye_views: &[xr::View],
-    refresh_rate: f32,
-    refresh_rates: Vec<f32>,
+    period: xr::Duration,
 ) -> Result<frames::Frames> {
     let mut x = 0;
-    let areas = eyes
+    let areas: Vec<frames::ViewArea> = eyes
         .iter()
         .zip(eye_views)
         .map(|(eye, view)| {
@@ -450,7 +455,28 @@ fn lend_buffers(
             area
         })
         .collect();
-    let transport = frames::Frames::new(areas, refresh_rate, refresh_rates, FRAME_BUFFERS)?;
+    let (refresh_rate, refresh_rates) = refresh_rates(instance, session, period);
+    let degrees = |angle: f32| angle.to_degrees().round() as i32;
+    for (index, area) in areas.iter().enumerate() {
+        log::info!(
+            "Immersive mode: view {index} {}x{}, field of view {} {} {} {} degrees",
+            area.width,
+            area.height,
+            degrees(area.fov.angle_left),
+            degrees(area.fov.angle_right),
+            degrees(area.fov.angle_up),
+            degrees(area.fov.angle_down)
+        );
+    }
+    guest::xr::remember(&protocol::Headset {
+        views: areas
+            .iter()
+            .map(|area| (area.width, area.height, area.fov))
+            .collect(),
+        refresh_rate,
+        refresh_rates,
+    });
+    let transport = frames::Frames::new(areas, refresh_rate, FRAME_BUFFERS)?;
     for buffer in &transport.buffers {
         gl.import(buffer.hardware_buffer)?;
     }
@@ -468,8 +494,8 @@ fn tracking(
     latch_time_ns: i64,
     eye_views: &[xr::View],
 ) -> Result<frames::Tracking> {
-    let mut samples = Vec::with_capacity(frames::MAX_HEAD_SAMPLES);
-    for index in 0..frames::MAX_HEAD_SAMPLES as i64 {
+    let mut samples = Vec::with_capacity(protocol::MAX_HEAD_SAMPLES);
+    for index in 0..protocol::MAX_HEAD_SAMPLES as i64 {
         let time = xr::Time::from_nanos(display_time.as_nanos() + index * period.as_nanos());
         let (location, velocity) = head.relate(space, time)?;
         samples.push(frames::HeadSample {
