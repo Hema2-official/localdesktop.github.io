@@ -623,6 +623,9 @@ fn refresh_rates(
 ) -> (f32, Vec<f32>) {
     let mut current = 1e9 / period.as_nanos() as f32;
     let Some(fb) = instance.exts().fb_display_refresh_rate else {
+        log::info!(
+            "Immersive mode: the runtime lists no refresh rates (XR_FB_display_refresh_rate)"
+        );
         return (current, vec![current]);
     };
     let mut rates = Vec::new();
@@ -653,6 +656,7 @@ fn refresh_rates(
     if rates.is_empty() {
         rates.push(current);
     }
+    log::info!("Immersive mode: {current:.0} Hz, of {rates:?}");
     (current, rates)
 }
 
