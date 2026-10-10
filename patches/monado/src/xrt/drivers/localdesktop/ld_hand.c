@@ -79,8 +79,12 @@ ld_hand_get_hand_tracking(struct xrt_device *xdev,
 		return XRT_SUCCESS;
 	}
 
-	// The joints are in the stage space already, as the hand's pose is.
+	// The joints are in the stage space already. Their flags pass through the hand's pose, so it
+	// is as tracked as can be, and theirs say how tracked each is.
 	m_space_relation_ident(&out_value->hand_pose);
+	out_value->hand_pose.relation_flags = (enum xrt_space_relation_flags)(
+	    XRT_SPACE_RELATION_ORIENTATION_VALID_BIT | XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+	    XRT_SPACE_RELATION_POSITION_VALID_BIT | XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
 	for (uint32_t i = 0; i < LD_HAND_JOINTS && i < XRT_HAND_JOINT_COUNT; i++) {
 		const struct ld_joint *joint = &hand.joints[i];
 		struct xrt_hand_joint_value *value = &out_value->values.hand_joint_set_default[i];
