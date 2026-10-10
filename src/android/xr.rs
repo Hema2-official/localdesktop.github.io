@@ -2,8 +2,9 @@
 //! activity; while it lives, a thread here runs an OpenXR session on the headset's runtime,
 //! through the Khronos loader in assets/libs.
 //!
-//! The session shows the frames a program in Linux renders into buffers it lends it (`frames`),
-//! and a slowly pulsing colour while there are none.
+//! The session shows the frames Monado in Linux renders into buffers it lends it (`frames`),
+//! each with the poses it was rendered for, and a slowly pulsing colour while there are none.
+//! Monado gets the head's tracking from it every display frame.
 
 mod frames;
 
@@ -37,8 +38,11 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const GL_RGBA8: u32 = 0x8058;
 const GL_SRGB8_ALPHA8: u32 = 0x8C43;
 
-/// Buffers lent to Linux: one on show, one it renders into, one spare.
+/// Buffers lent to Linux: one the app copies from, one Linux renders into, one spare.
 const FRAME_BUFFERS: usize = 3;
+
+/// How long Linux's last frame stays up when no newer one comes (its app quit, say).
+const FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[no_mangle]
 pub extern "system" fn Java_app_polarbear_XrActivity_nativeStart(
@@ -123,6 +127,8 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     let mut enabled = xr::ExtensionSet::default();
     enabled.khr_android_create_instance = true;
     enabled.khr_opengl_es_enable = true;
+    enabled.khr_convert_timespec_time = available.khr_convert_timespec_time;
+    enabled.fb_display_refresh_rate = available.fb_display_refresh_rate;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Local Desktop",
@@ -149,6 +155,10 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     );
     // Required before a session, even when nothing is checked against it.
     let _ = instance.graphics_requirements::<xr::OpenGlEs>(system)?;
+    let clock = Clock {
+        instance: instance.as_raw(),
+        convert: instance.exts().khr_convert_timespec_time,
+    };
 
     // Before the session, so it's dropped after it.
     let mut gl = Gl::new().context("setting up OpenGL ES")?;
@@ -162,8 +172,18 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
             },
         )
     }?;
-    let space =
-        session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
+    // Linux gets poses in the stage space, whose origin is on the floor, where there is one.
+    let space_type = if session
+        .enumerate_reference_spaces()?
+        .contains(&xr::ReferenceSpaceType::STAGE)
+    {
+        xr::ReferenceSpaceType::STAGE
+    } else {
+        log::warn!("Immersive mode: no stage space; Linux gets poses in the local space");
+        xr::ReferenceSpaceType::LOCAL
+    };
+    let space = session.create_reference_space(space_type, xr::Posef::IDENTITY)?;
+    let head = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
     let formats = session.enumerate_swapchain_formats()?;
     let format = [GL_SRGB8_ALPHA8, GL_RGBA8]
         .into_iter()
@@ -199,28 +219,20 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // Both eyes side by side in each buffer lent to Linux.
-    let mut transport = match frames::Frames::new(eyes[0].width * 2, eyes[0].height, FRAME_BUFFERS)
-        .and_then(|transport| {
-            for buffer in &transport.buffers {
-                gl.import(buffer.hardware_buffer)?;
-            }
-            Ok(transport)
-        }) {
-        Ok(transport) => Some(transport),
-        Err(error) => {
-            log::warn!("Immersive mode: no frames from Linux: {error:#}");
-            None
-        }
-    };
-    // The buffer on show, which the app holds until a newer frame replaces it.
-    let mut showing: Option<usize> = None;
+    // Lent once the session shows frames, when the views' fields of view are known.
+    let mut transport: Option<frames::Frames> = None;
+    let mut transport_failed = false;
+    // What the newest frame from Linux was rendered for, which the swapchains hold, and when it
+    // came.
+    let mut shown: Option<Vec<frames::View>> = None;
+    let mut shown_since = Instant::now();
 
     let mut events = xr::EventDataBuffer::new();
     let mut running = false;
     let mut exit_requested = false;
     let started = Instant::now();
-    let (mut shown, mut from_linux) = (0u32, 0u32);
+    let (mut displayed, mut from_linux) = (0u32, 0u32);
+    let mut lateness_ns = 0i64;
     let mut counted_since = Instant::now();
     loop {
         if stop.load(Ordering::Relaxed) && !exit_requested {
@@ -254,67 +266,113 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
             }
         }
         if !running {
+            // Linux keeps its buffers while nothing shows.
+            drop_frames(&mut transport);
             thread::sleep(Duration::from_millis(50));
             continue;
         }
 
-        let frame = waiter.wait()?;
+        let frame_state = waiter.wait()?;
+        let latch_time_ns = monotonic_ns();
         stream.begin()?;
-        if !frame.should_render {
+        if !frame_state.should_render {
+            drop_frames(&mut transport);
             stream.end(
-                frame.predicted_display_time,
+                frame_state.predicted_display_time,
                 xr::EnvironmentBlendMode::OPAQUE,
                 &[],
             )?;
             continue;
         }
-        let (_, located) = session.locate_views(
+        let display_time = frame_state.predicted_display_time;
+        let period = frame_state.predicted_display_period;
+        let (_, eye_views) = session.locate_views(
             xr::ViewConfigurationType::PRIMARY_STEREO,
-            frame.predicted_display_time,
-            &space,
+            display_time,
+            &head,
         )?;
-        let mut replaced = None;
-        if let Some(transport) = transport.as_mut() {
-            match transport.update() {
-                frames::Update::Frame { buffer, fence } => {
-                    if let Some(fence) = fence {
-                        gl.wait(fence)?;
-                    }
-                    replaced = showing.replace(buffer);
-                    from_linux += 1;
+
+        if transport.is_none() && !transport_failed {
+            let (refresh_rate, refresh_rates) = refresh_rates(&instance, &session, period);
+            match lend_buffers(&mut gl, &eyes, &eye_views, refresh_rate, refresh_rates) {
+                Ok(it) => transport = Some(it),
+                Err(error) => {
+                    log::warn!("Immersive mode: no frames from Linux: {error:#}");
+                    transport_failed = true;
                 }
-                frames::Update::Disconnected => showing = None,
-                frames::Update::Nothing => {}
             }
         }
-        let pulse = 0.5 + 0.5 * (started.elapsed().as_secs_f32() * 0.8).sin();
-        for (index, eye) in eyes.iter_mut().enumerate() {
-            let image = eye.swapchain.acquire_image()?;
-            eye.swapchain.wait_image(xr::Duration::INFINITE)?;
-            let texture = eye.images[image as usize];
-            match showing {
-                Some(buffer) => gl.blit(
-                    buffer,
-                    index as i32 * eye.width as i32,
-                    eye.width,
-                    eye.height,
-                    texture,
-                )?,
-                None => gl.clear(
-                    texture,
-                    eye.width,
-                    eye.height,
-                    [0.05, 0.2 + 0.2 * pulse, 0.3, 1.0],
-                )?,
+        let mut update = frames::Update::Nothing;
+        if let Some(transport) = transport.as_mut() {
+            let tracking = tracking(
+                &clock,
+                &head,
+                &space,
+                display_time,
+                period,
+                latch_time_ns,
+                &eye_views,
+            )?;
+            transport.send_tracking(&tracking);
+            update = transport.update();
+        }
+        match (update, transport.as_mut()) {
+            (frames::Update::Frame(frame), Some(transport)) => {
+                if let Some(fence) = frame.fence {
+                    gl.wait(fence)?;
+                }
+                for (eye, area) in eyes.iter_mut().zip(&transport.views) {
+                    let image = eye.swapchain.acquire_image()?;
+                    eye.swapchain.wait_image(xr::Duration::INFINITE)?;
+                    let texture = eye.images[image as usize];
+                    gl.blit(frame.buffer, area.x as i32, eye.width, eye.height, texture)?;
+                    eye.swapchain.release_image()?;
+                }
+                // The swapchains hold the frame now.
+                transport.give_back(frame.buffer, gl.fence());
+                lateness_ns += clock.to_monotonic_ns(display_time) - frame.display_time_ns;
+                from_linux += 1;
+                shown = Some(frame.views);
+                shown_since = Instant::now();
             }
-            eye.swapchain.release_image()?;
+            (frames::Update::Disconnected, _) => shown = None,
+            _ if shown_since.elapsed() > FRAME_TIMEOUT => shown = None,
+            _ => {}
         }
-        if let (Some(transport), Some(buffer)) = (transport.as_mut(), replaced) {
-            transport.give_back(buffer, gl.fence());
-        }
+
+        let layer_views: Vec<frames::View> = match &shown {
+            Some(views) => views.clone(),
+            None => {
+                // Nothing from Linux: a pulsing colour, where the head is.
+                let pulse = 0.5 + 0.5 * (started.elapsed().as_secs_f32() * 0.8).sin();
+                for eye in eyes.iter_mut() {
+                    let image = eye.swapchain.acquire_image()?;
+                    eye.swapchain.wait_image(xr::Duration::INFINITE)?;
+                    gl.clear(
+                        eye.images[image as usize],
+                        eye.width,
+                        eye.height,
+                        [0.05, 0.2 + 0.2 * pulse, 0.3, 1.0],
+                    )?;
+                    eye.swapchain.release_image()?;
+                }
+                let (_, located) = session.locate_views(
+                    xr::ViewConfigurationType::PRIMARY_STEREO,
+                    display_time,
+                    &space,
+                )?;
+                located
+                    .iter()
+                    .map(|view| frames::View {
+                        pose: view.pose,
+                        fov: view.fov,
+                    })
+                    .collect()
+            }
+        };
         let projection_views = eyes
             .iter()
-            .zip(&located)
+            .zip(&layer_views)
             .map(|(eye, view)| {
                 xr::CompositionLayerProjectionView::new()
                     .pose(view.pose)
@@ -334,33 +392,205 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
             })
             .collect::<Vec<_>>();
         stream.end(
-            frame.predicted_display_time,
+            display_time,
             xr::EnvironmentBlendMode::OPAQUE,
             &[&xr::CompositionLayerProjection::new()
                 .space(&space)
                 .views(&projection_views)],
         )?;
 
-        shown += 1;
+        displayed += 1;
         if counted_since.elapsed() >= Duration::from_secs(10) {
             let seconds = counted_since.elapsed().as_secs_f64();
             log::info!(
-                "Immersive mode: {:.1} frames/s, {:.1} from Linux, display period {} ms",
-                f64::from(shown) / seconds,
+                "Immersive mode: {:.1} frames/s, {:.1} from Linux ({:.1} ms behind), display \
+                 period {:.2} ms",
+                f64::from(displayed) / seconds,
                 f64::from(from_linux) / seconds,
-                frame.predicted_display_period.as_nanos() / 1_000_000
+                lateness_ns as f64 / f64::from(from_linux.max(1)) / 1e6,
+                period.as_nanos() as f64 / 1e6
             );
-            (shown, from_linux) = (0, 0);
+            (displayed, from_linux, lateness_ns) = (0, 0, 0);
             counted_since = Instant::now();
         }
     }
     Ok(())
 }
 
+/// Give Linux back the frames it sends while nothing shows them.
+fn drop_frames(transport: &mut Option<frames::Frames>) {
+    if let Some(transport) = transport.as_mut() {
+        if let frames::Update::Frame(frame) = transport.update() {
+            transport.give_back(frame.buffer, None);
+        }
+    }
+}
+
+/// Buffers for the views side by side, each at its swapchain's size, lent from a socket in the
+/// rootfs.
+fn lend_buffers(
+    gl: &mut Gl,
+    eyes: &[Eye],
+    eye_views: &[xr::View],
+    refresh_rate: f32,
+    refresh_rates: Vec<f32>,
+) -> Result<frames::Frames> {
+    let mut x = 0;
+    let areas = eyes
+        .iter()
+        .zip(eye_views)
+        .map(|(eye, view)| {
+            let area = frames::ViewArea {
+                x,
+                width: eye.width,
+                height: eye.height,
+                fov: view.fov,
+            };
+            x += eye.width;
+            area
+        })
+        .collect();
+    let transport = frames::Frames::new(areas, refresh_rate, refresh_rates, FRAME_BUFFERS)?;
+    for buffer in &transport.buffers {
+        gl.import(buffer.hardware_buffer)?;
+    }
+    Ok(transport)
+}
+
+/// When this display frame shows, the eyes relative to the head, and the head in `space` over
+/// the next few display periods, as the runtime predicts it.
+fn tracking(
+    clock: &Clock,
+    head: &xr::Space,
+    space: &xr::Space,
+    display_time: xr::Time,
+    period: xr::Duration,
+    latch_time_ns: i64,
+    eye_views: &[xr::View],
+) -> Result<frames::Tracking> {
+    let mut samples = Vec::with_capacity(frames::MAX_HEAD_SAMPLES);
+    for index in 0..frames::MAX_HEAD_SAMPLES as i64 {
+        let time = xr::Time::from_nanos(display_time.as_nanos() + index * period.as_nanos());
+        let (location, velocity) = head.relate(space, time)?;
+        samples.push(frames::HeadSample {
+            time_ns: clock.to_monotonic_ns(time),
+            pose: location.pose,
+            linear_velocity: velocity.linear_velocity,
+            angular_velocity: velocity.angular_velocity,
+            flags: relation_flags(location.location_flags, velocity.velocity_flags),
+        });
+    }
+    Ok(frames::Tracking {
+        display_time_ns: clock.to_monotonic_ns(display_time),
+        display_period_ns: period.as_nanos(),
+        latch_time_ns,
+        view_poses: eye_views
+            .iter()
+            .map(|view| frames::View {
+                pose: view.pose,
+                fov: view.fov,
+            })
+            .collect(),
+        head: samples,
+    })
+}
+
+/// Monado's `xrt_space_relation_flags` for what OpenXR says of a location and its velocity.
+fn relation_flags(location: xr::SpaceLocationFlags, velocity: xr::SpaceVelocityFlags) -> u32 {
+    [
+        location.contains(xr::SpaceLocationFlags::ORIENTATION_VALID),
+        location.contains(xr::SpaceLocationFlags::POSITION_VALID),
+        velocity.contains(xr::SpaceVelocityFlags::LINEAR_VALID),
+        velocity.contains(xr::SpaceVelocityFlags::ANGULAR_VALID),
+        location.contains(xr::SpaceLocationFlags::ORIENTATION_TRACKED),
+        location.contains(xr::SpaceLocationFlags::POSITION_TRACKED),
+    ]
+    .iter()
+    .enumerate()
+    .filter(|(_, set)| **set)
+    .fold(0, |flags, (bit, _)| flags | 1 << bit)
+}
+
+/// The display's refresh rate and those it can switch to, where the runtime says.
+fn refresh_rates(
+    instance: &xr::Instance,
+    session: &xr::Session<xr::OpenGlEs>,
+    period: xr::Duration,
+) -> (f32, Vec<f32>) {
+    let mut current = 1e9 / period.as_nanos() as f32;
+    let Some(fb) = instance.exts().fb_display_refresh_rate else {
+        return (current, vec![current]);
+    };
+    let mut rates = Vec::new();
+    unsafe {
+        let mut rate = 0.0;
+        if (fb.get_display_refresh_rate)(session.as_raw(), &mut rate) == xr::sys::Result::SUCCESS
+            && rate > 0.0
+        {
+            current = rate;
+        }
+        let mut count = 0;
+        if (fb.enumerate_display_refresh_rates)(session.as_raw(), 0, &mut count, ptr::null_mut())
+            == xr::sys::Result::SUCCESS
+        {
+            rates.resize(count as usize, 0.0);
+            if (fb.enumerate_display_refresh_rates)(
+                session.as_raw(),
+                count,
+                &mut count,
+                rates.as_mut_ptr(),
+            ) != xr::sys::Result::SUCCESS
+            {
+                count = 0;
+            }
+            rates.truncate(count as usize);
+        }
+    }
+    if rates.is_empty() {
+        rates.push(current);
+    }
+    (current, rates)
+}
+
+/// The runtime's times as CLOCK_MONOTONIC, which is Linux's clock too.
+struct Clock {
+    instance: xr::sys::Instance,
+    convert: Option<xr::raw::ConvertTimespecTimeKHR>,
+}
+
+impl Clock {
+    fn to_monotonic_ns(&self, time: xr::Time) -> i64 {
+        if let Some(convert) = &self.convert {
+            let mut timespec = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let result = unsafe {
+                (convert.convert_time_to_timespec_time)(self.instance, time, &mut timespec)
+            };
+            if result == xr::sys::Result::SUCCESS {
+                return timespec.tv_sec * 1_000_000_000 + timespec.tv_nsec;
+            }
+        }
+        // Without the extension, take the runtime to count CLOCK_MONOTONIC nanoseconds.
+        time.as_nanos()
+    }
+}
+
+fn monotonic_ns() -> i64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    now.tv_sec * 1_000_000_000 + now.tv_nsec
+}
+
 const EGL_NATIVE_BUFFER_ANDROID: u32 = 0x3140;
 const EGL_IMAGE_PRESERVED_KHR: egl::Int = 0x30D2;
 const EGL_SYNC_NATIVE_FENCE_ANDROID: u32 = 0x3144;
 const EGL_SYNC_NATIVE_FENCE_FD_ANDROID: egl::Int = 0x3145;
+const GL_FRAMEBUFFER_SRGB_EXT: u32 = 0x8DB9;
 
 /// The EGL and GL extensions that show Linux's frames: AHardwareBuffers as textures, and sync
 /// files as EGL fences.
@@ -437,6 +667,8 @@ struct Gl {
     gl: glow::Context,
     framebuffer: glow::Framebuffer,
     extensions: Option<Extensions>,
+    /// GL_EXT_sRGB_write_control: writes to sRGB images can skip the encoding.
+    srgb_write_control: bool,
     /// The buffers lent to Linux, by index.
     imported: Vec<Imported>,
 }
@@ -491,6 +723,14 @@ impl Gl {
         };
         let framebuffer = unsafe { gl.create_framebuffer() }.map_err(|error| anyhow!(error))?;
         let extensions = Extensions::load(&egl, display);
+        let srgb_write_control = gl
+            .supported_extensions()
+            .contains("GL_EXT_sRGB_write_control");
+        if !srgb_write_control {
+            log::warn!(
+                "Immersive mode: GL lacks GL_EXT_sRGB_write_control; Linux's frames show too light"
+            );
+        }
         Ok(Self {
             egl,
             display,
@@ -500,6 +740,7 @@ impl Gl {
             gl,
             framebuffer,
             extensions,
+            srgb_write_control,
             imported: Vec::new(),
         })
     }
@@ -609,7 +850,7 @@ impl Gl {
     }
 
     /// Copy `width` x `height` from `source_x` in an imported buffer into one of the runtime's
-    /// swapchain images.
+    /// swapchain images, as they are: Linux's frames are sRGB-encoded already.
     fn blit(
         &self,
         buffer: usize,
@@ -636,6 +877,9 @@ impl Gl {
                 Some(glow::NativeTexture(texture)),
                 0,
             );
+            if self.srgb_write_control {
+                self.gl.disable(GL_FRAMEBUFFER_SRGB_EXT);
+            }
             // Linux renders with Vulkan, whose rows go top to bottom, and GL's go bottom to top.
             self.gl.blit_framebuffer(
                 source_x,
@@ -649,6 +893,9 @@ impl Gl {
                 glow::COLOR_BUFFER_BIT,
                 glow::NEAREST,
             );
+            if self.srgb_write_control {
+                self.gl.enable(GL_FRAMEBUFFER_SRGB_EXT);
+            }
             self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
         }

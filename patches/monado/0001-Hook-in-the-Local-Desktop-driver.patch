@@ -1,0 +1,188 @@
+From f20bf74d887da3397d03a78a3c7ec6d065d79573 Mon Sep 17 00:00:00 2001
+From: Hema2 <49586027+Hema2-official@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 12:48:44 +0200
+Subject: [PATCH] Hook in the Local Desktop driver
+
+Builds drv_localdesktop (src/xrt/drivers/localdesktop), its builder and
+its compositor target when XRT_BUILD_DRIVER_LOCALDESKTOP is on, puts the
+builder first among the builders (it is only certain of a head while
+Local Desktop is in immersive mode) and the target first among the
+targets (it is only detected with the Local Desktop headset).
+---
+ CMakeLists.txt                                    |  3 +++
+ src/xrt/compositor/main/CMakeLists.txt            |  4 ++++
+ src/xrt/compositor/main/comp_compositor.c         |  3 +++
+ src/xrt/compositor/main/comp_window.h             | 11 +++++++++++
+ src/xrt/drivers/CMakeLists.txt                    |  9 +++++++++
+ src/xrt/targets/common/CMakeLists.txt             |  5 +++++
+ src/xrt/targets/common/target_builder_interface.h | 12 ++++++++++++
+ src/xrt/targets/common/target_lists.c             |  4 ++++
+ 8 files changed, 51 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3810b9b..23cffe2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -381,6 +381,7 @@ option_with_deps(XRT_BUILD_DRIVER_XREAL_AIR "Enable Xreal Air HMD driver" DEPEND
+ option_with_deps(XRT_BUILD_DRIVER_SIMULAVR "Enable simula driver" DEPENDS XRT_HAVE_REALSENSE)
+ option_with_deps(XRT_BUILD_DRIVER_SOLARXR "Enable SolarXR driver" DEPENDS XRT_HAVE_LINUX XRT_MODULE_IPC)
+ option(XRT_BUILD_DRIVER_SIMULATED "Enable simulated driver" ON)
++option_with_deps(XRT_BUILD_DRIVER_LOCALDESKTOP "Enable the driver for Local Desktop's immersive mode on VR headsets" DEPENDS XRT_HAVE_LINUX XRT_HAVE_VULKAN XRT_MODULE_COMPOSITOR_MAIN)
+ 
+ option(XRT_BUILD_SAMPLES "Enable compiling sample code implementations that will not be linked into any final targets" ON)
+ set(XRT_IPC_MSG_SOCK_FILENAME monado_comp_ipc CACHE STRING "Service socket filename")
+@@ -475,6 +476,7 @@ list(
+ 	"HDK"
+ 	"HYDRA"
+ 	"ILLIXR"
++	"LOCALDESKTOP"
+ 	"NS"
+ 	"OHMD"
+ 	"OPENGLOVES"
+@@ -738,6 +740,7 @@ message(STATUS "#    DRIVER_PSMV:                 ${XRT_BUILD_DRIVER_PSMV}")
+ message(STATUS "#    DRIVER_PSSENSE:              ${XRT_BUILD_DRIVER_PSSENSE}")
+ message(STATUS "#    DRIVER_PSVR:                 ${XRT_BUILD_DRIVER_PSVR}")
+ message(STATUS "#    DRIVER_PSVR2:                ${XRT_BUILD_DRIVER_PSVR2}")
++message(STATUS "#    DRIVER_LOCALDESKTOP:         ${XRT_BUILD_DRIVER_LOCALDESKTOP}")
+ message(STATUS "#    DRIVER_QWERTY:               ${XRT_BUILD_DRIVER_QWERTY}")
+ message(STATUS "#    DRIVER_REALSENSE:            ${XRT_BUILD_DRIVER_REALSENSE}")
+ message(STATUS "#    DRIVER_REMOTE:               ${XRT_BUILD_DRIVER_REMOTE}")
+diff --git a/src/xrt/compositor/main/CMakeLists.txt b/src/xrt/compositor/main/CMakeLists.txt
+index 50225e9..52c229b 100644
+--- a/src/xrt/compositor/main/CMakeLists.txt
++++ b/src/xrt/compositor/main/CMakeLists.txt
+@@ -48,6 +48,10 @@ if(XRT_HAVE_XCB AND XRT_HAVE_XLIB)
+ 	target_sources(comp_main PRIVATE comp_window_direct_randr.c comp_window_direct_nvidia.c)
+ 	target_link_libraries(comp_main PRIVATE ${X11_X11_LIB})
+ endif()
++if(XRT_BUILD_DRIVER_LOCALDESKTOP)
++	target_sources(comp_main PRIVATE comp_window_localdesktop.c)
++	target_link_libraries(comp_main PRIVATE drv_includes drv_localdesktop)
++endif()
+ if(XRT_FEATURE_WINDOW_PEEK)
+ 	target_sources(comp_main PRIVATE comp_window_peek.c)
+ 	target_link_libraries(comp_main PRIVATE SDL2::SDL2)
+diff --git a/src/xrt/compositor/main/comp_compositor.c b/src/xrt/compositor/main/comp_compositor.c
+index a8fbd01..3f86972 100644
+--- a/src/xrt/compositor/main/comp_compositor.c
++++ b/src/xrt/compositor/main/comp_compositor.c
+@@ -814,6 +814,9 @@ compositor_init_vulkan(struct comp_compositor *c)
+  */
+ 
+ const struct comp_target_factory *ctfs[] = {
++#ifdef XRT_BUILD_DRIVER_LOCALDESKTOP
++    &comp_target_factory_localdesktop,
++#endif
+ #if defined VK_USE_PLATFORM_WAYLAND_KHR && defined XRT_HAVE_WAYLAND_DIRECT
+     &comp_target_factory_direct_wayland,
+ #endif
+diff --git a/src/xrt/compositor/main/comp_window.h b/src/xrt/compositor/main/comp_window.h
+index eb41c3c..6524ddd 100644
+--- a/src/xrt/compositor/main/comp_window.h
++++ b/src/xrt/compositor/main/comp_window.h
+@@ -15,6 +15,7 @@
+ #include "main/comp_compositor.h"
+ 
+ #include "xrt/xrt_config_os.h"
++#include "xrt/xrt_config_drivers.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -34,6 +35,16 @@ extern "C" {
+  */
+ extern const struct comp_target_factory comp_target_factory_debug_image;
+ 
++#ifdef XRT_BUILD_DRIVER_LOCALDESKTOP
++/*!
++ * Renders into the buffers Local Desktop's immersive mode lends, found when the head is the
++ * Local Desktop headset.
++ *
++ * @ingroup comp_main
++ */
++extern const struct comp_target_factory comp_target_factory_localdesktop;
++#endif
++
+ #ifdef VK_USE_PLATFORM_XCB_KHR
+ 
+ /*!
+diff --git a/src/xrt/drivers/CMakeLists.txt b/src/xrt/drivers/CMakeLists.txt
+index d26dd2f..188c02c 100644
+--- a/src/xrt/drivers/CMakeLists.txt
++++ b/src/xrt/drivers/CMakeLists.txt
+@@ -70,6 +70,15 @@ if(XRT_BUILD_DRIVER_DEPTHAI)
+ 	list(APPEND ENABLED_DRIVERS depthai)
+ endif()
+ 
++if(XRT_BUILD_DRIVER_LOCALDESKTOP)
++	add_library(
++		drv_localdesktop STATIC localdesktop/ld_hmd.c localdesktop/ld_interface.h
++					localdesktop/ld_link.c localdesktop/ld_protocol.h
++		)
++	target_link_libraries(drv_localdesktop PRIVATE xrt-interfaces aux_util aux_math aux_os)
++	list(APPEND ENABLED_HEADSET_DRIVERS localdesktop)
++endif()
++
+ if(XRT_BUILD_DRIVER_SIMULATED)
+ 	add_library(
+ 		drv_simulated STATIC simulated/simulated_controller.c simulated/simulated_hmd.c
+diff --git a/src/xrt/targets/common/CMakeLists.txt b/src/xrt/targets/common/CMakeLists.txt
+index f3f46c9..bee72cc 100644
+--- a/src/xrt/targets/common/CMakeLists.txt
++++ b/src/xrt/targets/common/CMakeLists.txt
+@@ -56,6 +56,11 @@ if(XRT_BUILD_DRIVER_STEAMVR_LIGHTHOUSE)
+ 	target_sources(target_lists PRIVATE target_builder_steamvr.c)
+ endif()
+ 
++if(XRT_BUILD_DRIVER_LOCALDESKTOP)
++	target_sources(target_lists PRIVATE target_builder_localdesktop.c)
++	target_link_libraries(target_lists PRIVATE drv_localdesktop)
++endif()
++
+ if(XRT_BUILD_DRIVER_SIMULATED)
+ 	target_sources(target_lists PRIVATE target_builder_simulated.c)
+ endif()
+diff --git a/src/xrt/targets/common/target_builder_interface.h b/src/xrt/targets/common/target_builder_interface.h
+index e36c1dd..c1261d0 100644
+--- a/src/xrt/targets/common/target_builder_interface.h
++++ b/src/xrt/targets/common/target_builder_interface.h
+@@ -59,6 +59,10 @@ extern "C" {
+ #define T_BUILDER_RGB_TRACKING
+ #endif
+ 
++#if defined(XRT_BUILD_DRIVER_LOCALDESKTOP) || defined(XRT_DOXYGEN)
++#define T_BUILDER_LOCALDESKTOP
++#endif
++
+ #if defined(XRT_BUILD_DRIVER_SIMULATED) || defined(XRT_DOXYGEN)
+ #define T_BUILDER_SIMULATED
+ #endif
+@@ -158,6 +162,14 @@ struct xrt_builder *
+ t_builder_rgb_tracking_create(void);
+ #endif
+ 
++#ifdef T_BUILDER_LOCALDESKTOP
++/*!
++ * Builder for the @ref drv_localdesktop headset.
++ */
++struct xrt_builder *
++t_builder_localdesktop_create(void);
++#endif
++
+ #ifdef T_BUILDER_SIMULATED
+ /*!
+  * Builder for @ref drv_simulated devices.
+diff --git a/src/xrt/targets/common/target_lists.c b/src/xrt/targets/common/target_lists.c
+index 78efb9b..b0a42f7 100644
+--- a/src/xrt/targets/common/target_lists.c
++++ b/src/xrt/targets/common/target_lists.c
+@@ -112,6 +112,10 @@
+  * Builders
+  */
+ xrt_builder_create_func_t target_builder_list[] = {
++#ifdef T_BUILDER_LOCALDESKTOP // Only certain while Local Desktop is in immersive mode.
++    t_builder_localdesktop_create,
++#endif // T_BUILDER_LOCALDESKTOP
++
+ #ifdef T_BUILDER_QWERTY // High up to override any real hardware.
+     t_builder_qwerty_create,
+ #endif // T_BUILDER_QWERTY
