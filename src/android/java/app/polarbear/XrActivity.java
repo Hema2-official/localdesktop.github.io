@@ -12,8 +12,7 @@ import android.os.Bundle;
  * category in the manifest, and the desktop's own activity as a panel. The OpenXR session runs on
  * a thread of its own in Rust (src/android/xr.rs).
  *
- * The extra "to" switches modes: "panel" leaves immersive mode for the desktop's panel in Home,
- * "overlay" opens the panel over immersive mode, which keeps running behind it.
+ * The extra "to" set to "panel" leaves immersive mode for the desktop's panel in Home.
  */
 public class XrActivity extends Activity {
     static final String EXTRA_TO = "to";
@@ -66,8 +65,6 @@ public class XrActivity extends Activity {
         String to = intent == null ? null : intent.getStringExtra(EXTRA_TO);
         if ("panel".equals(to)) {
             leaveForPanel();
-        } else if ("overlay".equals(to)) {
-            startActivity(panelIntent());
         }
     }
 
