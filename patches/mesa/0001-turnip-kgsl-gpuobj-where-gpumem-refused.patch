@@ -1,0 +1,271 @@
+From: Hema2 <49586027+Hema2-official@users.noreply.github.com>
+Subject: [PATCH] turnip/kgsl: allocate with GPUOBJ ioctls where GPUMEM ones are refused
+
+On the Meta Quest 3 (Horizon OS v81) apps may only use the KGSL ioctls
+Qualcomm's own driver uses: GPUMEM_ALLOC_ID, GPUMEM_FREE_ID,
+GPUMEM_GET_INFO, CMDSTREAM_READTIMESTAMP_CTXTID, GPUMEM_BIND_RANGES and
+PERFCOUNTER_READ fail with EACCES, so vkCreateDevice failed on the first
+BO. Probe GPUMEM_ALLOC_ID once at physical device setup; where it's refused,
+allocate with GPUOBJ_ALLOC (+ GPUOBJ_INFO for the GPU address), free with
+GPUOBJ_FREE, and poll timestamps with a 1 ms DEVICE_WAITTIMESTAMP_CTXTID.
+Everything else keeps the old ioctls. Sparse binding stays unsupported
+there (its probe fails as before).
+
+Against Mesa main 07d7e87.
+---
+diff --git a/src/freedreno/vulkan/tu_knl_kgsl.cc b/src/freedreno/vulkan/tu_knl_kgsl.cc
+index e12798f..656a948 100644
+--- a/src/freedreno/vulkan/tu_knl_kgsl.cc
++++ b/src/freedreno/vulkan/tu_knl_kgsl.cc
+@@ -77,6 +77,49 @@ kgsl_submitqueue_close(struct tu_device *dev, struct tu_queue *queue)
+ 
+ static void kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo);
+ 
++/* Some devices let apps use only the KGSL ioctls Qualcomm's own driver uses:
++ * on the Meta Quest 3 (Horizon OS) the older GPUMEM allocation ioctls and
++ * CMDSTREAM_READTIMESTAMP_CTXTID fail with EACCES, while the GPUOBJ ones and
++ * DEVICE_WAITTIMESTAMP_CTXTID work. The process has one policy, so these are
++ * global.
++ */
++static bool kgsl_gpumem_refused;
++static bool kgsl_readtimestamp_refused;
++
++static void
++kgsl_probe_gpumem(int fd)
++{
++   struct kgsl_gpumem_alloc_id req = {
++      .size = 4096,
++   };
++
++   if (safe_ioctl(fd, IOCTL_KGSL_GPUMEM_ALLOC_ID, &req) == 0) {
++      struct kgsl_gpumem_free_id free_req = {
++         .id = req.id,
++      };
++      safe_ioctl(fd, IOCTL_KGSL_GPUMEM_FREE_ID, &free_req);
++   } else if (errno == EACCES) {
++      mesa_logi("kgsl: GPUMEM ioctls refused, allocating with GPUOBJ ones");
++      kgsl_gpumem_refused = true;
++   }
++}
++
++static void
++kgsl_free_id(int fd, uint32_t id)
++{
++   if (kgsl_gpumem_refused) {
++      struct kgsl_gpuobj_free req = {
++         .id = id,
++      };
++      safe_ioctl(fd, IOCTL_KGSL_GPUOBJ_FREE, &req);
++   } else {
++      struct kgsl_gpumem_free_id req = {
++         .id = id,
++      };
++      safe_ioctl(fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
++   }
++}
++
+ static VkResult
+ bo_init_new_dmaheap(struct tu_device *dev, struct tu_bo **out_bo, uint64_t size,
+                 uint64_t align, enum tu_bo_alloc_flags flags)
+@@ -334,11 +377,43 @@ kgsl_bo_init(struct tu_device *dev,
+ 
+    int ret;
+ 
+-   ret = safe_ioctl(dev->physical_device->local_fd,
+-                    IOCTL_KGSL_GPUMEM_ALLOC_ID, &req);
+-   if (ret) {
+-      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+-                       "GPUMEM_ALLOC_ID failed (%s)", strerror(errno));
++   if (kgsl_gpumem_refused) {
++      struct kgsl_gpuobj_alloc obj_req = {
++         .size = size,
++         .flags = req.flags,
++      };
++
++      ret = safe_ioctl(dev->physical_device->local_fd,
++                       IOCTL_KGSL_GPUOBJ_ALLOC, &obj_req);
++      if (ret) {
++         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                          "GPUOBJ_ALLOC failed (%s)", strerror(errno));
++      }
++
++      /* GPUOBJ_ALLOC doesn't return the GPU address. */
++      struct kgsl_gpuobj_info info = {
++         .id = obj_req.id,
++      };
++
++      ret = safe_ioctl(dev->physical_device->local_fd,
++                       IOCTL_KGSL_GPUOBJ_INFO, &info);
++      if (ret) {
++         int error = errno;
++         kgsl_free_id(dev->physical_device->local_fd, obj_req.id);
++         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                          "GPUOBJ_INFO failed (%s)", strerror(error));
++      }
++
++      req.id = obj_req.id;
++      req.mmapsize = obj_req.mmapsize;
++      req.gpuaddr = info.gpuaddr;
++   } else {
++      ret = safe_ioctl(dev->physical_device->local_fd,
++                       IOCTL_KGSL_GPUMEM_ALLOC_ID, &req);
++      if (ret) {
++         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                          "GPUMEM_ALLOC_ID failed (%s)", strerror(errno));
++      }
+    }
+ 
+    struct tu_bo* bo = tu_device_lookup_bo(dev, req.id);
+@@ -412,14 +487,11 @@ kgsl_bo_init_dmabuf(struct tu_device *dev,
+    ret = safe_ioctl(dev->physical_device->local_fd,
+                     IOCTL_KGSL_GPUOBJ_INFO, &info_req);
+    if (ret) {
+-      struct kgsl_gpumem_free_id free_req = {
+-         .id = req.id,
+-      };
+-      safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUMEM_FREE_ID,
+-                 &free_req);
++      int error = errno;
++      kgsl_free_id(dev->physical_device->local_fd, req.id);
+ 
+       return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+-                       "Failed to get dma-buf info (%s)\n", strerror(errno));
++                       "Failed to get dma-buf info (%s)\n", strerror(error));
+    }
+ 
+    struct tu_bo* bo = tu_device_lookup_bo(dev, req.id);
+@@ -505,14 +577,12 @@ kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo)
+ 
+    TU_RMV(bo_destroy, dev, bo);
+ 
+-   struct kgsl_gpumem_free_id req = {
+-      .id = bo->gem_handle
+-   };
++   uint32_t id = bo->gem_handle;
+ 
+    /* Tell sparse array that entry is free */
+    memset(bo, 0, sizeof(*bo));
+ 
+-   safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
++   kgsl_free_id(dev->physical_device->local_fd, id);
+ }
+ 
+ static VkResult
+@@ -569,18 +639,33 @@ kgsl_sparse_vma_init(struct tu_device *dev,
+       /* For some cursed reason, the ioctl doesn't return the GPU address so
+        * we have to query it.
+        */
+-      struct kgsl_gpumem_get_info info = {
+-         .id = req.id,
+-      };
++      if (kgsl_gpumem_refused) {
++         struct kgsl_gpuobj_info info = {
++            .id = req.id,
++         };
+ 
+-      ret = safe_ioctl(dev->physical_device->local_fd,
+-                       IOCTL_KGSL_GPUMEM_GET_INFO, &info);
+-      if (ret) {
+-         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+-                          "GPUMEM_GET_INFO failed (%s)", strerror(errno));
+-      }
++         ret = safe_ioctl(dev->physical_device->local_fd,
++                          IOCTL_KGSL_GPUOBJ_INFO, &info);
++         if (ret) {
++            return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                             "GPUOBJ_INFO failed (%s)", strerror(errno));
++         }
+ 
+-      bo->iova = info.gpuaddr;
++         bo->iova = info.gpuaddr;
++      } else {
++         struct kgsl_gpumem_get_info info = {
++            .id = req.id,
++         };
++
++         ret = safe_ioctl(dev->physical_device->local_fd,
++                          IOCTL_KGSL_GPUMEM_GET_INFO, &info);
++         if (ret) {
++            return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                             "GPUMEM_GET_INFO failed (%s)", strerror(errno));
++         }
++
++         bo->iova = info.gpuaddr;
++      }
+    }
+ 
+    out_vma->kgsl.virtual_bo = bo;
+@@ -619,6 +704,21 @@ get_kgsl_prop(int fd, unsigned int type, void *value, size_t size)
+ static bool
+ kgsl_is_memory_type_supported(int fd, uint32_t flags)
+ {
++   if (kgsl_gpumem_refused) {
++      struct kgsl_gpuobj_alloc req = {
++         .size = 0x1000,
++         .flags = flags,
++      };
++
++      if (safe_ioctl(fd, IOCTL_KGSL_GPUOBJ_ALLOC, &req))
++         return false;
++
++      /* The kernel echoes back the flags it used, as below. */
++      bool supported = (req.flags & flags) == flags;
++      kgsl_free_id(fd, req.id);
++      return supported;
++   }
++
+    struct kgsl_gpumem_alloc_id req_alloc = {
+       .flags = flags,
+       .size = 0x1000,
+@@ -862,16 +962,36 @@ kgsl_timestamp_error(
+ static VkResult
+ kgsl_poll_timestamp(struct tu_device *device, unsigned int context_id, unsigned int timestamp)
+ {
+-   struct kgsl_cmdstream_readtimestamp_ctxtid read = {
++   if (!kgsl_readtimestamp_refused) {
++      struct kgsl_cmdstream_readtimestamp_ctxtid read = {
++         .context_id = context_id,
++         .type = KGSL_TIMESTAMP_RETIRED,
++      };
++
++      if (safe_ioctl(device->fd, IOCTL_KGSL_CMDSTREAM_READTIMESTAMP_CTXTID, &read) == 0)
++         return timestamp_cmp(read.timestamp, timestamp) ? VK_SUCCESS : VK_TIMEOUT;
++
++      if (errno != EACCES)
++         return vk_errorf(device, VK_ERROR_UNKNOWN, "KGSL timestamp read failed: context %u, timestamp %u, errno %d (%s)",
++                          context_id, timestamp, errno, strerror(errno));
++
++      mesa_logi("kgsl: CMDSTREAM_READTIMESTAMP_CTXTID refused, polling with short waits");
++      kgsl_readtimestamp_refused = true;
++   }
++
++   /* The shortest wait there is: KGSL may take a timeout of 0 for no
++    * timeout at all.
++    */
++   struct kgsl_device_waittimestamp_ctxtid wait = {
+       .context_id = context_id,
+-      .type = KGSL_TIMESTAMP_RETIRED,
++      .timestamp = timestamp,
++      .timeout = 1,
+    };
+ 
+-   if (safe_ioctl(device->fd, IOCTL_KGSL_CMDSTREAM_READTIMESTAMP_CTXTID, &read))
+-      return vk_errorf(device, VK_ERROR_UNKNOWN, "KGSL timestamp read failed: context %u, timestamp %u, errno %d (%s)",
+-                       context_id, timestamp, errno, strerror(errno));
++   if (safe_ioctl(device->fd, IOCTL_KGSL_DEVICE_WAITTIMESTAMP_CTXTID, &wait) == 0)
++      return VK_SUCCESS;
+ 
+-   return timestamp_cmp(read.timestamp, timestamp) ? VK_SUCCESS : VK_TIMEOUT;
++   return kgsl_timestamp_error(device, context_id, timestamp, "poll", errno);
+ }
+ 
+ /* safe_ioctl is not enough as restarted waits would not adjust the timeout
+@@ -1939,6 +2059,8 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
+    if (get_kgsl_prop(fd, KGSL_PROP_DEVICE_INFO, &info, sizeof(info)))
+       goto fail;
+ 
++   kgsl_probe_gpumem(fd);
++
+    uint64_t gmem_iova;
+    if (get_kgsl_prop(fd, KGSL_PROP_UCHE_GMEM_VADDR, &gmem_iova, sizeof(gmem_iova)))
+       goto fail;
