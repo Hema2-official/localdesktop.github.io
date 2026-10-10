@@ -80,6 +80,11 @@ android:
           authorities: "${applicationId}.clipboard"
           exported: false
           grant_uri_permissions: true
+        # Files the desktop shares with Android's apps, for the app the user picks in the share sheet
+        - name: app.polarbear.ShareProvider
+          authorities: "${applicationId}.share"
+          exported: false
+          grant_uri_permissions: true
       meta_data:
         - name: com.samsung.android.dex.launchwidth
           value: 0

@@ -10,6 +10,9 @@ use crate::android::utils::application_context::get_application_context;
 use crate::android::utils::java::AppClass;
 use crate::core::config::ARCH_FS_ROOT;
 use crate::core::control::{self, Command};
+use jni::errors::Result as JniResult;
+use jni::objects::{JObject, JObjectArray};
+use jni::JNIEnv;
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -142,15 +145,13 @@ impl Job {
                 thread::spawn(launch::restart);
             }
             Command::Install(guest) => self.install(&guest),
+            Command::Share(paths) => self.share(&paths),
         }
     }
 
     fn install(&mut self, guest: &str) {
         let shared_storage = get_application_context().permission_all_files_access;
-        let name = Path::new(guest)
-            .file_name()
-            .map(|it| it.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = file_name(guest);
         let Some(path) = control::host_path(guest, ARCH_FS_ROOT, shared_storage) else {
             log::info!("Commands: can't read an app to install where it is");
             self.notice(&format!("Local Desktop can't read {name} where it is"));
@@ -171,6 +172,49 @@ impl Job {
             });
     }
 
+    /// Android's share sheet for the files, where they are (`ShareProvider.java`).
+    fn share(&mut self, paths: &[String]) {
+        let shared_storage = get_application_context().permission_all_files_access;
+        let mut roots = Vec::new();
+        let mut places = Vec::new();
+        let mut unreadable = Vec::new();
+        for guest in paths {
+            match control::place(guest, shared_storage) {
+                Some((root, place)) => {
+                    roots.push(root.name().to_owned());
+                    places.push(place.to_string_lossy().into_owned());
+                }
+                None => unreadable.push(file_name(guest)),
+            }
+        }
+        match unreadable.as_slice() {
+            [] => {}
+            [name] => self.notice(&format!("Local Desktop can't read {name} where it is")),
+            names => self.notice(&format!(
+                "Local Desktop can't read {} of the files where they are",
+                names.len()
+            )),
+        }
+        if places.is_empty() {
+            return;
+        }
+        match places.len() {
+            1 => log::info!("Commands: shares a file with an app on Android"),
+            count => log::info!("Commands: shares {count} files with an app on Android"),
+        }
+        self.commands.call("share files", |env, class, activity| {
+            let roots = strings(env, &roots)?;
+            let places = strings(env, &places)?;
+            env.call_static_method(
+                class,
+                "share",
+                "(Landroid/content/Context;[Ljava/lang/String;[Ljava/lang/String;)V",
+                &[activity.into(), (&roots).into(), (&places).into()],
+            )?;
+            Ok(())
+        });
+    }
+
     fn notice(&self, text: &str) {
         self.commands.call("tell the user", |env, class, activity| {
             let text = env.new_string(text)?;
@@ -183,6 +227,26 @@ impl Job {
             Ok(())
         });
     }
+}
+
+/// The name of a file the guest names, for the user.
+fn file_name(guest: &str) -> String {
+    Path::new(guest)
+        .file_name()
+        .map(|it| it.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// A Java `String[]`.
+fn strings<'local>(env: &mut JNIEnv<'local>, items: &[String]) -> JniResult<JObjectArray<'local>> {
+    let array = env.new_object_array(items.len() as i32, "java/lang/String", JObject::null())?;
+    for (index, item) in items.iter().enumerate() {
+        let string = env.new_string(item)?;
+        env.set_object_array_element(&array, index as i32, &string)?;
+        // However many there are, the local frame holds a few at a time.
+        env.delete_local_ref(string)?;
+    }
+    Ok(array)
 }
 
 /// The pipe at `path`, made anew unless it's there, open for reading and writing.

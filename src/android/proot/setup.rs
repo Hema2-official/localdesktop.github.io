@@ -1505,6 +1505,28 @@ Exec=localdesktop open-settings
 Categories=Settings;
 Terminal=false
 ";
+/// "Share with Android Apps…" in the context menu of Dolphin and of Plasma's desktop, for files.
+/// KIO runs a service menu outside the applications folders only if it's executable or root's.
+const SHARE_SERVICE_MENU: &str = "[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;
+Actions=share;
+X-KDE-Priority=TopLevel
+
+[Desktop Action share]
+Name=Share with Android Apps…
+Icon=document-share
+Exec=localdesktop share %F
+";
+/// The same in the "Send To" menu of Thunar, Xfce's file manager.
+const SHARE_SEND_TO: &str = "[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Android Apps
+Icon=document-share
+Exec=localdesktop share %F
+";
 /// Bundles of split APKs, which shared-mime-info doesn't know.
 const BUNDLE_TYPE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
@@ -1519,7 +1541,8 @@ const BUNDLE_TYPE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 
 /// `localdesktop`, the command that asks Android for things (`guest::control`), with "Install on
-/// Android" for apps and Android's settings for the app in the desktop's menus.
+/// Android" for apps, sharing files with Android's apps and Android's settings for the app in the
+/// desktop's menus.
 fn setup_localdesktop_command(_: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     write_executable(
@@ -1532,6 +1555,7 @@ usage() {{
     cat >&2 <<'EOF'
 Usage: localdesktop COMMAND
   open-url URL      open a web or mail link with Android's apps
+  share FILE...     share files with an Android app, picked in Android's share sheet
   install FILE      install an Android app (.apk, .xapk, .apks); Android asks first
   open-settings     open Android's settings for Local Desktop
   open-terminal     open Local Desktop's terminal
@@ -1555,6 +1579,21 @@ send() {{
 }}
 case "$1" in
     open-url) [ $# -eq 2 ] || usage; send "open-url $2" ;;
+    share)
+        [ $# -ge 2 ] || usage
+        shift
+        # One line, a tab between the files; the app tells what it can't share.
+        tab=$(printf '\t')
+        files=
+        for file in "$@"; do
+            path=$(realpath -e -- "$file") || exit 1
+            case "$path" in
+                *"$tab"*) echo "localdesktop: can't share $file: its name has a tab" >&2; exit 2 ;;
+            esac
+            files="${{files:+$files$tab}}$path"
+        done
+        [ ${{#files}} -lt 16000 ] || {{ echo "localdesktop: too many files at once" >&2; exit 2; }}
+        send "share $files" ;;
     install)
         [ $# -eq 2 ] || usage
         file=$(realpath -e -- "$2") || exit 1
@@ -1566,14 +1605,30 @@ esac
             pipe = control::PIPE
         ),
     );
-    let applications = fs_root.join("usr/share/applications");
-    let _ = fs::create_dir_all(&applications);
-    for (name, entry) in [
-        ("localdesktop-install.desktop", INSTALL_ENTRY),
-        ("localdesktop-settings.desktop", SETTINGS_ENTRY),
+    for (path, entry) in [
+        (
+            "usr/share/applications/localdesktop-install.desktop",
+            INSTALL_ENTRY,
+        ),
+        (
+            "usr/share/applications/localdesktop-settings.desktop",
+            SETTINGS_ENTRY,
+        ),
+        (
+            "usr/share/Thunar/sendto/localdesktop-share.desktop",
+            SHARE_SEND_TO,
+        ),
     ] {
-        fs::write(applications.join(name), entry).expect("Failed to write a desktop entry");
+        let path = fs_root.join(path);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        fs::write(path, entry).expect("Failed to write a desktop entry");
     }
+    write_executable(
+        &fs_root.join("usr/share/kio/servicemenus/localdesktop-share.desktop"),
+        SHARE_SERVICE_MENU,
+    );
     // The file manager knows the bundle type once its cache has it.
     let bundle_type = fs_root.join("usr/share/mime/packages/localdesktop.xml");
     if fs::read_to_string(&bundle_type).ok().as_deref() != Some(BUNDLE_TYPE) {

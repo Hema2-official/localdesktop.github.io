@@ -1,6 +1,7 @@
 //! What the `localdesktop` command in the guest asks of the app (`guest::control`): one line per
 //! command on a pipe in the rootfs. Every program in the guest can write there, so the commands
-//! only do what is harmless, or what Android asks the user about itself (installing an app).
+//! only do what is harmless, or what Android asks the user about itself (installing an app,
+//! sharing files with an app the user picks).
 
 use std::path::{Component, Path, PathBuf};
 
@@ -14,6 +15,9 @@ pub enum Command {
     /// An app (`.apk`), or a bundle of them (`.xapk`, `.apks`), to install on Android: its path in
     /// the guest.
     Install(String),
+    /// Files to share with an app the user picks in Android's share sheet: their paths in the
+    /// guest.
+    Share(Vec<String>),
     /// Android's settings for the app.
     OpenSettings,
     /// The app's own terminal.
@@ -23,7 +27,8 @@ pub enum Command {
 
 /// The command a line stands for, `None` for anything else.
 pub fn parse(line: &str) -> Option<Command> {
-    if line.chars().any(char::is_control) {
+    // Tabs separate the files of a share; nothing has other control characters.
+    if line.chars().any(|it| it.is_control() && it != '\t') {
         return None;
     }
     let (verb, argument) = match line.split_once(' ') {
@@ -31,6 +36,12 @@ pub fn parse(line: &str) -> Option<Command> {
         None => (line, None),
     };
     match (verb, argument) {
+        ("share", Some(paths)) => {
+            let paths: Vec<String> = paths.split('\t').map(str::to_owned).collect();
+            let absolute = paths.iter().all(|it| it.starts_with('/'));
+            absolute.then_some(Command::Share(paths))
+        }
+        _ if line.contains('\t') => None,
         ("open-url", Some(url)) if is_link(url) => Some(Command::OpenUrl(url.into())),
         ("install", Some(path)) if path.starts_with('/') => Some(Command::Install(path.into())),
         ("open-settings", None) => Some(Command::OpenSettings),
@@ -46,17 +57,35 @@ fn is_link(url: &str) -> bool {
     matches!(scheme.as_deref(), Some("http" | "https" | "mailto"))
 }
 
-/// Where the app reads a file the guest names: in the rootfs, or in Android's shared storage,
-/// which proot binds at `/android` and `/root/Android` when the app may read it. `None` for what
-/// the app can't read that way.
-pub fn host_path(guest: &str, rootfs: &str, shared_storage: bool) -> Option<PathBuf> {
+/// Where a file the guest names is for the app, as a path relative to one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Root {
+    Rootfs,
+    /// Android's shared storage, which proot binds at `/android` and `/root/Android` when the app
+    /// may read it.
+    SharedStorage,
+}
+
+impl Root {
+    /// How `ShareProvider.java` names it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rootfs => "rootfs",
+            Self::SharedStorage => "storage",
+        }
+    }
+}
+
+/// Where the app finds a file the guest names: in the rootfs, or in Android's shared storage.
+/// `None` for what the app can't read that way.
+pub fn place(guest: &str, shared_storage: bool) -> Option<(Root, &Path)> {
     let path = Path::new(guest);
     if !path.is_absolute() || path.components().any(|it| it == Component::ParentDir) {
         return None;
     }
     for bind in ["/android", "/root/Android"] {
         if let Ok(rest) = path.strip_prefix(bind) {
-            return shared_storage.then(|| Path::new("/sdcard").join(rest));
+            return shared_storage.then_some((Root::SharedStorage, rest));
         }
     }
     if ["/proc", "/sys", "/dev"]
@@ -65,7 +94,16 @@ pub fn host_path(guest: &str, rootfs: &str, shared_storage: bool) -> Option<Path
     {
         return None;
     }
-    Some(Path::new(rootfs).join(path.strip_prefix("/").ok()?))
+    Some((Root::Rootfs, path.strip_prefix("/").ok()?))
+}
+
+/// The path the app reads a file the guest names at (see `place`).
+pub fn host_path(guest: &str, rootfs: &str, shared_storage: bool) -> Option<PathBuf> {
+    let (root, path) = place(guest, shared_storage)?;
+    Some(match root {
+        Root::Rootfs => Path::new(rootfs).join(path),
+        Root::SharedStorage => Path::new("/sdcard").join(path),
+    })
 }
 
 #[cfg(test)]
@@ -93,6 +131,16 @@ mod tests {
         assert_eq!(parse("open-terminal"), Some(Command::OpenTerminal));
         assert_eq!(parse("restart-desktop"), Some(Command::RestartDesktop));
         assert_eq!(parse("restart-desktop now"), None);
+        assert_eq!(
+            parse("share /home/tester/a b.pdf\t/android/DCIM/c.jpg"),
+            Some(Command::Share(vec![
+                "/home/tester/a b.pdf".into(),
+                "/android/DCIM/c.jpg".into()
+            ]))
+        );
+        assert_eq!(parse("share /home/tester/a.pdf\tb.pdf"), None);
+        assert_eq!(parse("share /home/tester/a.pdf\t"), None);
+        assert_eq!(parse("open-url https://example.org/\ta"), None);
         assert_eq!(parse("open-url https://example.org/\u{7}"), None);
         assert_eq!(parse("rm -rf /"), None);
         assert_eq!(parse(""), None);
@@ -127,5 +175,13 @@ mod tests {
         );
         assert_eq!(host_path("/proc/self/root/app.apk", rootfs, true), None);
         assert_eq!(host_path("app.apk", rootfs, true), None);
+        assert_eq!(
+            place("/android/DCIM/a.jpg", true),
+            Some((Root::SharedStorage, Path::new("DCIM/a.jpg")))
+        );
+        assert_eq!(
+            place("/home/tester/a.jpg", true),
+            Some((Root::Rootfs, Path::new("home/tester/a.jpg")))
+        );
     }
 }
