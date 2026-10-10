@@ -14,8 +14,9 @@ VR. On a phone it behaves like the bleeding-edge build it's based on.
   ready-made download of it (a few MB); where that doesn't work, the headset builds it itself,
   which takes about 15 minutes.
 - **A Linux app that starts a VR session switches the headset to immersive mode**, and you're
-  back at the desktop's panel when it ends. Apps render at the headset's resolution and 90 Hz,
-  with your head, the controllers and your hands tracked, and controllers vibrate when apps ask.
+  back at the desktop's panel when it ends. Apps render at the headset's resolution and 90 Hz, or
+  at the refresh rate they ask for (72, 80 or 120 Hz on a Quest 3), with your head, the
+  controllers and your hands tracked, and controllers vibrate when apps ask.
 - **Passthrough**: apps that draw over your surroundings (OpenXR's alpha blend mode) appear in
   your room.
 - The Meta button pauses an app as it does any VR app: Resume goes back to it. Quit asks the
@@ -38,8 +39,9 @@ VR. On a phone it behaves like the bleeding-edge build it's based on.
 
 - It's an experiment, tested on one Meta Quest 3 (Horizon OS v81). Other Quests should work the
   same; other headsets aren't tried.
-- Horizon OS offers the app 90 Hz only, so apps asking for other refresh rates stay at 90 Hz.
-- VR at 90 Hz drains the battery fast: keep the headset charging for long sessions.
+- 120 Hz asks more of the headset than 90 Hz: an app that can't keep up shows its frames late,
+  as stutter, and the headset may lower the rate when it gets hot.
+- VR drains the battery fast: keep the headset charging for long sessions.
 - When an update changes VR support, the next start installs the new one (a few seconds, or the
   build on the headset).
 - If an app doesn't switch the headset, look at Monado's log, `~/.cache/monado-service.log`,

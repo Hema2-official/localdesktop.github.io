@@ -80,6 +80,9 @@ struct ld_link
 	bool connected;
 	//! What the app was told last.
 	bool session_running;
+	//! The refresh rate apps asked for last, 0 for none: asked for again whenever immersive mode
+	//! starts, until no sessions are left.
+	float requested_refresh_rate;
 
 	//! Immersive mode's channel, -1 while it's off.
 	int channel;
@@ -185,6 +188,14 @@ send_message(int sock, const void *data, size_t size, int fd)
 		}
 	}
 	return true;
+}
+
+//! Ask the app to switch the display to @p rate, on immersive mode's channel.
+static bool
+send_refresh_rate(int channel, float rate)
+{
+	struct ld_refresh_rate request = {.type = LD_MESSAGE_REFRESH_RATE, .rate = rate};
+	return send_message(channel, &request, sizeof(request), -1);
 }
 
 static void
@@ -323,12 +334,17 @@ install_channel(struct ld_link *link, const struct ld_immersive *immersive, int 
 	}
 	link->next_buffer = 0;
 	link->generation++;
+	float rate = link->requested_refresh_rate;
+	bool asked = rate > 0.0f && send_refresh_rate(channel, rate);
 	pthread_cond_broadcast(&link->cond);
 	pthread_mutex_unlock(&link->mutex);
 
 	LD_INFO("Immersive mode: %u buffers of %ux%u, %u views of %ux%u at %.1f Hz", immersive->buffer_count,
 	        immersive->width, immersive->height, immersive->view_count, immersive->views[0].width,
 	        immersive->views[0].height, immersive->refresh_rate);
+	if (asked) {
+		LD_INFO("Asking for %.1f Hz", rate);
+	}
 }
 
 //! Tell the sessions whether the headset shows them, if that changed.
@@ -730,6 +746,10 @@ ld_link_set_session_running(struct ld_link *link, bool running)
 	if (changed) {
 		link->session_running = running;
 	}
+	if (!running) {
+		// The next apps start at the display's own rate, unless they ask.
+		link->requested_refresh_rate = 0.0f;
+	}
 	pthread_mutex_unlock(&link->mutex);
 
 	if (changed) {
@@ -837,17 +857,19 @@ ld_link_get_hand(struct ld_link *link, uint32_t hand, struct ld_hand *out_hand, 
 bool
 ld_link_request_refresh_rate(struct ld_link *link, float rate)
 {
-	struct ld_refresh_rate request = {.type = LD_MESSAGE_REFRESH_RATE, .rate = rate};
-
 	// Under the lock, so that the reader can't close the channel meanwhile.
 	pthread_mutex_lock(&link->mutex);
-	bool sent = link->channel >= 0 && send_message(link->channel, &request, sizeof(request), -1);
+	link->requested_refresh_rate = rate;
+	bool now = link->channel >= 0;
+	bool sent = now && send_refresh_rate(link->channel, rate);
 	pthread_mutex_unlock(&link->mutex);
 
-	if (sent) {
+	if (!now) {
+		LD_INFO("Asking for %.1f Hz once immersive mode starts", rate);
+	} else if (sent) {
 		LD_INFO("Asking for %.1f Hz", rate);
 	}
-	return sent;
+	return !now || sent;
 }
 
 void

@@ -68,6 +68,10 @@ const FRAME_TIMEOUT: Duration = Duration::from_secs(1);
 /// switching between modes doesn't turn it off and on.
 const PASSTHROUGH_LINGER: Duration = Duration::from_secs(1);
 
+/// The refresh rate immersive mode starts at, where the display offers it: Horizon OS would start
+/// at 72 Hz. Linux apps ask for others through XR_FB_display_refresh_rate.
+const START_REFRESH_RATE: f32 = 90.0;
+
 #[no_mangle]
 pub extern "system" fn Java_app_polarbear_XrActivity_nativeStart(
     env: JNIEnv,
@@ -279,6 +283,8 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
 
     let mut events = xr::EventDataBuffer::new();
     let mut running = false;
+    // Whether the session began before: it keeps the refresh rate Linux asked for meanwhile.
+    let mut began = false;
     // Whether the headset shows the session, and takes input for it (`protocol::STATE_*`).
     let mut visibility = 0;
     let mut exit_requested = false;
@@ -313,6 +319,10 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                             session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
                             running = true;
                             sustain_performance(&instance, &session);
+                            if !began {
+                                start_refresh_rate(&instance, &session);
+                                began = true;
+                            }
                         }
                         xr::SessionState::STOPPING => {
                             session.end()?;
@@ -737,7 +747,7 @@ fn sustain_performance(instance: &xr::Instance, session: &xr::Session<xr::OpenGl
     }
 }
 
-/// Switch the display to the refresh rate Monado asked for.
+/// Switch the display to one of the refresh rates it offers.
 fn request_refresh_rate(instance: &xr::Instance, session: &xr::Session<xr::OpenGlEs>, rate: f32) {
     let Some(fb) = instance.exts().fb_display_refresh_rate else {
         return;
@@ -747,6 +757,13 @@ fn request_refresh_rate(instance: &xr::Instance, session: &xr::Session<xr::OpenG
         log::info!("Immersive mode: {rate:.0} Hz");
     } else {
         log::warn!("Immersive mode: no {rate:.0} Hz: {result:?}");
+    }
+}
+
+/// Switch the display to `START_REFRESH_RATE`, where it offers it.
+fn start_refresh_rate(instance: &xr::Instance, session: &xr::Session<xr::OpenGlEs>) {
+    if listed_refresh_rates(instance, session).contains(&START_REFRESH_RATE) {
+        request_refresh_rate(instance, session, START_REFRESH_RATE);
     }
 }
 
@@ -763,7 +780,6 @@ fn refresh_rates(
         );
         return (current, vec![current]);
     };
-    let mut rates = Vec::new();
     unsafe {
         let mut rate = 0.0;
         if (fb.get_display_refresh_rate)(session.as_raw(), &mut rate) == xr::sys::Result::SUCCESS
@@ -771,6 +787,22 @@ fn refresh_rates(
         {
             current = rate;
         }
+    }
+    let mut rates = listed_refresh_rates(instance, session);
+    if rates.is_empty() {
+        rates.push(current);
+    }
+    log::info!("Immersive mode: {current:.0} Hz, of {rates:?}");
+    (current, rates)
+}
+
+/// The refresh rates the runtime lists for the display, if it does.
+fn listed_refresh_rates(instance: &xr::Instance, session: &xr::Session<xr::OpenGlEs>) -> Vec<f32> {
+    let Some(fb) = instance.exts().fb_display_refresh_rate else {
+        return Vec::new();
+    };
+    let mut rates = Vec::new();
+    unsafe {
         let mut count = 0;
         if (fb.enumerate_display_refresh_rates)(session.as_raw(), 0, &mut count, ptr::null_mut())
             == xr::sys::Result::SUCCESS
@@ -788,11 +820,7 @@ fn refresh_rates(
             rates.truncate(count as usize);
         }
     }
-    if rates.is_empty() {
-        rates.push(current);
-    }
-    log::info!("Immersive mode: {current:.0} Hz, of {rates:?}");
-    (current, rates)
+    rates
 }
 
 /// The runtime's times as CLOCK_MONOTONIC, which is Linux's clock too.

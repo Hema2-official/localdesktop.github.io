@@ -108,6 +108,10 @@ android:
           value: 0
         - name: com.samsung.android.sdk.multiwindow.dex.launchheight
           value: 0
+        # The Meta headsets the app is made for. On others, Horizon OS runs it in compatibility
+        # mode, as an older headset, which offers fewer refresh rates.
+        - name: com.oculus.supportedDevices
+          value: "quest2|questpro|quest3|quest3s"
     uses_permission:
       - name: android.permission.INTERNET
       - name: android.permission.ACCESS_NETWORK_STATE

@@ -148,7 +148,8 @@ bool
 ld_link_get_hand(struct ld_link *link, uint32_t hand, struct ld_hand *out_hand, int64_t *out_time_ns);
 
 /*!
- * Ask for one of the display's refresh rates; false while immersive mode is off.
+ * Ask for one of the display's refresh rates: now, and again whenever immersive mode starts,
+ * until no sessions are left. False if the app couldn't be asked.
  * @ingroup drv_localdesktop
  */
 bool
