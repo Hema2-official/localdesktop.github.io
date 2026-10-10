@@ -79,18 +79,6 @@ fn headset_file() -> PathBuf {
     Path::new(ARCH_FS_ROOT).with_file_name("xr-headset")
 }
 
-/// Whether the device is a headset: one with an OpenXR runtime of the system's.
-fn headset() -> bool {
-    [
-        "/odm/etc/openxr",
-        "/vendor/etc/openxr",
-        "/system/etc/openxr",
-        "/product/etc/openxr",
-    ]
-    .iter()
-    .any(|path| Path::new(path).is_dir())
-}
-
 pub struct Job {
     activity: AppClass,
     listener: Option<OwnedFd>,
@@ -104,7 +92,7 @@ pub struct Job {
 impl Job {
     /// For the calling thread, on headsets.
     pub fn new(android_app: &AndroidApp) -> Option<Self> {
-        if !headset() {
+        if !crate::android::xr::headset() {
             return None;
         }
         Some(Self {

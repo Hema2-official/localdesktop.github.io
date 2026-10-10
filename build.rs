@@ -1,4 +1,7 @@
-use std::{env, fs};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 /// The Android package this build is for: `LOCALDESKTOP_PACKAGE` if set, otherwise the
 /// `package:` entry of `manifest.yaml`.
@@ -20,9 +23,46 @@ fn package_name() -> String {
         .expect("manifest.yaml has no `package:` entry")
 }
 
+/// What `scripts/guest/build-xr.sh` builds headsets' VR support from, for setup to build it
+/// where no prebuilt bundle installs (src/android/proot/xr.rs): `$OUT_DIR/xr_recipe.rs`, an
+/// expression listing `(path, contents)` by the files' paths in the repository, sorted.
+fn embed_xr_recipe() {
+    let mut paths = vec!["scripts/guest/build-xr.sh".to_string()];
+    println!("cargo::rerun-if-changed=scripts/guest/build-xr.sh");
+    for dir in ["patches/mesa", "patches/monado"] {
+        println!("cargo::rerun-if-changed={dir}");
+        files_under(Path::new(dir), &mut paths);
+    }
+    paths.sort();
+    let mut code = String::from("&[\n");
+    for path in &paths {
+        let absolute = fs::canonicalize(path).expect("Failed to find a file of the XR recipe");
+        code.push_str(&format!("    ({path:?}, include_bytes!({absolute:?})),\n"));
+    }
+    code.push_str("]\n");
+    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is unset")).join("xr_recipe.rs");
+    fs::write(out, code).expect("Failed to write the XR recipe");
+}
+
+fn files_under(dir: &Path, paths: &mut Vec<String>) {
+    let entries = fs::read_dir(dir).expect("Failed to list a directory of the XR recipe");
+    for entry in entries {
+        let path = entry
+            .expect("Failed to list a directory of the XR recipe")
+            .path();
+        if path.is_dir() {
+            files_under(&path, paths);
+        } else {
+            paths.push(path.to_str().expect("Non-UTF-8 path").replace('\\', "/"));
+        }
+    }
+}
+
 fn main() {
     let lib_path = "./assets/libs/arm64-v8a";
     println!("cargo::rustc-link-search={}", lib_path);
+
+    embed_xr_recipe();
 
     let package = package_name();
     println!("cargo::rustc-env=LOCALDESKTOP_PACKAGE={package}");

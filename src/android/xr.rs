@@ -23,6 +23,7 @@ use openxr as xr;
 use std::ffi::c_void;
 use std::num::NonZeroU32;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::path::Path;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,6 +32,18 @@ use std::time::{Duration, Instant};
 
 /// The session's thread, while `XrActivity` lives.
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+/// Whether the device is a headset: one with an OpenXR runtime of the system's.
+pub fn headset() -> bool {
+    [
+        "/odm/etc/openxr",
+        "/vendor/etc/openxr",
+        "/system/etc/openxr",
+        "/product/etc/openxr",
+    ]
+    .iter()
+    .any(|path| Path::new(path).is_dir())
+}
 
 struct Session {
     stop: Arc<AtomicBool>,

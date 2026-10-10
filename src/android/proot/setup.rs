@@ -1,4 +1,4 @@
-use super::process::ArchProcess;
+use super::{process::ArchProcess, xr};
 use crate::{
     android::{
         app::build::PolarBearBackend,
@@ -191,7 +191,7 @@ fn download(url: &str, path: &Path, sender: &Sender<SetupMessage>, label: &str) 
 }
 
 /// One try, continuing from what `part` already holds when the server allows ranges.
-fn download_attempt(
+pub(super) fn download_attempt(
     client: &reqwest::blocking::Client,
     url: &str,
     part: &Path,
@@ -758,7 +758,7 @@ fn setup_pipewire_package_lock(_: &SetupOptions) -> StageOutput {
         }
     };
 
-    let updated = ensure_pacman_ignore_pkg(&content, PIPEWIRE_GUEST_LOCK_PACKAGES);
+    let updated = ensure_pacman_list(&content, "IgnorePkg", PIPEWIRE_GUEST_LOCK_PACKAGES);
     if updated != content {
         fs::write(&pacman_conf, updated).expect("Failed to write PipeWire pacman lock");
         log::info!(
@@ -794,8 +794,8 @@ const ADRENO_MESA_STATE: &str = "var/lib/localdesktop/adreno-mesa";
 const ADRENO_MESA_FAILED: &str = "var/lib/localdesktop/adreno-mesa.failed";
 const ADRENO_MESA_RETRY_SECS: u64 = 24 * 60 * 60;
 /// `gpu <program>` runs an OpenGL program on the Adreno. Vulkan programs use it without help.
-const GPU_HELPER: &str = "usr/local/bin/gpu";
-const GPU_HELPER_SCRIPT: &str = r#"#!/bin/sh
+pub(super) const GPU_HELPER: &str = "usr/local/bin/gpu";
+pub(super) const GPU_HELPER_SCRIPT: &str = r#"#!/bin/sh
 # Run an OpenGL program on the Adreno GPU: through Zink on Turnip, under X11 (Xwayland), because
 # the compositors here only take shared-memory buffers and OpenGL through Wayland can't use them.
 # Vulkan programs use the GPU without this.
@@ -808,7 +808,9 @@ exec "$@"
 "#;
 
 fn setup_adreno_mesa(options: &SetupOptions) -> StageOutput {
-    if !Path::new("/dev/kgsl-3d0").exists() {
+    // Headsets refuse the KGSL ioctls these builds allocate with: their VR support brings the
+    // Turnip they need (super::xr).
+    if !Path::new("/dev/kgsl-3d0").exists() || crate::android::xr::headset() {
         return None;
     }
     let fs_root = Path::new(ARCH_FS_ROOT);
@@ -855,7 +857,7 @@ fn setup_adreno_mesa(options: &SetupOptions) -> StageOutput {
     }))
 }
 
-fn unix_time() -> u64 {
+pub(super) fn unix_time() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |it| it.as_secs())
@@ -1078,7 +1080,7 @@ fn install_adreno_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
     // Keep `pacman -Syu` from putting Arch's Mesa back.
     let pacman_conf = fs_root.join("etc/pacman.conf");
     if let Ok(content) = fs::read_to_string(&pacman_conf) {
-        let updated = ensure_pacman_ignore_pkg(&content, ADRENO_MESA_PACKAGES);
+        let updated = ensure_pacman_list(&content, "IgnorePkg", ADRENO_MESA_PACKAGES);
         if updated != content {
             fs::write(&pacman_conf, updated).map_err(|error| error.to_string())?;
         }
@@ -1270,16 +1272,17 @@ fn upsert_kv_file(path: &Path, delimiter: char, updates: &[(&str, String)]) {
     fs::write(path, content).expect("Failed to write key/value file");
 }
 
-fn ensure_pacman_ignore_pkg(content: &str, packages: &[&str]) -> String {
+/// `content`, a pacman.conf, with `values` in the `key` list of its `[options]`.
+pub(super) fn ensure_pacman_list(content: &str, key: &str, values: &[&str]) -> String {
     let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
-    let value = packages.join(" ");
+    let value = values.join(" ");
 
     let Some(options_start) = lines.iter().position(|line| line.trim() == "[options]") else {
         if !lines.is_empty() {
             lines.push(String::new());
         }
         lines.push("[options]".to_string());
-        lines.push(format!("IgnorePkg   = {value}"));
+        lines.push(format!("{key:<12}= {value}"));
         let mut out = lines.join("\n");
         out.push('\n');
         return out;
@@ -1306,16 +1309,16 @@ fn ensure_pacman_ignore_pkg(content: &str, packages: &[&str]) -> String {
             trimmed.trim_start_matches('#').trim_start()
         };
 
-        let Some((key, existing)) = candidate.split_once('=') else {
+        let Some((found, existing)) = candidate.split_once('=') else {
             continue;
         };
-        if key.trim() != "IgnorePkg" {
+        if found.trim() != key {
             continue;
         }
 
         if active {
-            let merged = merge_pacman_list(existing, packages);
-            lines[index] = format!("IgnorePkg   = {merged}");
+            let merged = merge_pacman_list(existing, values);
+            lines[index] = format!("{key:<12}= {merged}");
             let mut out = lines.join("\n");
             out.push('\n');
             return out;
@@ -1326,7 +1329,7 @@ fn ensure_pacman_ignore_pkg(content: &str, packages: &[&str]) -> String {
 
     lines.insert(
         insert_after_comment.unwrap_or(options_start + 1),
-        format!("IgnorePkg   = {value}"),
+        format!("{key:<12}= {value}"),
     );
 
     let mut out = lines.join("\n");
@@ -2356,6 +2359,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(setup_time_zone),              // Step 6. Follow Android's time zone
         Box::new(setup_pipewire_package_lock), // Step 7. Hold guest PipeWire packages for the Android-side PipeWire POC
         Box::new(setup_adreno_mesa), // Step 7b. Mesa that drives the Adreno GPU through KGSL
+        Box::new(xr::setup_xr),      // Step 7c. Monado and the GPU driver for VR apps, on headsets
         Box::new(setup_firefox_config),        // Step 8. Setup Firefox config
         Box::new(setup_fake_bwrap), // Step 9. Replace bwrap with a no-sandbox shim (Android has no user namespaces)
         Box::new(setup_chromium_no_sandbox), // Step 10. Make Chromium/Electron apps launchable without a terminal

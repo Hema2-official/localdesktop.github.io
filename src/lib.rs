@@ -36,6 +36,7 @@ pub mod android {
         pub mod process;
         pub mod setup;
         pub mod ssh;
+        pub mod xr;
     }
     pub mod utils {
         pub mod application_context;

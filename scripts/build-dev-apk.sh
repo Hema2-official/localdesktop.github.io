@@ -7,7 +7,8 @@
 #
 # Usage: scripts/build-dev-apk.sh [--debug]
 # Environment: LOCALDESKTOP_DEV_DIR, LOCALDESKTOP_PACKAGE, LOCALDESKTOP_LABEL, CARGO_TARGET_DIR,
-# NDK_VERSION
+# NDK_VERSION; LOCALDESKTOP_XR_BUNDLE_URL and LOCALDESKTOP_XR_BUNDLE_SHA256 name a VR support
+# bundle (scripts/build-xr-bundle.sh) for headsets to install instead of building it.
 set -eu
 
 cd "$(dirname "$0")/.."
