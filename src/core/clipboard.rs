@@ -18,6 +18,20 @@ pub const ANDROID_TEXT_LIMIT: usize = 250_000;
 pub const DESKTOP_READ_LIMIT: usize = ANDROID_TEXT_LIMIT * 3;
 
 const HTML_TYPE: &str = "text/html";
+/// What an image goes to the desktop as when Android's has another type, and what the desktop's
+/// is asked for first.
+pub const PNG: &str = "image/png";
+/// The image types the link carries as they are, the ones Android's apps take best first, and
+/// the extensions of the files they go to Android in (`ClipProvider.java` knows them too).
+const IMAGE_TYPES: [(&str, &str); 5] = [
+    (PNG, "png"),
+    ("image/jpeg", "jpg"),
+    ("image/webp", "webp"),
+    ("image/gif", "gif"),
+    ("image/bmp", "bmp"),
+];
+/// How large an image may be, either way: it is read whole.
+pub const IMAGE_LIMIT: usize = 64 << 20;
 /// What a text is offered as on the desktop, the UTF-8 ones first. `STRING` is Latin-1 by
 /// X11's rules; the others are UTF-8 on every desktop of this decade.
 const TEXT_TYPES: [&str; 5] = [
@@ -33,6 +47,7 @@ const TEXT_TYPES: [&str; 5] = [
 pub enum Kind {
     Text,
     Html,
+    Image,
 }
 
 /// What a clip on Android has for the desktop.
@@ -40,11 +55,13 @@ pub enum Kind {
 pub struct Kinds {
     pub text: bool,
     pub html: bool,
+    /// An image, and the type it goes to the desktop as, as it is (`image_type_of`).
+    pub image: Option<&'static str>,
 }
 
 impl Kinds {
     pub fn any(self) -> bool {
-        self.text || self.html
+        self.text || self.html || self.image.is_some()
     }
 }
 
@@ -65,18 +82,45 @@ pub fn kind_of(mime_type: &str) -> Option<Kind> {
         Some(Kind::Html)
     } else if TEXT_TYPES.iter().any(|it| same_type(mime_type, it)) {
         Some(Kind::Text)
+    } else if IMAGE_TYPES.iter().any(|(it, _)| same_type(mime_type, it)) {
+        Some(Kind::Image)
     } else {
         None
     }
 }
 
+/// The type an image Android has as `mime_type` goes to the desktop as, as it is: one the link
+/// carries, or PNG, which the app makes of it.
+pub fn image_type_of(mime_type: &str) -> &'static str {
+    IMAGE_TYPES
+        .into_iter()
+        .map(|(it, _)| it)
+        .find(|it| same_type(it, mime_type))
+        .unwrap_or(PNG)
+}
+
+/// The extension of a file with an image of this type, which the link carries.
+pub fn image_extension(mime_type: &str) -> &'static str {
+    IMAGE_TYPES
+        .into_iter()
+        .find(|(it, _)| same_type(it, mime_type))
+        .map_or("png", |(_, extension)| extension)
+}
+
 /// The types to offer on the desktop for a clip from Android.
 pub fn desktop_types(kinds: Kinds) -> Vec<&'static str> {
     let mut types = Vec::new();
+    if let Some(image) = kinds.image {
+        types.push(image);
+        // What every program takes, made of the other on request.
+        if image != PNG {
+            types.push(PNG);
+        }
+    }
     if kinds.html {
         types.push(HTML_TYPE);
     }
-    if kinds.any() {
+    if kinds.text || kinds.html {
         // Android makes a text of every HTML clip.
         types.extend(TEXT_TYPES);
     }
@@ -107,6 +151,38 @@ pub fn html_type<T: AsRef<str>>(offered: &[T]) -> Option<&str> {
         .iter()
         .map(AsRef::as_ref)
         .find(|it| same_type(it, HTML_TYPE))
+}
+
+/// The type to ask a desktop selection for to get its image, the one Android's apps take best.
+pub fn image_type<T: AsRef<str>>(offered: &[T]) -> Option<&str> {
+    IMAGE_TYPES.iter().find_map(|(wanted, _)| {
+        offered
+            .iter()
+            .map(AsRef::as_ref)
+            .find(|it| same_type(it, wanted))
+    })
+}
+
+/// Whether a desktop selection offering these types has something the link carries.
+fn carries<T: AsRef<str>>(offered: &[T]) -> bool {
+    text_type(offered).is_some() || html_type(offered).is_some() || image_type(offered).is_some()
+}
+
+/// What to read of a desktop selection offering these types for Android's clipboard, and as
+/// which type: its text and HTML, or its image if it has no text. Programs that copy text offer
+/// pictures of it too (LibreOffice Calc does of its cells), and programs that copy an image an
+/// HTML `<img>` of it, whose text on Android would be an object replacement character.
+pub fn to_read<T: AsRef<str>>(offered: &[T]) -> Vec<(Kind, &str)> {
+    let text = text_type(offered);
+    if text.is_none() {
+        if let Some(image) = image_type(offered) {
+            return vec![(Kind::Image, image)];
+        }
+    }
+    [(Kind::Text, text), (Kind::Html, html_type(offered))]
+        .into_iter()
+        .filter_map(|(kind, mime_type)| Some((kind, mime_type?)))
+        .collect()
 }
 
 fn latin1(bytes: &[u8]) -> String {
@@ -187,7 +263,7 @@ pub struct AndroidClip {
 /// Why Android's clip on offer on the desktop couldn't be read when a program there asked.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unread {
-    /// It has no text after all: its items are empty, or not text.
+    /// It has nothing of the kind asked for after all: its items are empty, or of another kind.
     Empty,
     /// Android gave none although the window has focus: the clipboard was cleared (Android 13
     /// and later do that after an hour, apps can too).
@@ -210,7 +286,7 @@ impl Unread {
 impl std::fmt::Display for Unread {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Empty => f.write_str("it has no text"),
+            Self::Empty => f.write_str("it has nothing to read"),
             Self::Gone => f.write_str("Android gave none"),
             Self::Unfocused => f.write_str("the window doesn't have focus"),
             Self::Failed(what) => write!(f, "reading it failed ({what})"),
@@ -306,9 +382,7 @@ impl Sync {
             return Step::OfferAgain;
         }
         let restored = offered.iter().any(|it| it.as_ref() == RESTORED_TYPE);
-        if (restored && !self.pending_when_emptied)
-            || (text_type(offered).is_none() && html_type(offered).is_none())
-        {
+        if (restored && !self.pending_when_emptied) || !carries(offered) {
             self.pending = false;
             return Step::Nothing;
         }
@@ -341,6 +415,7 @@ mod tests {
     const TEXT: Kinds = Kinds {
         text: true,
         html: false,
+        image: None,
     };
 
     fn foreign(stamp: i64) -> Option<AndroidClip> {
@@ -357,7 +432,9 @@ mod tests {
         assert_eq!(kind_of("TEXT/PLAIN; charset=UTF-8"), Some(Kind::Text));
         assert_eq!(kind_of("UTF8_STRING"), Some(Kind::Text));
         assert_eq!(kind_of("text/html"), Some(Kind::Html));
-        assert_eq!(kind_of("image/png"), None);
+        assert_eq!(kind_of("image/png"), Some(Kind::Image));
+        assert_eq!(kind_of("Image/JPEG"), Some(Kind::Image));
+        assert_eq!(kind_of("image/x-xcf"), None);
         assert_eq!(kind_of(LINK_TYPE), None);
     }
 
@@ -376,6 +453,7 @@ mod tests {
         let types = desktop_types(Kinds {
             text: false,
             html: true,
+            image: None,
         });
         assert_eq!(types.first(), Some(&"text/html"));
         assert!(types.contains(&"text/plain;charset=utf-8"));
@@ -483,6 +561,66 @@ mod tests {
     }
 
     #[test]
+    fn should_carry_images_as_they_are_and_as_png() {
+        // A JPEG from Android: as it is, and as PNG made of it on request.
+        let jpeg = Kinds {
+            image: Some(image_type_of("image/jpeg")),
+            ..Kinds::default()
+        };
+        assert!(jpeg.any());
+        assert_eq!(desktop_types(jpeg), ["image/jpeg", PNG, LINK_TYPE]);
+        // A type the link doesn't carry as it is goes as PNG alone.
+        assert_eq!(image_type_of("image/heic"), PNG);
+        let captioned = Kinds {
+            text: true,
+            image: Some(PNG),
+            ..Kinds::default()
+        };
+        let types = desktop_types(captioned);
+        assert_eq!(types[..2], [PNG, "text/plain;charset=utf-8"]);
+        assert_eq!(types.last(), Some(&LINK_TYPE));
+        // Of the desktop's image, the type Android's apps take best.
+        let offered = ["image/bmp", "image/jpeg", "image/png", "text/html"];
+        assert_eq!(image_type(&offered), Some("image/png"));
+        assert_eq!(image_type(&["image/x-xcf"]), None);
+        assert_eq!(image_extension("image/jpeg"), "jpg");
+        assert_eq!(image_extension(PNG), "png");
+    }
+
+    #[test]
+    fn should_read_the_text_of_a_selection_or_else_its_image() {
+        // LibreOffice Calc's cells.
+        let cells = ["image/png", "text/html", "text/plain;charset=utf-8"];
+        assert_eq!(
+            to_read(&cells),
+            [
+                (Kind::Text, "text/plain;charset=utf-8"),
+                (Kind::Html, "text/html")
+            ]
+        );
+        // A browser's "Copy Image".
+        let image = ["image/png", "text/html"];
+        assert_eq!(to_read(&image), [(Kind::Image, "image/png")]);
+        assert_eq!(to_read(&["text/html"]), [(Kind::Html, "text/html")]);
+        assert_eq!(to_read(&["image/x-xcf"]), []);
+    }
+
+    #[test]
+    fn should_copy_an_image_alone_to_android() {
+        let mut sync = Sync::new(false);
+        sync.input();
+        assert_eq!(
+            sync.desktop_selection(Some(&["image/png", "image/bmp"])),
+            Step::CopyToAndroid
+        );
+        // Nothing the link carries.
+        assert_eq!(
+            sync.desktop_selection(Some(&["image/x-xcf", "application/x-qt-image"])),
+            Step::Nothing
+        );
+    }
+
+    #[test]
     fn should_not_copy_its_own_offers_back() {
         let mut sync = Sync::new(true);
         assert_eq!(sync.android_clip(foreign(1)), Step::OfferToDesktop(TEXT));
@@ -518,7 +656,10 @@ mod tests {
 
         assert_eq!(sync.focus(true), Step::Nothing);
         assert_eq!(sync.desktop_selection(Some(&["text/plain"])), Step::Nothing);
-        assert_eq!(sync.desktop_selection(Some(&["image/png"])), Step::Nothing);
+        assert_eq!(
+            sync.desktop_selection(Some(&["image/x-xcf"])),
+            Step::Nothing
+        );
         assert_eq!(sync.focus(false), Step::Nothing);
 
         assert_eq!(sync.focus(true), Step::Nothing);

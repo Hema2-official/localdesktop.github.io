@@ -2,11 +2,12 @@
 //! (`guest::clipboard`). What Android allows when is described there.
 
 use crate::android::session::app_class;
-use crate::core::clipboard::{AndroidClip, Kinds, Unread};
+use crate::core::clipboard::{self as rules, AndroidClip, Kinds, Unread};
 use jni::errors::Result as JniResult;
 use jni::objects::{GlobalRef, JClass, JObject, JObjectArray, JString, JValue};
 use jni::sys::{JNIInvokeInterface_, _jobject};
 use jni::{JNIEnv, JavaVM};
+use std::os::fd::{AsRawFd, BorrowedFd};
 use winit::platform::android::activity::AndroidApp;
 
 /// What a clip holds.
@@ -87,7 +88,7 @@ impl AndroidClipboard {
             let Some(fields) = strings(env, fields)? else {
                 return Ok(None);
             };
-            let [stamp, own, text, html] = fields.as_slice() else {
+            let [stamp, own, text, html, image] = fields.as_slice() else {
                 return Ok(None);
             };
             let has = |field: &Option<String>| field.as_deref().is_some_and(|it| !it.is_empty());
@@ -97,6 +98,10 @@ impl AndroidClipboard {
                 kinds: Kinds {
                     text: has(text),
                     html: has(html),
+                    image: image
+                        .as_deref()
+                        .filter(|it| !it.is_empty())
+                        .map(rules::image_type_of),
                 },
             }))
         })
@@ -127,11 +132,39 @@ impl AndroidClipboard {
                 text: fields.next().flatten().unwrap_or_default(),
                 html: fields.next().flatten(),
             }),
-            "empty" => Err(Unread::Empty),
-            "gone" => Err(Unread::Gone),
-            "unfocused" => Err(Unread::Unfocused),
-            // "failed" and the exception.
-            _ => Err(Unread::Failed(fields.next().flatten().unwrap_or(what))),
+            _ => Err(unread(what, fields.next().flatten())),
+        }
+    }
+
+    /// Have the clip's image written into `pipe` while the caller reads it, as it is if it has
+    /// type `mime_type`, or as PNG. Java takes a copy of the pipe, which it closes at the end: the
+    /// caller's has to go once this returns.
+    pub fn read_image(&self, pipe: BorrowedFd, mime_type: &str) -> Result<(), Unread> {
+        let fields = self.call("read", |env, class, context| {
+            let mime_type = env.new_string(mime_type)?;
+            let fields = env
+                .call_static_method(
+                    class,
+                    "readImage",
+                    "(Landroid/content/Context;ILjava/lang/String;)[Ljava/lang/String;",
+                    &[
+                        context.into(),
+                        JValue::Int(pipe.as_raw_fd()),
+                        (&mime_type).into(),
+                    ],
+                )?
+                .l()?;
+            strings(env, fields)
+        });
+        let Some(Some(fields)) = fields else {
+            return Err(Unread::Failed("JNI".into()));
+        };
+        let mut fields = fields.into_iter();
+        let what = fields.next().flatten().unwrap_or_default();
+        if what == "image" {
+            Ok(())
+        } else {
+            Err(unread(what, fields.next().flatten()))
         }
     }
 
@@ -154,6 +187,23 @@ impl AndroidClipboard {
         .unwrap_or(false)
     }
 
+    /// Make a clip of the image file `name` in the app's `files/clipboard/`, which has type
+    /// `mime_type`. Whether Android took it.
+    pub fn write_image(&self, name: &str, mime_type: &str) -> bool {
+        self.call("write to", |env, class, context| {
+            let name = env.new_string(name)?;
+            let mime_type = env.new_string(mime_type)?;
+            env.call_static_method(
+                class,
+                "writeImage",
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Z",
+                &[context.into(), (&name).into(), (&mime_type).into()],
+            )?
+            .z()
+        })
+        .unwrap_or(false)
+    }
+
     /// Have changes of the clipboard reported as `guest::Event::AndroidClipboard`, or no longer.
     pub fn watch(&self, on: bool) {
         self.call("watch", |env, class, context| {
@@ -165,6 +215,17 @@ impl AndroidClipboard {
             )?;
             Ok(())
         });
+    }
+}
+
+/// Why a clip couldn't be read, as `Clipboard.java` tells it.
+fn unread(what: String, detail: Option<String>) -> Unread {
+    match what.as_str() {
+        "empty" => Unread::Empty,
+        "gone" => Unread::Gone,
+        "unfocused" => Unread::Unfocused,
+        // "failed" and the exception.
+        _ => Unread::Failed(detail.unwrap_or(what)),
     }
 }
 
