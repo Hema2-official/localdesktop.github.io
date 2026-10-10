@@ -42,5 +42,6 @@ int path_exists(char path[PATH_MAX]);
 int get_fd_path(Tracee *tracee, char path[PATH_MAX], Reg fd_sysarg, RegVersion version);
 
 int read_sysarg_path(Tracee *tracee, char path[PATH_MAX], Reg path_sysarg, RegVersion version);
+int resolve_proc_fd_path(Tracee *tracee, char path[PATH_MAX]);
 
 #endif /* FAKE_ID0_HELPER_FUNCTIONS_H */
