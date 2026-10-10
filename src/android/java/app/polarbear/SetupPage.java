@@ -24,8 +24,38 @@ import android.widget.FrameLayout;
 public final class SetupPage {
     private SetupPage() {}
 
-    /** Show {@code url}. Call on a thread with a Looper, and run the Looper afterwards. */
-    public static void show(Activity activity, String url) {
+    /** The page on screen and its activity. Only the UI thread touches them. */
+    private static Dialog shown;
+    private static Activity shownOver;
+
+    /**
+     * Show {@code url} over {@code activity}, from any thread. The page is made on the UI thread,
+     * because Chromium binds every WebView in the process to the thread that made the first one.
+     * And once per activity: the app resumes again whenever its window is recreated, and the page
+     * is still there.
+     */
+    public static void show(final Activity activity, final String url) {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (shownOver == activity && shown != null && shown.isShowing()) {
+                    return;
+                }
+                if (shown != null) {
+                    try {
+                        shown.dismiss();
+                    } catch (IllegalArgumentException e) {
+                        // Its activity is gone, and its window with it.
+                    }
+                }
+                shown = create(activity, url);
+                shownOver = activity;
+                shown.show();
+            }
+        });
+    }
+
+    private static Dialog create(Activity activity, String url) {
         WebView webView = new WebView(activity);
         webView.getSettings().setJavaScriptEnabled(true);
         // Links open in the page rather than in a browser.
@@ -58,6 +88,6 @@ public final class SetupPage {
                 }
             });
         }
-        dialog.show();
+        return dialog;
     }
 }
