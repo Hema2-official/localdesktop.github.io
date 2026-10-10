@@ -30,6 +30,7 @@ pub const CONTROLLERS: u32 = 6;
 pub const HAPTIC: u32 = 7;
 pub const REFRESH_RATE: u32 = 8;
 pub const HANDS: u32 = 9;
+pub const STATE: u32 = 10;
 pub const DRM_FORMAT_ABGR8888: u32 = 0x3432_4241;
 
 /// A controller's buttons and touches. Lower is A or X, upper B or Y; menu is the left one's.
@@ -48,6 +49,10 @@ pub const CONTROLLER_ACTIVE: u32 = 1;
 pub const HAND_ACTIVE: u32 = 1;
 /// As XR_EXT_hand_tracking has them.
 pub const HAND_JOINTS: usize = 26;
+/// The headset shows immersive mode.
+pub const STATE_VISIBLE: u32 = 1;
+/// And takes input for it.
+pub const STATE_FOCUSED: u32 = 2;
 
 pub const MAX_BUFFERS: usize = 8;
 pub const MAX_VIEWS: usize = 2;

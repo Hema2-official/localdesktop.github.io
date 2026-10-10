@@ -253,6 +253,8 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
 
     let mut events = xr::EventDataBuffer::new();
     let mut running = false;
+    // Whether the headset shows the session, and takes input for it (`protocol::STATE_*`).
+    let mut visibility = 0;
     let mut exit_requested = false;
     let started = Instant::now();
     let (mut displayed, mut from_linux) = (0u32, 0u32);
@@ -270,6 +272,16 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
             match event {
                 xr::Event::SessionStateChanged(change) => {
                     log::info!("Immersive mode: session {:?}", change.state());
+                    visibility = match change.state() {
+                        xr::SessionState::FOCUSED => {
+                            protocol::STATE_VISIBLE | protocol::STATE_FOCUSED
+                        }
+                        xr::SessionState::VISIBLE => protocol::STATE_VISIBLE,
+                        _ => 0,
+                    };
+                    if let Some(transport) = transport.as_mut() {
+                        transport.send_state(visibility);
+                    }
                     match change.state() {
                         xr::SessionState::READY => {
                             session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
@@ -319,7 +331,10 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
 
         if transport.is_none() && !transport_failed {
             match lend_buffers(&instance, &session, &mut gl, &eyes, &eye_views, period) {
-                Ok(it) => transport = Some(it),
+                Ok(mut it) => {
+                    it.send_state(visibility);
+                    transport = Some(it);
+                }
                 Err(error) => {
                     log::warn!("Immersive mode: no frames from Linux: {error:#}");
                     transport_failed = true;

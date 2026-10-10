@@ -20,6 +20,8 @@
 #include "util/u_misc.h"
 #include "util/u_time.h"
 
+#include "xrt/xrt_session.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -68,6 +70,11 @@ struct ld_link
 	pthread_mutex_t mutex;
 	//! Signalled when a buffer comes back and when immersive mode starts or ends.
 	pthread_cond_t cond;
+
+	//! Where the sessions hear whether the headset shows them.
+	struct xrt_session_event_sink *events;
+	//! What they heard last.
+	bool visible, focused;
 
 	//! The control connection is up.
 	bool connected;
@@ -324,6 +331,32 @@ install_channel(struct ld_link *link, const struct ld_immersive *immersive, int 
 	        immersive->views[0].height, immersive->refresh_rate);
 }
 
+//! Tell the sessions whether the headset shows them, if that changed.
+static void
+tell_sessions(struct ld_link *link, bool visible, bool focused)
+{
+	pthread_mutex_lock(&link->mutex);
+	struct xrt_session_event_sink *events = link->events;
+	bool changed = link->visible != visible || link->focused != focused;
+	link->visible = visible;
+	link->focused = focused;
+	pthread_mutex_unlock(&link->mutex);
+
+	if (!changed || events == NULL) {
+		return;
+	}
+	LD_INFO("The headset %s the sessions%s", visible ? "shows" : "doesn't show",
+	        focused ? ", and takes their input" : "");
+	union xrt_session_event event = XRT_STRUCT_INIT;
+	event.type = XRT_SESSION_EVENT_STATE_CHANGE;
+	event.state.visible = visible;
+	event.state.focused = focused;
+	event.state.timestamp_ns = os_monotonic_get_ns();
+	if (xrt_session_event_sink_push(events, &event) != XRT_SUCCESS) {
+		LD_WARN("The sessions didn't take the news");
+	}
+}
+
 //! Immersive mode ended: every buffer is ours again, and frames go nowhere until it's back.
 static void
 drop_channel(struct ld_link *link)
@@ -343,6 +376,7 @@ drop_channel(struct ld_link *link)
 
 	if (had_channel) {
 		LD_INFO("Immersive mode ended");
+		tell_sessions(link, false, false);
 	}
 }
 
@@ -413,6 +447,7 @@ read_channel(struct ld_link *link, int channel)
 		struct ld_tracking tracking;
 		struct ld_controllers controllers;
 		struct ld_hands hands;
+		struct ld_state state;
 		struct ld_release release;
 		uint8_t bytes[MAX_MESSAGE_SIZE];
 	} message;
@@ -441,6 +476,9 @@ read_channel(struct ld_link *link, int channel)
 		link->controllers = message.controllers;
 		link->has_controllers = true;
 		pthread_mutex_unlock(&link->mutex);
+	} else if (size == sizeof(message.state) && message.type == LD_MESSAGE_STATE) {
+		tell_sessions(link, (message.state.flags & LD_STATE_VISIBLE) != 0,
+		              (message.state.flags & LD_STATE_FOCUSED) != 0);
 	} else if (size == sizeof(message.hands) && message.type == LD_MESSAGE_HANDS) {
 		pthread_mutex_lock(&link->mutex);
 		link->hands = message.hands;
@@ -529,6 +567,9 @@ ld_link_create(void)
 	struct ld_link *link = U_TYPED_CALLOC(struct ld_link);
 	link->reference.count = 1;
 	link->control = fd;
+	// What the compositor tells sessions until the app says otherwise.
+	link->visible = true;
+	link->focused = true;
 	link->channel = -1;
 	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
 		link->dma_bufs[i] = -1;
@@ -609,6 +650,14 @@ ld_link_reference(struct ld_link **dst, struct ld_link *src)
 	if (old != NULL && xrt_reference_dec_and_is_zero(&old->reference)) {
 		destroy(old);
 	}
+}
+
+void
+ld_link_set_event_sink(struct ld_link *link, struct xrt_session_event_sink *events)
+{
+	pthread_mutex_lock(&link->mutex);
+	link->events = events;
+	pthread_mutex_unlock(&link->mutex);
 }
 
 const struct ld_hello *

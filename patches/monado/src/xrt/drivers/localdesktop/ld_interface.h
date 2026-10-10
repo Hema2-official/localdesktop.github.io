@@ -28,6 +28,7 @@ extern "C" {
  */
 
 struct xrt_device;
+struct xrt_session_event_sink;
 
 /*!
  * The connection to the app, which the headset and the controllers share.
@@ -77,6 +78,13 @@ ld_link_create(void);
  */
 void
 ld_link_reference(struct ld_link **dst, struct ld_link *src);
+
+/*!
+ * Where to tell the sessions whether the headset shows them, as the app says.
+ * @ingroup drv_localdesktop
+ */
+void
+ld_link_set_event_sink(struct ld_link *link, struct xrt_session_event_sink *events);
 
 /*!
  * The app's description of the headset.

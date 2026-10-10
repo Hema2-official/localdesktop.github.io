@@ -140,6 +140,8 @@ pub struct Frames {
     haptics: Vec<Haptic>,
     /// The refresh rate Monado asked for last, until the app takes it.
     refresh_rate_request: Option<f32>,
+    /// Whether the headset shows immersive mode, as Monado was told last.
+    state: u32,
 }
 
 impl Frames {
@@ -212,6 +214,7 @@ impl Frames {
                     heard: false,
                     haptics: Vec::new(),
                     refresh_rate_request: None,
+                    state: protocol::STATE_VISIBLE | protocol::STATE_FOCUSED,
                 };
                 frames.offer(theirs)?;
                 return Ok(frames);
@@ -346,6 +349,7 @@ impl Frames {
                 if let Err(error) = self.offer(theirs) {
                     log::warn!("Immersive mode: no buffers for the next Monado: {error:#}");
                 }
+                self.send_state(self.state);
             }
             Err(error) => log::warn!("Immersive mode: no channel for the next Monado: {error}"),
         }
@@ -416,6 +420,16 @@ impl Frames {
         }
         debug_assert_eq!(message.0.len(), protocol::CONTROLLERS_SIZE);
         self.send(&message.0, "the controllers' state");
+    }
+
+    /// Tell Monado whether the headset shows immersive mode (`protocol::STATE_*`). Sent again on
+    /// a new channel.
+    pub fn send_state(&mut self, flags: u32) {
+        self.state = flags;
+        let mut message = Message::default();
+        message.u32(protocol::STATE);
+        message.u32(flags);
+        self.send(&message.0, "the session's state");
     }
 
     /// Tell Monado where the hands' joints are (a hands message).

@@ -12,7 +12,8 @@
  * views side by side). On the channel the app sends the head's tracking every display frame, and
  * the driver sends each frame with the poses it was rendered for, so the headset's compositor can
  * reproject it to where the head is when it's shown. The controllers' state and the hands'
- * joints come every display frame too, and haptic pulses and refresh rate requests go back. The channel closes when
+ * joints come every display frame too, with whether the headset shows immersive mode; haptic
+ * pulses and refresh rate requests go back. The channel closes when
  * immersive mode ends.
  *
  * Messages are little-endian structs, of a fixed size per type, without padding; descriptors
@@ -63,6 +64,8 @@ enum ld_message_type
 	LD_MESSAGE_REFRESH_RATE = 8,
 	//! Channel, app → Linux: @ref ld_hands.
 	LD_MESSAGE_HANDS = 9,
+	//! Channel, app → Linux: @ref ld_state.
+	LD_MESSAGE_STATE = 10,
 };
 
 //! A controller's buttons and touches, in @ref ld_controller::buttons.
@@ -87,6 +90,11 @@ enum ld_button
 
 //! In @ref ld_hand::flags: the runtime tracks the hand.
 #define LD_HAND_ACTIVE 1u
+
+//! In @ref ld_state::flags: the headset shows immersive mode.
+#define LD_STATE_VISIBLE 1u
+//! In @ref ld_state::flags: and takes input for it.
+#define LD_STATE_FOCUSED 2u
 
 //! Angles in radians, as XrFovf: left and down are negative.
 struct ld_fov
@@ -255,6 +263,16 @@ struct ld_hands
 	struct ld_hand hands[2];
 };
 
+/*!
+ * Channel, app → Linux, when it changes and when the channel opens: whether the headset shows
+ * immersive mode (not while it's off the head, say), and whether it takes input for it.
+ */
+struct ld_state
+{
+	uint32_t type;
+	uint32_t flags;
+};
+
 //! Channel, Linux → app: switch the display to one of its refresh rates.
 struct ld_refresh_rate
 {
@@ -301,3 +319,4 @@ static_assert(sizeof(struct ld_haptic) == 24, "ld_haptic layout");
 static_assert(sizeof(struct ld_refresh_rate) == 8, "ld_refresh_rate layout");
 static_assert(sizeof(struct ld_joint) == 36, "ld_joint layout");
 static_assert(sizeof(struct ld_hands) == 1904, "ld_hands layout");
+static_assert(sizeof(struct ld_state) == 8, "ld_state layout");

@@ -30,6 +30,14 @@ static const char *driver_list[] = {
     "localdesktop",
 };
 
+struct ld_builder
+{
+	struct t_builder base;
+
+	//! Reaches every session, for the link to tell them whether the headset shows them.
+	struct xrt_session_event_sink *broadcast;
+};
+
 static xrt_result_t
 localdesktop_estimate_system(struct xrt_builder *xb,
                              cJSON *config,
@@ -60,6 +68,8 @@ localdesktop_open_system_impl(struct xrt_builder *xb,
 		return XRT_ERROR_DEVICE_CREATION_FAILED;
 	}
 
+	ld_link_set_event_sink(link, ((struct ld_builder *)xb)->broadcast);
+
 	struct xrt_device *head = ld_hmd_create(link);
 	struct xrt_device *left = ld_controller_create(link, 0, head);
 	struct xrt_device *right = ld_controller_create(link, 1, head);
@@ -88,6 +98,18 @@ localdesktop_open_system_impl(struct xrt_builder *xb,
 	return XRT_SUCCESS;
 }
 
+static xrt_result_t
+localdesktop_open_system(struct xrt_builder *xb,
+                         cJSON *config,
+                         struct xrt_prober *xp,
+                         struct xrt_session_event_sink *broadcast,
+                         struct xrt_system_devices **out_xsysd,
+                         struct xrt_space_overseer **out_xso)
+{
+	((struct ld_builder *)xb)->broadcast = broadcast;
+	return t_builder_open_system_static_roles(xb, config, xp, broadcast, out_xsysd, out_xso);
+}
+
 static void
 localdesktop_destroy(struct xrt_builder *xb)
 {
@@ -97,11 +119,12 @@ localdesktop_destroy(struct xrt_builder *xb)
 struct xrt_builder *
 t_builder_localdesktop_create(void)
 {
-	struct t_builder *ub = U_TYPED_CALLOC(struct t_builder);
+	struct ld_builder *builder = U_TYPED_CALLOC(struct ld_builder);
+	struct t_builder *ub = &builder->base;
 
 	// xrt_builder fields.
 	ub->base.estimate_system = localdesktop_estimate_system;
-	ub->base.open_system = t_builder_open_system_static_roles;
+	ub->base.open_system = localdesktop_open_system;
 	ub->base.destroy = localdesktop_destroy;
 	ub->base.identifier = "localdesktop";
 	ub->base.name = "Local Desktop headset";
