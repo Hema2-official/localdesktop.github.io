@@ -115,7 +115,7 @@ Android and the desktop share one clipboard: what you copy in an Android app can
 
 - Android only shows its clipboard to the app in front, so what you copied on Android reaches the desktop once Local Desktop's window is in front again. Android 12 and later may then say "Local Desktop pasted from your clipboard": that is the desktop taking your copy, when a program there reads it (Plasma's clipboard history does so right away).
 - What you copy on the desktop reaches Android when you switch to another app. Android takes up to about 500 KB of text.
-- Text and HTML for now, images later.
+- Images go across too, up to 64 MB: a picture copied in an Android app (Chrome's "Copy image", for one) pastes in the desktop's programs, and an image copied on the desktop (a screenshot in Spectacle, "Copy Image" in a browser, a selection in GIMP) pastes in the Android apps that take pictures, such as messaging and note apps. When the desktop's selection has text as well, as a spreadsheet's cells do, Android gets the text.
 - The desktop's compositor has to let clipboard managers in (`ext-data-control-v1` or `wlr-data-control`), which KWin (the Plasma preset), labwc (the Xfce preset) and sway do.
 
 To keep the two clipboards apart:

@@ -73,6 +73,13 @@ android:
           meta_data:
             - name: android.accessibilityservice
               resource: "@xml/keyboard_accessibility_service"
+      providers:
+        # Images copied on the desktop, which Android's clipboard lets the app that pastes read
+        - name: app.polarbear.ClipProvider
+          # Each build of the app needs its own
+          authorities: "${applicationId}.clipboard"
+          exported: false
+          grant_uri_permissions: true
       meta_data:
         - name: com.samsung.android.dex.launchwidth
           value: 0
