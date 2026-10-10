@@ -1,0 +1,76 @@
+From: Hema2 <49586027+Hema2-official@users.noreply.github.com>
+Subject: [PATCH] vulkan/wsi/x11: wait for software presents on the present thread
+
+With a software WSI (MESA_VK_WSI_DEBUG=sw, as on desktops that only take
+shared-memory buffers), vkQueuePresentKHR waited on the application's
+thread for the present's fence, so that the CPU could read the image: for
+everything the application had queued before the present. An OpenXR
+application that draws its eyes and then its window on the same queue,
+such as a Godot project, stalled for its whole frame's GPU work every
+frame, and ran at a half or a third of the headset's refresh rate.
+
+The X11 swapchain's present thread can wait as well: it already does for
+MAILBOX where the X server needs it. Let it wait for every software
+present, and leave the application's thread free.
+
+Against Mesa main 07d7e87.
+---
+diff --git a/src/vulkan/wsi/wsi_common.c b/src/vulkan/wsi/wsi_common.c
+index f40f078..241ee44 100644
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -2886,7 +2886,7 @@ wsi_common_queue_present(const struct wsi_device *wsi,
+ #endif
+       }
+ 
+-      if (wsi->sw) {
++      if (wsi->sw && !swapchain->sw_present_thread_waits) {
+          wsi->WaitForFences(vk_device_to_handle(dev),
+                             1, &swapchain->fences[image_index], true, ~0ull);
+       }
+diff --git a/src/vulkan/wsi/wsi_common_private.h b/src/vulkan/wsi/wsi_common_private.h
+index 3d2cd7d..a907006 100644
+--- a/src/vulkan/wsi/wsi_common_private.h
++++ b/src/vulkan/wsi/wsi_common_private.h
+@@ -239,6 +239,14 @@ struct wsi_swapchain {
+    VkSemaphore present_id_timeline;
+    bool present_wait_enabled;
+ 
++   /**
++    * With a software WSI, the CPU reads a presented image, so its rendering
++    * must be done first. Set when the swapchain's present thread waits for
++    * that, so that vkQueuePresentKHR doesn't wait on the application's thread
++    * for everything it queued before the present.
++    */
++   bool sw_present_thread_waits;
++
+    int signal_dma_buf_from_semaphore;
+    /**
+     * Optional semaphore for implicit-sync swapchains.  It will be signaled by
+diff --git a/src/vulkan/wsi/wsi_common_x11.c b/src/vulkan/wsi/wsi_common_x11.c
+index e2e6ef8..18758b8 100644
+--- a/src/vulkan/wsi/wsi_common_x11.c
++++ b/src/vulkan/wsi/wsi_common_x11.c
+@@ -2540,9 +2540,12 @@ x11_manage_present_queue(void *state)
+ 
+       VkPresentModeKHR present_mode = chain->images[image_index].present_mode;
+ 
+-      /* Not necessary to block when we have explicit sync */
++      /* Not necessary to block when we have explicit sync. Software presents
++       * read the image with the CPU, so they always wait.
++       */
+       bool need_fence_wait =
+-            x11_needs_wait_for_fences(chain->base.wsi, wsi_conn, present_mode) &&
++            (chain->base.wsi->sw ||
++             x11_needs_wait_for_fences(chain->base.wsi, wsi_conn, present_mode)) &&
+             !chain->base.image_info.explicit_sync;
+ 
+       bool need_timing_fence_wait = x11_swapchain_present_timing_is_out_of_order_completion(
+@@ -3270,6 +3273,7 @@ x11_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
+    chain->base.get_wsi_image = x11_get_wsi_image;
+    chain->base.acquire_next_image = x11_acquire_next_image;
+    chain->base.queue_present = x11_queue_present;
++   chain->base.sw_present_thread_waits = true;
+    chain->base.wait_for_present = x11_wait_for_present;
+    chain->base.wait_for_present2 = x11_wait_for_present;
+    chain->base.release_images = x11_release_images;
