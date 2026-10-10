@@ -6,8 +6,9 @@
 //! Monado connects to the app's socket in the rootfs, the control connection: the app describes
 //! the headset (hello), Monado says when Linux apps run OpenXR sessions (session), and each time
 //! immersive mode starts, the app hands over a channel and the buffers frames go into
-//! (immersive). On the channel go tracking, the controllers' state, the hands' joints, frames,
-//! releases, haptic pulses and refresh rate requests, until it closes with immersive mode.
+//! (immersive). On the channel go tracking, the controllers' state, the hands' joints, frames
+//! (with whether to show them over the surroundings), releases, haptic pulses and refresh rate
+//! requests, until it closes with immersive mode.
 
 use openxr as xr;
 use std::ffi::c_void;
@@ -20,7 +21,7 @@ use std::ptr;
 pub const SOCKET: &str = "tmp/localdesktop-xr.sock";
 
 pub const MAGIC: u32 = 0x5258_4c44; // "LDXR"
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const FRAME: u32 = 1;
 pub const RELEASE: u32 = 2;
 pub const TRACKING: u32 = 3;
@@ -53,17 +54,22 @@ pub const HAND_JOINTS: usize = 26;
 pub const STATE_VISIBLE: u32 = 1;
 /// And takes input for it.
 pub const STATE_FOCUSED: u32 = 2;
+/// The headset can show its surroundings behind immersive mode.
+pub const HELLO_PASSTHROUGH: u32 = 1;
+/// Show the frame over the surroundings, blended by its alpha, which its colours are
+/// premultiplied by.
+pub const FRAME_ALPHA_BLEND: u32 = 1;
 
 pub const MAX_BUFFERS: usize = 8;
 pub const MAX_VIEWS: usize = 2;
 pub const MAX_REFRESH_RATES: usize = 8;
 pub const MAX_HEAD_SAMPLES: usize = 4;
 
-pub const HELLO_SIZE: usize = 100;
+pub const HELLO_SIZE: usize = 104;
 pub const IMMERSIVE_SIZE: usize = 100;
 pub const SESSION_SIZE: usize = 8;
 pub const TRACKING_SIZE: usize = 376;
-pub const FRAME_SIZE: usize = 112;
+pub const FRAME_SIZE: usize = 120;
 pub const CONTROLLERS_SIZE: usize = 320;
 pub const HAPTIC_SIZE: usize = 24;
 pub const REFRESH_RATE_SIZE: usize = 8;
@@ -154,11 +160,13 @@ pub struct Headset {
     pub views: Vec<(u32, u32, xr::Fovf)>,
     pub refresh_rate: f32,
     pub refresh_rates: Vec<f32>,
+    /// Whether it can show its surroundings behind immersive mode.
+    pub passthrough: bool,
 }
 
 impl Headset {
-    /// Before immersive mode has run once: a Quest 3's sizes and rates, and a field of view that
-    /// immersive mode corrects when it lends buffers.
+    /// Before immersive mode has run once: a Quest 3's sizes, rates and passthrough, and a field
+    /// of view that immersive mode corrects when it lends buffers.
     pub fn guess() -> Self {
         let quarter = std::f32::consts::FRAC_PI_4;
         let fov = xr::Fovf {
@@ -171,6 +179,7 @@ impl Headset {
             views: vec![(1680, 1760, fov); 2],
             refresh_rate: 90.0,
             refresh_rates: vec![72.0, 80.0, 90.0, 120.0],
+            passthrough: true,
         }
     }
 
@@ -194,6 +203,11 @@ impl Headset {
         for index in 0..MAX_REFRESH_RATES {
             message.f32(self.refresh_rates.get(index).copied().unwrap_or(0.0));
         }
+        let mut flags = 0;
+        if self.passthrough {
+            flags |= HELLO_PASSTHROUGH;
+        }
+        message.u32(flags);
         debug_assert_eq!(message.0.len(), HELLO_SIZE);
         message.0
     }
@@ -222,6 +236,7 @@ impl Headset {
             views,
             refresh_rate: f32_at(bytes, 64),
             refresh_rates,
+            passthrough: u32_at(bytes, 100) & HELLO_PASSTHROUGH != 0,
         })
     }
 }

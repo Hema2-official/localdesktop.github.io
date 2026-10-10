@@ -476,9 +476,12 @@ target_present(struct comp_target *ct,
 	}
 
 	// Turnip flushes its caches at the end of every command buffer, so the app reads the frame
-	// once the sync file signals; the image needs no queue family transfer.
+	// once the sync file signals; the image needs no queue family transfer. The renderer keeps
+	// the layers' alpha, premultiplied, for frames blended over the surroundings.
+	bool alpha_blend = c->base.layer_accum.data.env_blend_mode == XRT_BLEND_MODE_ALPHA_BLEND;
 	ld_link_present(ldt->link, ldt->generation, index, fence, c->frame.rendering.predicted_display_time_ns,
-	                (uint32_t)c->xdev->hmd->view_count, c->base.frame_params.poses, c->base.frame_params.fovs);
+	                alpha_blend, (uint32_t)c->xdev->hmd->view_count, c->base.frame_params.poses,
+	                c->base.frame_params.fovs);
 
 	if (fence >= 0) {
 		close(fence);

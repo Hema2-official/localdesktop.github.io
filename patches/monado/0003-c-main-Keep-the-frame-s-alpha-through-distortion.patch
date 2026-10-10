@@ -1,0 +1,87 @@
+From a05d6a82caf1810fe55898d2df71b13998c81d45 Mon Sep 17 00:00:00 2001
+From: Hema2 <49586027+Hema2-official@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 18:59:33 +0200
+Subject: [PATCH] c/main: Keep the frame's alpha through distortion
+
+Targets that hand frames to another compositor, which blends them over
+the user's surroundings (a headset's passthrough), need the alpha the
+layer squasher accumulates. The distortion compute shader and the mesh
+shader now write it instead of 1, from the green sample.
+
+The distortion shader passes a layer's alpha on without premultiplying
+the colours by it, so frames blended with the environment whose single
+projection layer has unpremultiplied alpha go through the layer
+squasher instead of the fast path.
+---
+ src/xrt/auxiliary/render/shaders/distortion.comp | 11 +++++++----
+ src/xrt/auxiliary/render/shaders/mesh.frag       |  5 +++--
+ src/xrt/compositor/main/comp_compositor.c        | 10 ++++++++++
+ 3 files changed, 20 insertions(+), 6 deletions(-)
+
+diff --git a/src/xrt/auxiliary/render/shaders/distortion.comp b/src/xrt/auxiliary/render/shaders/distortion.comp
+index 149b9e2..35fb36c 100644
+--- a/src/xrt/auxiliary/render/shaders/distortion.comp
++++ b/src/xrt/auxiliary/render/shaders/distortion.comp
+@@ -128,15 +128,18 @@ void main()
+ 	g_uv = transform_uv(g_uv, iz);
+ 	b_uv = transform_uv(b_uv, iz);
+ 
+-	// Sample the source with distorted and chromatic-aberration corrected samples.
++	// Sample the source with distorted and chromatic-aberration corrected samples. The alpha
++	// goes with green, the middle of the spectrum, for targets that blend the frame over
++	// something (the user's surroundings, say).
++	vec4 g_sample = texture(source[iz], g_uv);
+ 	vec4 colour = vec4(              //
+ 	    texture(source[iz], r_uv).r, //
+-	    texture(source[iz], g_uv).g, //
++	    g_sample.g,                  //
+ 	    texture(source[iz], b_uv).b, //
+-	    1);                          //
++	    g_sample.a);                 //
+ 
+ 	// Do colour correction here since there are no automatic conversion in hardware available.
+-	colour = vec4(from_linear_to_srgb(colour.rgb), 1);
++	colour = vec4(from_linear_to_srgb(colour.rgb), colour.a);
+ 
+ 	imageStore(target, ivec2(offset.x + ix, offset.y + iy), colour);
+ }
+diff --git a/src/xrt/auxiliary/render/shaders/mesh.frag b/src/xrt/auxiliary/render/shaders/mesh.frag
+index 242c6d5..df4b938 100644
+--- a/src/xrt/auxiliary/render/shaders/mesh.frag
++++ b/src/xrt/auxiliary/render/shaders/mesh.frag
+@@ -21,8 +21,9 @@ layout (location = 0) out vec4 out_color;
+ void main()
+ {
+ 	float r = texture(tex_sampler, in_ruv).x;
+-	float g = texture(tex_sampler, in_guv).y;
++	vec4 g = texture(tex_sampler, in_guv);
+ 	float b = texture(tex_sampler, in_buv).z;
+ 
+-	out_color = vec4(r, g, b, 1.0);
++	// The alpha goes with green, as in the distortion compute shader.
++	out_color = vec4(r, g.y, b, g.w);
+ }
+diff --git a/src/xrt/compositor/main/comp_compositor.c b/src/xrt/compositor/main/comp_compositor.c
+index 930939e..fe845b0 100644
+--- a/src/xrt/compositor/main/comp_compositor.c
++++ b/src/xrt/compositor/main/comp_compositor.c
+@@ -293,6 +293,16 @@ can_do_one_projection_layer_fast_path(struct comp_compositor *c)
+ 		return false;
+ 	}
+ 
++	/*
++	 * The distortion shader passes the layer's alpha on but doesn't premultiply the colours by
++	 * it, which a frame blended over the environment needs: the layer squasher does.
++	 */
++	if (c->base.layer_accum.data.env_blend_mode != XRT_BLEND_MODE_OPAQUE &&
++	    (layer->data.flags & XRT_LAYER_COMPOSITION_BLEND_TEXTURE_SOURCE_ALPHA_BIT) != 0 &&
++	    (layer->data.flags & XRT_LAYER_COMPOSITION_UNPREMULTIPLIED_ALPHA_BIT) != 0) {
++		return false;
++	}
++
+ 	enum xrt_layer_type type = layer->data.type;
+ 
+ 	// Check if chroma key is active for projection layers
+-- 
+2.47.3
+

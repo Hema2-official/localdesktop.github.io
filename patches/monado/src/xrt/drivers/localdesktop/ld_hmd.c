@@ -139,8 +139,13 @@ ld_hmd_create(struct ld_link *link)
 	parts->screens[0].w_pixels = (int)x;
 	parts->screens[0].h_pixels = (int)height;
 	parts->screens[0].nominal_frame_interval_ns = (uint64_t)(U_TIME_1S_IN_NS / hello->refresh_rate);
-	parts->blend_modes[0] = XRT_BLEND_MODE_OPAQUE;
-	parts->blend_mode_count = 1;
+	// Opaque first, the mode apps take unless they ask for another. Alpha blending shows what they
+	// draw over the surroundings, where the headset can show those (passthrough).
+	parts->blend_mode_count = 0;
+	parts->blend_modes[parts->blend_mode_count++] = XRT_BLEND_MODE_OPAQUE;
+	if ((hello->flags & LD_HELLO_PASSTHROUGH) != 0) {
+		parts->blend_modes[parts->blend_mode_count++] = XRT_BLEND_MODE_ALPHA_BLEND;
+	}
 
 	// The headset's compositor corrects for its lenses.
 	u_distortion_mesh_set_none(&hmd->base);

@@ -609,8 +609,9 @@ ld_link_create(void)
 	}
 
 	const struct ld_hello *hello = &link->hello;
-	LD_INFO("Headset: %u views of %ux%u at %.1f Hz", hello->view_count, hello->views[0].width,
-	        hello->views[0].height, hello->refresh_rate);
+	LD_INFO("Headset: %u views of %ux%u at %.1f Hz%s", hello->view_count, hello->views[0].width,
+	        hello->views[0].height, hello->refresh_rate,
+	        (hello->flags & LD_HELLO_PASSTHROUGH) != 0 ? ", with passthrough" : "");
 
 	return link;
 
@@ -928,6 +929,7 @@ ld_link_present(struct ld_link *link,
                 uint32_t index,
                 int render_fence,
                 int64_t display_time_ns,
+                bool alpha_blend,
                 uint32_t view_count,
                 const struct xrt_pose *poses,
                 const struct xrt_fov *fovs)
@@ -940,6 +942,7 @@ ld_link_present(struct ld_link *link,
 	    .type = LD_MESSAGE_FRAME,
 	    .buffer = index,
 	    .display_time_ns = display_time_ns,
+	    .flags = alpha_blend ? LD_FRAME_ALPHA_BLEND : 0,
 	};
 	for (uint32_t i = 0; i < view_count && i < LD_MAX_VIEWS; i++) {
 		frame.views[i].pose = pose_to(&poses[i]);

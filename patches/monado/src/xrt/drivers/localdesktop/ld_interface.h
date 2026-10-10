@@ -189,8 +189,8 @@ ld_link_acquire(struct ld_link *link, uint64_t generation, uint32_t *out_index);
 
 /*!
  * Hand an acquired buffer to the app, with a sync file that signals once it's rendered (-1 for
- * none; it stays the caller's), and the display time and views it was rendered for. False when
- * the frame goes nowhere.
+ * none; it stays the caller's), the display time and views it was rendered for, and whether to
+ * blend it over the surroundings by its alpha (premultiplied). False when the frame goes nowhere.
  * @ingroup drv_localdesktop
  */
 bool
@@ -199,6 +199,7 @@ ld_link_present(struct ld_link *link,
                 uint32_t index,
                 int render_fence,
                 int64_t display_time_ns,
+                bool alpha_blend,
                 uint32_t view_count,
                 const struct xrt_pose *poses,
                 const struct xrt_fov *fovs);

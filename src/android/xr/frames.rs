@@ -109,6 +109,8 @@ pub struct Frame {
     /// To wait for before reading it.
     pub fence: Option<OwnedFd>,
     pub display_time_ns: i64,
+    /// Whether to show it over the surroundings, blended by its (premultiplied) alpha.
+    pub alpha_blend: bool,
     /// What it was rendered for: each view's pose in the stage space, and field of view.
     pub views: Vec<View>,
 }
@@ -298,14 +300,16 @@ impl Frames {
                     }
                     let views = (0..self.views.len())
                         .map(|index| View {
-                            pose: protocol::pose_at(&message, 24 + index * 44),
-                            fov: protocol::fov_at(&message, 24 + index * 44 + 28),
+                            pose: protocol::pose_at(&message, 32 + index * 44),
+                            fov: protocol::fov_at(&message, 32 + index * 44 + 28),
                         })
                         .collect();
+                    let flags = protocol::u32_at(&message, 24);
                     newest = Some(Frame {
                         buffer,
                         fence: fds.pop(),
                         display_time_ns: protocol::i64_at(&message, 16),
+                        alpha_blend: flags & protocol::FRAME_ALPHA_BLEND != 0,
                         views,
                     });
                 }

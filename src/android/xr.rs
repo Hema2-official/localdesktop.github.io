@@ -3,7 +3,8 @@
 //! through the Khronos loader in assets/libs.
 //!
 //! The session shows the frames Monado in Linux renders into buffers it lends it (`frames`),
-//! each with the poses it was rendered for, and a slowly pulsing colour while there are none.
+//! each with the poses it was rendered for, over the headset's view of the surroundings
+//! (passthrough) when the frame asks for it, and a slowly pulsing colour while there are none.
 //! Monado gets the head's tracking and the controllers' state from it every display frame
 //! (`controllers`). The guest link enters immersive mode when Monado asks for it, and hands it the
 //! buffers (`guest::xr`).
@@ -62,6 +63,10 @@ const FRAME_BUFFERS: usize = 3;
 
 /// How long Linux's last frame stays up when no newer one comes (its app quit, say).
 const FRAME_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// How long passthrough stays on after the last frame that asked for it, so that an app
+/// switching between modes doesn't turn it off and on.
+const PASSTHROUGH_LINGER: Duration = Duration::from_secs(1);
 
 #[no_mangle]
 pub extern "system" fn Java_app_polarbear_XrActivity_nativeStart(
@@ -156,6 +161,7 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     enabled.fb_display_refresh_rate = available.fb_display_refresh_rate;
     enabled.ext_performance_settings = available.ext_performance_settings;
     enabled.ext_hand_tracking = available.ext_hand_tracking;
+    enabled.fb_passthrough = available.fb_passthrough;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Local Desktop",
@@ -172,13 +178,15 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
     let views = instance
         .enumerate_view_configuration_views(system, xr::ViewConfigurationType::PRIMARY_STEREO)?;
+    let passthrough = supports_passthrough(&instance, system);
     log::info!(
-        "Immersive mode: runtime {} {}, {} views of {}x{}",
+        "Immersive mode: runtime {} {}, {} views of {}x{}{}",
         properties.runtime_name,
         properties.runtime_version,
         views.len(),
         views[0].recommended_image_rect_width,
-        views[0].recommended_image_rect_height
+        views[0].recommended_image_rect_height,
+        if passthrough { ", passthrough" } else { "" }
     );
     // Required before a session, even when nothing is checked against it.
     let _ = instance.graphics_requirements::<xr::OpenGlEs>(system)?;
@@ -259,10 +267,15 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     // Lent once the session shows frames, when the views' fields of view are known.
     let mut transport: Option<frames::Frames> = None;
     let mut transport_failed = false;
-    // What the newest frame from Linux was rendered for, which the swapchains hold, and when it
-    // came.
+    // What the newest frame from Linux was rendered for, which the swapchains hold, whether it
+    // goes over the surroundings, and when it came.
     let mut shown: Option<Vec<frames::View>> = None;
+    let mut shown_alpha_blend = false;
     let mut shown_since = Instant::now();
+    // The surroundings behind Linux's frames, while they ask for them.
+    let mut surroundings: Option<Surroundings> = None;
+    let mut surroundings_failed = false;
+    let mut blended_at = Instant::now();
 
     let mut events = xr::EventDataBuffer::new();
     let mut running = false;
@@ -343,7 +356,15 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
         )?;
 
         if transport.is_none() && !transport_failed {
-            match lend_buffers(&instance, &session, &mut gl, &eyes, &eye_views, period) {
+            match lend_buffers(
+                &instance,
+                &session,
+                &mut gl,
+                &eyes,
+                &eye_views,
+                period,
+                passthrough,
+            ) {
                 Ok(mut it) => {
                     it.send_state(visibility);
                     transport = Some(it);
@@ -410,6 +431,7 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                 lateness_ns += clock.to_monotonic_ns(display_time) - frame.display_time_ns;
                 from_linux += 1;
                 shown = Some(frame.views);
+                shown_alpha_blend = frame.alpha_blend;
                 shown_since = Instant::now();
             }
             (frames::Update::Disconnected, _) => shown = None,
@@ -468,13 +490,54 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                     )
             })
             .collect::<Vec<_>>();
-        stream.end(
-            display_time,
-            xr::EnvironmentBlendMode::OPAQUE,
-            &[&xr::CompositionLayerProjection::new()
-                .space(&space)
-                .views(&projection_views)],
-        )?;
+        let projection = xr::CompositionLayerProjection::new()
+            .space(&space)
+            .views(&projection_views);
+
+        let blend = shown.is_some() && shown_alpha_blend;
+        if blend {
+            blended_at = Instant::now();
+            if surroundings.is_none() && passthrough && !surroundings_failed {
+                match Surroundings::new(&session) {
+                    Ok(it) => {
+                        log::info!("Immersive mode: passthrough on");
+                        surroundings = Some(it);
+                    }
+                    Err(error) => {
+                        log::warn!("Immersive mode: no passthrough: {error:#}");
+                        surroundings_failed = true;
+                    }
+                }
+            }
+        } else if surroundings.is_some() && blended_at.elapsed() > PASSTHROUGH_LINGER {
+            log::info!("Immersive mode: passthrough off");
+            surroundings = None;
+        }
+        match surroundings.as_ref().filter(|_| blend) {
+            // The surroundings, with the frame over them by its alpha.
+            Some(surroundings) => {
+                let behind = surroundings.composition_layer();
+                // A layer as the crate's own builders hand theirs over (it keeps this one's
+                // builder to itself): the struct begins with the base header.
+                let behind = unsafe {
+                    &*ptr::addr_of!(behind).cast::<xr::CompositionLayerBase<xr::OpenGlEs>>()
+                };
+                stream.end(
+                    display_time,
+                    xr::EnvironmentBlendMode::OPAQUE,
+                    &[
+                        behind,
+                        &projection
+                            .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA),
+                    ],
+                )?
+            }
+            None => stream.end(
+                display_time,
+                xr::EnvironmentBlendMode::OPAQUE,
+                &[&projection],
+            )?,
+        }
 
         displayed += 1;
         if counted_since.elapsed() >= Duration::from_secs(10) {
@@ -503,6 +566,63 @@ fn drop_frames(transport: &mut Option<frames::Frames>) {
     }
 }
 
+/// Whether the headset can show its surroundings behind the session's layers.
+fn supports_passthrough(instance: &xr::Instance, system: xr::SystemId) -> bool {
+    if instance.exts().fb_passthrough.is_none() {
+        return false;
+    }
+    let mut passthrough = xr::sys::SystemPassthroughProperties2FB {
+        ty: xr::sys::SystemPassthroughProperties2FB::TYPE,
+        next: ptr::null(),
+        capabilities: xr::sys::PassthroughCapabilityFlagsFB::EMPTY,
+    };
+    let mut properties: xr::sys::SystemProperties = unsafe { std::mem::zeroed() };
+    properties.ty = xr::sys::SystemProperties::TYPE;
+    properties.next = ptr::addr_of_mut!(passthrough).cast();
+    let result = unsafe {
+        (instance.fp().get_system_properties)(instance.as_raw(), system, &mut properties)
+    };
+    result == xr::sys::Result::SUCCESS
+        && passthrough
+            .capabilities
+            .contains(xr::sys::PassthroughCapabilityFlagsFB::PASSTHROUGH_CAPABILITY)
+}
+
+/// The headset's view of the surroundings (XR_FB_passthrough), for Linux's frames to go over.
+/// Fields drop in order: the layer before the passthrough it belongs to.
+struct Surroundings {
+    layer: xr::PassthroughLayerFB,
+    _passthrough: xr::Passthrough,
+}
+
+impl Surroundings {
+    fn new(session: &xr::Session<xr::OpenGlEs>) -> Result<Self> {
+        // Both run from the start, and stop when dropped: the crate's `Passthrough::start` pauses.
+        let passthrough =
+            session.create_passthrough(xr::PassthroughFlagsFB::IS_RUNNING_AT_CREATION)?;
+        let layer = session.create_passthrough_layer(
+            &passthrough,
+            xr::PassthroughFlagsFB::IS_RUNNING_AT_CREATION,
+            xr::PassthroughLayerPurposeFB::RECONSTRUCTION,
+        )?;
+        Ok(Self {
+            layer,
+            _passthrough: passthrough,
+        })
+    }
+
+    /// The composition layer that shows them, under the frame's.
+    fn composition_layer(&self) -> xr::sys::CompositionLayerPassthroughFB {
+        xr::sys::CompositionLayerPassthroughFB {
+            ty: xr::sys::CompositionLayerPassthroughFB::TYPE,
+            next: ptr::null(),
+            flags: xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA,
+            space: <xr::sys::Space as xr::sys::Handle>::NULL,
+            layer_handle: self.layer.as_raw(),
+        }
+    }
+}
+
 /// Buffers for the views side by side, each at its swapchain's size, for Monado; and the headset
 /// as it is, for the next Monado's start.
 fn lend_buffers(
@@ -512,6 +632,7 @@ fn lend_buffers(
     eyes: &[Eye],
     eye_views: &[xr::View],
     period: xr::Duration,
+    passthrough: bool,
 ) -> Result<frames::Frames> {
     let mut x = 0;
     let areas: Vec<frames::ViewArea> = eyes
@@ -548,6 +669,7 @@ fn lend_buffers(
             .collect(),
         refresh_rate,
         refresh_rates,
+        passthrough,
     });
     let transport = frames::Frames::new(areas, refresh_rate, FRAME_BUFFERS)?;
     for buffer in &transport.buffers {

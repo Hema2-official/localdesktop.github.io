@@ -127,6 +127,9 @@ android:
         version: 1
       - name: oculus.software.handtracking
         required: false
+      # The surroundings behind Linux apps' frames, where they ask for them.
+      - name: com.oculus.feature.PASSTHROUGH
+        required: false
     # What the OpenXR loader talks to: the runtime brokers, and the runtime's and API layers' services.
     queries:
       providers:

@@ -11,10 +11,10 @@
  * (another SOCK_SEQPACKET socket) and the buffers frames go into, as dma-bufs (linear layout, all
  * views side by side). On the channel the app sends the head's tracking every display frame, and
  * the driver sends each frame with the poses it was rendered for, so the headset's compositor can
- * reproject it to where the head is when it's shown. The controllers' state and the hands'
- * joints come every display frame too, with whether the headset shows immersive mode; haptic
- * pulses and refresh rate requests go back. The channel closes when
- * immersive mode ends.
+ * reproject it to where the head is when it's shown, over the headset's view of the surroundings
+ * (passthrough) when the frame asks for it. The controllers' state and the hands' joints come
+ * every display frame too, with whether the headset shows immersive mode; haptic pulses and
+ * refresh rate requests go back. The channel closes when immersive mode ends.
  *
  * Messages are little-endian structs, of a fixed size per type, without padding; descriptors
  * travel as SCM_RIGHTS. Times are CLOCK_MONOTONIC nanoseconds. Poses are in the app's stage space
@@ -32,7 +32,7 @@
 
 #define LD_SOCKET_PATH "/tmp/localdesktop-xr.sock"
 #define LD_PROTOCOL_MAGIC 0x52584c44u // "LDXR"
-#define LD_PROTOCOL_VERSION 4u
+#define LD_PROTOCOL_VERSION 5u
 
 #define LD_MAX_BUFFERS 8
 #define LD_MAX_VIEWS 2
@@ -96,6 +96,15 @@ enum ld_button
 //! In @ref ld_state::flags: and takes input for it.
 #define LD_STATE_FOCUSED 2u
 
+//! In @ref ld_hello::flags: the headset can show its surroundings behind immersive mode.
+#define LD_HELLO_PASSTHROUGH 1u
+
+/*!
+ * In @ref ld_frame::flags: show the frame over the surroundings, blended by its alpha. The
+ * colours are premultiplied by it.
+ */
+#define LD_FRAME_ALPHA_BLEND 1u
+
 //! Angles in radians, as XrFovf: left and down are negative.
 struct ld_fov
 {
@@ -133,6 +142,8 @@ struct ld_hello
 	//! Hz.
 	float refresh_rate;
 	float refresh_rates[LD_MAX_REFRESH_RATES];
+	//! LD_HELLO_* bits.
+	uint32_t flags;
 };
 
 /*!
@@ -292,6 +303,9 @@ struct ld_frame
 	uint64_t number;
 	//! The display time it was rendered for.
 	int64_t display_time_ns;
+	//! LD_FRAME_* bits.
+	uint32_t flags;
+	uint32_t reserved;
 	//! Each view's pose and field of view it was rendered with.
 	struct ld_view views[LD_MAX_VIEWS];
 };
@@ -306,12 +320,12 @@ struct ld_release
 	uint32_t buffer;
 };
 
-static_assert(sizeof(struct ld_hello) == 100, "ld_hello layout");
+static_assert(sizeof(struct ld_hello) == 104, "ld_hello layout");
 static_assert(sizeof(struct ld_immersive) == 100, "ld_immersive layout");
 static_assert(sizeof(struct ld_session) == 8, "ld_session layout");
 static_assert(sizeof(struct ld_pose_sample) == 64, "ld_pose_sample layout");
 static_assert(sizeof(struct ld_tracking) == 376, "ld_tracking layout");
-static_assert(sizeof(struct ld_frame) == 112, "ld_frame layout");
+static_assert(sizeof(struct ld_frame) == 120, "ld_frame layout");
 static_assert(sizeof(struct ld_release) == 8, "ld_release layout");
 static_assert(sizeof(struct ld_controller) == 152, "ld_controller layout");
 static_assert(sizeof(struct ld_controllers) == 320, "ld_controllers layout");
