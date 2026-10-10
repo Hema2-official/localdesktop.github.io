@@ -154,6 +154,17 @@ impl Config {
             .get_or_insert(target_sdk_version);
         manifest.sdk.min_sdk_version.get_or_insert(min_sdk_version);
 
+        // A task affinity of ".name" belongs to this package, as ".ClassName" does for a name:
+        // builds under other package names (dev, forks) keep their tasks apart.
+        let package = manifest.package.clone().unwrap_or_default();
+        for activity in &mut manifest.application.activities {
+            if let Some(affinity) = activity.task_affinity.as_mut() {
+                if affinity.starts_with('.') {
+                    *affinity = format!("{package}{affinity}");
+                }
+            }
+        }
+
         let application = &mut manifest.application;
         application
             .label

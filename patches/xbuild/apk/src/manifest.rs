@@ -32,6 +32,8 @@ pub struct AndroidManifest {
     #[serde(default)]
     pub uses_permission: Vec<Permission>,
     #[serde(default)]
+    pub queries: Option<Queries>,
+    #[serde(default)]
     pub application: Application,
 }
 
@@ -45,6 +47,7 @@ impl Default for AndroidManifest {
             sdk: Default::default(),
             uses_feature: Default::default(),
             uses_permission: Default::default(),
+            queries: Default::default(),
             application: Default::default(),
             compile_sdk_version: Default::default(),
             compile_sdk_version_codename: Default::default(),
@@ -113,6 +116,9 @@ pub struct Activity {
     pub exported: Option<bool>,
     #[serde(rename(serialize = "android:hardwareAccelerated"))]
     pub hardware_accelerated: Option<bool>,
+    /// Which task the activity joins; `.name` is relative to the package.
+    #[serde(rename(serialize = "android:taskAffinity"))]
+    pub task_affinity: Option<String>,
     #[serde(rename(serialize = "meta-data"))]
     #[serde(default)]
     pub meta_data: Vec<MetaData>,
@@ -207,6 +213,37 @@ where
         })?;
     }
     seq.end()
+}
+
+/// Android [queries element](https://developer.android.com/guide/topics/manifest/queries-element):
+/// the other apps' components this one talks to, which Android 11+ hides otherwise.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Queries {
+    #[serde(rename(serialize = "provider"))]
+    #[serde(default)]
+    pub providers: Vec<QueriesProvider>,
+    #[serde(rename(serialize = "intent"))]
+    #[serde(default)]
+    pub intents: Vec<QueriesIntent>,
+}
+
+/// A content provider, by authority, in a [`Queries`] element.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueriesProvider {
+    #[serde(rename(serialize = "android:authorities"))]
+    pub authorities: String,
+}
+
+/// Components that handle these actions, in a [`Queries`] element.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueriesIntent {
+    #[serde(serialize_with = "serialize_actions")]
+    #[serde(rename(serialize = "action"))]
+    #[serde(default)]
+    pub actions: Vec<String>,
 }
 
 /// Android [intent filter data element](https://developer.android.com/guide/topics/manifest/data-element).

@@ -387,6 +387,17 @@ pub mod apk {
             .get_or_insert(target_sdk_version);
         manifest.sdk.min_sdk_version.get_or_insert(min_sdk_version);
 
+        // A task affinity of ".name" belongs to this package, as ".ClassName" does for a name:
+        // builds under other package names (dev, forks) keep their tasks apart.
+        let package = manifest.package.clone().unwrap_or_default();
+        for activity in &mut manifest.application.activities {
+            if let Some(affinity) = activity.task_affinity.as_mut() {
+                if affinity.starts_with('.') {
+                    *affinity = format!("{package}{affinity}");
+                }
+            }
+        }
+
         let has_android_code = !manifest.application.services.is_empty() || dex_path.exists();
         let app = &mut manifest.application;
         if app.label.is_none() {
@@ -1108,6 +1119,8 @@ pub mod apk {
             #[serde(default)]
             pub uses_permission: Vec<Permission>,
             #[serde(default)]
+            pub queries: Option<Queries>,
+            #[serde(default)]
             pub application: Application,
         }
 
@@ -1121,6 +1134,7 @@ pub mod apk {
                     sdk: Default::default(),
                     uses_feature: Default::default(),
                     uses_permission: Default::default(),
+                    queries: Default::default(),
                     application: Default::default(),
                     compile_sdk_version: Default::default(),
                     compile_sdk_version_codename: Default::default(),
@@ -1189,6 +1203,9 @@ pub mod apk {
             pub exported: Option<bool>,
             #[serde(rename(serialize = "android:hardwareAccelerated"))]
             pub hardware_accelerated: Option<bool>,
+            /// Which task the activity joins; `.name` is relative to the package.
+            #[serde(rename(serialize = "android:taskAffinity"))]
+            pub task_affinity: Option<String>,
             #[serde(rename(serialize = "meta-data"))]
             #[serde(default)]
             pub meta_data: Vec<MetaData>,
@@ -1283,6 +1300,37 @@ pub mod apk {
                 })?;
             }
             seq.end()
+        }
+
+        /// Android [queries element](https://developer.android.com/guide/topics/manifest/queries-element):
+        /// the other apps' components this one talks to, which Android 11+ hides otherwise.
+        #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct Queries {
+            #[serde(rename(serialize = "provider"))]
+            #[serde(default)]
+            pub providers: Vec<QueriesProvider>,
+            #[serde(rename(serialize = "intent"))]
+            #[serde(default)]
+            pub intents: Vec<QueriesIntent>,
+        }
+
+        /// A content provider, by authority, in a [`Queries`] element.
+        #[derive(Clone, Debug, Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct QueriesProvider {
+            #[serde(rename(serialize = "android:authorities"))]
+            pub authorities: String,
+        }
+
+        /// Components that handle these actions, in a [`Queries`] element.
+        #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct QueriesIntent {
+            #[serde(serialize_with = "serialize_actions")]
+            #[serde(rename(serialize = "action"))]
+            #[serde(default)]
+            pub actions: Vec<String>,
         }
 
         /// Android [intent filter data element](https://developer.android.com/guide/topics/manifest/data-element).
