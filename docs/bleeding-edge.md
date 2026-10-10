@@ -12,7 +12,7 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
   files with far fewer stops. Package installs and Node.js tools run about twice as fast as in
   the official app, the desktop starts three times as fast, and the file quirks that broke
   `git`, `pnpm`, `makepkg`, KWin and others are fixed.
-- **One clipboard** for Android and the desktop (`[clipboard] sync`).
+- **One clipboard** for Android and the desktop (`[clipboard] sync`): text and images, both ways.
 - **A normal user**, named on the first start (or later in `[user] username`), with `sudo`.
 - **An SSH server** (`[ssh]`), a terminal and a "restart the desktop" button in the app's
   notification, so a broken desktop doesn't lock you out. Restart and Quit log the desktop out
