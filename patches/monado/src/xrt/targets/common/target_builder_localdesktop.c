@@ -39,6 +39,8 @@ localdesktop_estimate_system(struct xrt_builder *xb,
 	// The app listens while it's in immersive mode.
 	if (ld_link_available()) {
 		estimate->certain.head = true;
+		estimate->certain.left = true;
+		estimate->certain.right = true;
 	}
 	return XRT_SUCCESS;
 }
@@ -59,8 +61,22 @@ localdesktop_open_system_impl(struct xrt_builder *xb,
 	}
 
 	struct xrt_device *head = ld_hmd_create(link);
+	struct xrt_device *left = ld_controller_create(link, 0, head);
+	struct xrt_device *right = ld_controller_create(link, 1, head);
+	struct xrt_device *left_hand = ld_hand_create(link, 0, head);
+	struct xrt_device *right_hand = ld_hand_create(link, 1, head);
+	ld_link_reference(&link, NULL);
+
 	xsysd->static_xdevs[xsysd->static_xdev_count++] = head;
+	xsysd->static_xdevs[xsysd->static_xdev_count++] = left;
+	xsysd->static_xdevs[xsysd->static_xdev_count++] = right;
+	xsysd->static_xdevs[xsysd->static_xdev_count++] = left_hand;
+	xsysd->static_xdevs[xsysd->static_xdev_count++] = right_hand;
 	tbrh->head = head;
+	tbrh->left = left;
+	tbrh->right = right;
+	tbrh->hand_tracking.unobstructed.left = left_hand;
+	tbrh->hand_tracking.unobstructed.right = right_hand;
 
 	/*
 	 * The headset's compositor does the lens correction, so apps render at the size it

@@ -4,10 +4,13 @@
 //!
 //! The session shows the frames Monado in Linux renders into buffers it lends it (`frames`),
 //! each with the poses it was rendered for, and a slowly pulsing colour while there are none.
-//! Monado gets the head's tracking from it every display frame. The guest link enters immersive
-//! mode when Monado asks for it, and hands it the buffers (`guest::xr`).
+//! Monado gets the head's tracking and the controllers' state from it every display frame
+//! (`controllers`). The guest link enters immersive mode when Monado asks for it, and hands it the
+//! buffers (`guest::xr`).
 
+mod controllers;
 mod frames;
+mod hands;
 pub mod protocol;
 
 use crate::android::guest;
@@ -68,11 +71,12 @@ pub extern "system" fn Java_app_polarbear_XrActivity_nativeStart(
             return;
         }
     };
+    // Before the panel's window goes, so the desktop's sound stays (`PolarBearApp::detach`).
+    guest::xr::set_immersive(true);
     let stop = Arc::new(AtomicBool::new(false));
     let spawned = thread::Builder::new().name("openxr".into()).spawn({
         let stop = stop.clone();
         move || {
-            guest::xr::set_immersive(true);
             if let Err(error) = run(&vm, &activity, &stop) {
                 log::error!("Immersive mode failed: {error:#}");
             }
@@ -81,7 +85,10 @@ pub extern "system" fn Java_app_polarbear_XrActivity_nativeStart(
     });
     match spawned {
         Ok(thread) => *SESSION.lock().unwrap() = Some(Session { stop, thread }),
-        Err(error) => log::error!("Immersive mode: no thread for the session: {error}"),
+        Err(error) => {
+            log::error!("Immersive mode: no thread for the session: {error}");
+            guest::xr::set_immersive(false);
+        }
     }
 }
 
@@ -134,6 +141,8 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     enabled.khr_opengl_es_enable = true;
     enabled.khr_convert_timespec_time = available.khr_convert_timespec_time;
     enabled.fb_display_refresh_rate = available.fb_display_refresh_rate;
+    enabled.ext_performance_settings = available.ext_performance_settings;
+    enabled.ext_hand_tracking = available.ext_hand_tracking;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Local Desktop",
@@ -189,6 +198,16 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     };
     let space = session.create_reference_space(space_type, xr::Posef::IDENTITY)?;
     let head = session.create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)?;
+    let controllers = controllers::Controllers::new(&instance, &session)
+        .map_err(|error| log::warn!("Immersive mode: no controllers: {error:#}"))
+        .ok();
+    let hands = if available.ext_hand_tracking && instance.supports_hand_tracking(system)? {
+        hands::Hands::new(&session)
+            .map_err(|error| log::warn!("Immersive mode: no hand tracking: {error:#}"))
+            .ok()
+    } else {
+        None
+    };
     let formats = session.enumerate_swapchain_formats()?;
     let format = [GL_SRGB8_ALPHA8, GL_RGBA8]
         .into_iter()
@@ -255,6 +274,7 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                         xr::SessionState::READY => {
                             session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
                             running = true;
+                            sustain_performance(&instance, &session);
                         }
                         xr::SessionState::STOPPING => {
                             session.end()?;
@@ -318,7 +338,32 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                 &eye_views,
             )?;
             transport.send_tracking(&tracking);
+            if let Some(controllers) = &controllers {
+                match controllers.read(&session, &space, display_time, &clock) {
+                    Ok(hands) => {
+                        transport.send_controllers(clock.to_monotonic_ns(display_time), &hands)
+                    }
+                    Err(error) => log::warn!("Immersive mode: the controllers: {error:#}"),
+                }
+            }
+            if let Some(hands) = &hands {
+                let time_ns = clock.to_monotonic_ns(display_time);
+                match hands.message(&space, display_time, time_ns) {
+                    Ok(message) => transport.send_hands(&message),
+                    Err(error) => log::warn!("Immersive mode: the hands: {error:#}"),
+                }
+            }
             update = transport.update();
+            if let Some(rate) = transport.take_refresh_rate_request() {
+                request_refresh_rate(&instance, &session, rate);
+            }
+            for haptic in transport.take_haptics() {
+                if let Some(controllers) = &controllers {
+                    if let Err(error) = controllers.vibrate(&session, &haptic) {
+                        log::warn!("Immersive mode: haptics: {error:#}");
+                    }
+                }
+            }
         }
         match (update, transport.as_mut()) {
             (frames::Update::Frame(frame), Some(transport)) => {
@@ -498,13 +543,11 @@ fn tracking(
     for index in 0..protocol::MAX_HEAD_SAMPLES as i64 {
         let time = xr::Time::from_nanos(display_time.as_nanos() + index * period.as_nanos());
         let (location, velocity) = head.relate(space, time)?;
-        samples.push(frames::HeadSample {
-            time_ns: clock.to_monotonic_ns(time),
-            pose: location.pose,
-            linear_velocity: velocity.linear_velocity,
-            angular_velocity: velocity.angular_velocity,
-            flags: relation_flags(location.location_flags, velocity.velocity_flags),
-        });
+        samples.push(protocol::PoseSample::new(
+            clock.to_monotonic_ns(time),
+            location,
+            velocity,
+        ));
     }
     Ok(frames::Tracking {
         display_time_ns: clock.to_monotonic_ns(display_time),
@@ -521,20 +564,40 @@ fn tracking(
     })
 }
 
-/// Monado's `xrt_space_relation_flags` for what OpenXR says of a location and its velocity.
-fn relation_flags(location: xr::SpaceLocationFlags, velocity: xr::SpaceVelocityFlags) -> u32 {
-    [
-        location.contains(xr::SpaceLocationFlags::ORIENTATION_VALID),
-        location.contains(xr::SpaceLocationFlags::POSITION_VALID),
-        velocity.contains(xr::SpaceVelocityFlags::LINEAR_VALID),
-        velocity.contains(xr::SpaceVelocityFlags::ANGULAR_VALID),
-        location.contains(xr::SpaceLocationFlags::ORIENTATION_TRACKED),
-        location.contains(xr::SpaceLocationFlags::POSITION_TRACKED),
-    ]
-    .iter()
-    .enumerate()
-    .filter(|(_, set)| **set)
-    .fold(0, |flags, (bit, _)| flags | 1 << bit)
+/// Ask the runtime for clocks that sustain Linux's apps: they render in other processes, and
+/// through proot.
+fn sustain_performance(instance: &xr::Instance, session: &xr::Session<xr::OpenGlEs>) {
+    let Some(performance) = instance.exts().ext_performance_settings else {
+        return;
+    };
+    for domain in [
+        xr::sys::PerfSettingsDomainEXT::CPU,
+        xr::sys::PerfSettingsDomainEXT::GPU,
+    ] {
+        let result = unsafe {
+            (performance.perf_settings_set_performance_level)(
+                session.as_raw(),
+                domain,
+                xr::sys::PerfSettingsLevelEXT::SUSTAINED_HIGH,
+            )
+        };
+        if result != xr::sys::Result::SUCCESS {
+            log::warn!("Immersive mode: performance level for {domain:?}: {result:?}");
+        }
+    }
+}
+
+/// Switch the display to the refresh rate Monado asked for.
+fn request_refresh_rate(instance: &xr::Instance, session: &xr::Session<xr::OpenGlEs>, rate: f32) {
+    let Some(fb) = instance.exts().fb_display_refresh_rate else {
+        return;
+    };
+    let result = unsafe { (fb.request_display_refresh_rate)(session.as_raw(), rate) };
+    if result == xr::sys::Result::SUCCESS {
+        log::info!("Immersive mode: {rate:.0} Hz");
+    } else {
+        log::warn!("Immersive mode: no {rate:.0} Hz: {result:?}");
+    }
 }
 
 /// The display's refresh rate and those it can switch to, where the runtime says.

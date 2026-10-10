@@ -11,7 +11,9 @@
  * (another SOCK_SEQPACKET socket) and the buffers frames go into, as dma-bufs (linear layout, all
  * views side by side). On the channel the app sends the head's tracking every display frame, and
  * the driver sends each frame with the poses it was rendered for, so the headset's compositor can
- * reproject it to where the head is when it's shown. The channel closes when immersive mode ends.
+ * reproject it to where the head is when it's shown. The controllers' state and the hands'
+ * joints come every display frame too, and haptic pulses and refresh rate requests go back. The channel closes when
+ * immersive mode ends.
  *
  * Messages are little-endian structs, of a fixed size per type, without padding; descriptors
  * travel as SCM_RIGHTS. Times are CLOCK_MONOTONIC nanoseconds. Poses are in the app's stage space
@@ -29,12 +31,14 @@
 
 #define LD_SOCKET_PATH "/tmp/localdesktop-xr.sock"
 #define LD_PROTOCOL_MAGIC 0x52584c44u // "LDXR"
-#define LD_PROTOCOL_VERSION 3u
+#define LD_PROTOCOL_VERSION 4u
 
 #define LD_MAX_BUFFERS 8
 #define LD_MAX_VIEWS 2
 #define LD_MAX_REFRESH_RATES 8
 #define LD_MAX_HEAD_SAMPLES 4
+//! As XR_EXT_hand_tracking has them, in its order.
+#define LD_HAND_JOINTS 26
 
 //! DRM_FORMAT_ABGR8888: bytes R, G, B, A. The values are sRGB-encoded.
 #define LD_DRM_FORMAT_ABGR8888 0x34324241u
@@ -51,7 +55,38 @@ enum ld_message_type
 	LD_MESSAGE_IMMERSIVE = 4,
 	//! Control, Linux → app: @ref ld_session.
 	LD_MESSAGE_SESSION = 5,
+	//! Channel, app → Linux: @ref ld_controllers.
+	LD_MESSAGE_CONTROLLERS = 6,
+	//! Channel, Linux → app: @ref ld_haptic.
+	LD_MESSAGE_HAPTIC = 7,
+	//! Channel, Linux → app: @ref ld_refresh_rate.
+	LD_MESSAGE_REFRESH_RATE = 8,
+	//! Channel, app → Linux: @ref ld_hands.
+	LD_MESSAGE_HANDS = 9,
 };
+
+//! A controller's buttons and touches, in @ref ld_controller::buttons.
+enum ld_button
+{
+	//! A on the right controller, X on the left.
+	LD_BUTTON_LOWER_CLICK = 1u << 0u,
+	LD_BUTTON_LOWER_TOUCH = 1u << 1u,
+	//! B on the right controller, Y on the left.
+	LD_BUTTON_UPPER_CLICK = 1u << 2u,
+	LD_BUTTON_UPPER_TOUCH = 1u << 3u,
+	//! The left controller's menu button.
+	LD_BUTTON_MENU_CLICK = 1u << 4u,
+	LD_BUTTON_TRIGGER_TOUCH = 1u << 5u,
+	LD_BUTTON_THUMBSTICK_CLICK = 1u << 6u,
+	LD_BUTTON_THUMBSTICK_TOUCH = 1u << 7u,
+	LD_BUTTON_THUMBREST_TOUCH = 1u << 8u,
+};
+
+//! In @ref ld_controller::flags: the runtime has the controller (in a hand, or at least on).
+#define LD_CONTROLLER_ACTIVE 1u
+
+//! In @ref ld_hand::flags: the runtime tracks the hand.
+#define LD_HAND_ACTIVE 1u
 
 //! Angles in radians, as XrFovf: left and down are negative.
 struct ld_fov
@@ -124,8 +159,8 @@ struct ld_session
 	uint32_t running;
 };
 
-//! A head pose the headset's runtime predicted for a time.
-struct ld_head_sample
+//! A pose the headset's runtime predicted for a time, with its velocities.
+struct ld_pose_sample
 {
 	int64_t time_ns;
 	struct ld_pose pose;
@@ -152,7 +187,80 @@ struct ld_tracking
 	int64_t latch_time_ns;
 	//! Each view's pose relative to the head.
 	struct ld_view views[LD_MAX_VIEWS];
-	struct ld_head_sample head[LD_MAX_HEAD_SAMPLES];
+	struct ld_pose_sample head[LD_MAX_HEAD_SAMPLES];
+};
+
+struct ld_controller
+{
+	uint32_t flags;
+	uint32_t buttons;
+	//! 0 to 1.
+	float trigger, squeeze;
+	//! -1 to 1, right and up.
+	float thumbstick[2];
+	struct ld_pose_sample grip, aim;
+};
+
+/*!
+ * Channel, app → Linux, every display frame: the controllers' state, and their poses predicted for
+ * the frame's display time.
+ */
+struct ld_controllers
+{
+	uint32_t type;
+	uint32_t reserved;
+	//! When the state was read.
+	int64_t time_ns;
+	//! Left, right.
+	struct ld_controller hands[2];
+};
+
+//! Channel, Linux → app: vibrate a controller, or stop it (amplitude 0).
+struct ld_haptic
+{
+	uint32_t type;
+	//! 0 left, 1 right.
+	uint32_t hand;
+	//! -1 for the shortest the runtime makes.
+	int64_t duration_ns;
+	//! Hz, 0 for the runtime's choice.
+	float frequency;
+	//! 0 to 1.
+	float amplitude;
+};
+
+struct ld_joint
+{
+	struct ld_pose pose;
+	//! Metres.
+	float radius;
+	//! enum xrt_space_relation_flags bits.
+	uint32_t flags;
+};
+
+struct ld_hand
+{
+	uint32_t flags;
+	uint32_t reserved;
+	struct ld_joint joints[LD_HAND_JOINTS];
+};
+
+//! Channel, app → Linux, every display frame: the hands' joints at the frame's display time.
+struct ld_hands
+{
+	uint32_t type;
+	uint32_t reserved;
+	int64_t time_ns;
+	//! Left, right.
+	struct ld_hand hands[2];
+};
+
+//! Channel, Linux → app: switch the display to one of its refresh rates.
+struct ld_refresh_rate
+{
+	uint32_t type;
+	//! Hz.
+	float rate;
 };
 
 /*!
@@ -183,7 +291,13 @@ struct ld_release
 static_assert(sizeof(struct ld_hello) == 100, "ld_hello layout");
 static_assert(sizeof(struct ld_immersive) == 100, "ld_immersive layout");
 static_assert(sizeof(struct ld_session) == 8, "ld_session layout");
-static_assert(sizeof(struct ld_head_sample) == 64, "ld_head_sample layout");
+static_assert(sizeof(struct ld_pose_sample) == 64, "ld_pose_sample layout");
 static_assert(sizeof(struct ld_tracking) == 376, "ld_tracking layout");
 static_assert(sizeof(struct ld_frame) == 112, "ld_frame layout");
 static_assert(sizeof(struct ld_release) == 8, "ld_release layout");
+static_assert(sizeof(struct ld_controller) == 152, "ld_controller layout");
+static_assert(sizeof(struct ld_controllers) == 320, "ld_controllers layout");
+static_assert(sizeof(struct ld_haptic) == 24, "ld_haptic layout");
+static_assert(sizeof(struct ld_refresh_rate) == 8, "ld_refresh_rate layout");
+static_assert(sizeof(struct ld_joint) == 36, "ld_joint layout");
+static_assert(sizeof(struct ld_hands) == 1904, "ld_hands layout");

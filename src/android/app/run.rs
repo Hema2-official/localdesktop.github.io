@@ -222,8 +222,11 @@ impl PolarBearApp {
             backend.key_counter = 0;
             backend.reset_touch_state();
             backend.pointer_pressed = false;
-            // Kill the standalone-client PipeWire/AAudio backend if it was started.
-            pipewire_standalone_aaudio::shutdown();
+            // Kill the standalone-client PipeWire/AAudio backend if it was started, unless
+            // immersive mode took the window: its Linux apps play sound too.
+            if !guest::xr::immersive() {
+                pipewire_standalone_aaudio::shutdown();
+            }
         }
     }
 }

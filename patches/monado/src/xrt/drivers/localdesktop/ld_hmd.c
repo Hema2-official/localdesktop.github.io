@@ -38,7 +38,7 @@ ld_hmd_destroy(struct xrt_device *xdev)
 {
 	struct ld_hmd *hmd = ld_hmd(xdev);
 
-	ld_link_destroy(&hmd->link);
+	ld_link_reference(&hmd->link, NULL);
 	u_device_free(&hmd->base);
 }
 
@@ -91,7 +91,7 @@ ld_hmd_create(struct ld_link *link)
 	enum u_device_alloc_flags flags =
 	    (enum u_device_alloc_flags)(U_DEVICE_ALLOC_HMD | U_DEVICE_ALLOC_TRACKING_NONE);
 	struct ld_hmd *hmd = U_DEVICE_ALLOCATE(struct ld_hmd, flags, 1, 0);
-	hmd->link = link;
+	ld_link_reference(&hmd->link, link);
 
 	u_device_populate_function_pointers(&hmd->base, ld_hmd_get_tracked_pose, ld_hmd_destroy);
 	hmd->base.get_view_poses = ld_hmd_get_view_poses;

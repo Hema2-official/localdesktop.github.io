@@ -3,6 +3,8 @@
 /*!
  * @file
  * @brief  The connection to Local Desktop: the headset, immersive mode, tracking and frames.
+ *
+ * The headset and both controllers share it, each with a reference.
  * @ingroup drv_localdesktop
  */
 
@@ -49,11 +51,13 @@ DEBUG_GET_ONCE_LOG_OPTION(ld_log, "LOCALDESKTOP_LOG", U_LOGGING_INFO)
 #define STALE_TRACKING_NS (500 * (int64_t)U_TIME_1MS_IN_NS)
 
 //! Room for the largest message the app sends, and then some.
-#define MAX_MESSAGE_SIZE 512
+#define MAX_MESSAGE_SIZE 2048
 
 
 struct ld_link
 {
+	struct xrt_reference reference;
+
 	//! The control connection.
 	int control;
 	struct ld_hello hello;
@@ -79,6 +83,10 @@ struct ld_link
 
 	bool has_tracking;
 	struct ld_tracking tracking;
+	bool has_controllers;
+	struct ld_controllers controllers;
+	bool has_hands;
+	struct ld_hands hands;
 
 	//! The app holds it: sent in a frame and not released yet.
 	bool lent[LD_MAX_BUFFERS];
@@ -208,7 +216,7 @@ fov_to(const struct xrt_fov *fov)
 }
 
 static struct xrt_space_relation
-relation_from(const struct ld_head_sample *sample)
+relation_from(const struct ld_pose_sample *sample)
 {
 	return (struct xrt_space_relation){
 	    .relation_flags = (enum xrt_space_relation_flags)sample->flags,
@@ -403,6 +411,8 @@ read_channel(struct ld_link *link, int channel)
 	union {
 		uint32_t type;
 		struct ld_tracking tracking;
+		struct ld_controllers controllers;
+		struct ld_hands hands;
 		struct ld_release release;
 		uint8_t bytes[MAX_MESSAGE_SIZE];
 	} message;
@@ -425,6 +435,16 @@ read_channel(struct ld_link *link, int channel)
 		pthread_mutex_lock(&link->mutex);
 		link->tracking = message.tracking;
 		link->has_tracking = true;
+		pthread_mutex_unlock(&link->mutex);
+	} else if (size == sizeof(message.controllers) && message.type == LD_MESSAGE_CONTROLLERS) {
+		pthread_mutex_lock(&link->mutex);
+		link->controllers = message.controllers;
+		link->has_controllers = true;
+		pthread_mutex_unlock(&link->mutex);
+	} else if (size == sizeof(message.hands) && message.type == LD_MESSAGE_HANDS) {
+		pthread_mutex_lock(&link->mutex);
+		link->hands = message.hands;
+		link->has_hands = true;
 		pthread_mutex_unlock(&link->mutex);
 	} else if (size == sizeof(message.release) && message.type == LD_MESSAGE_RELEASE &&
 	           message.release.buffer < LD_MAX_BUFFERS) {
@@ -507,6 +527,7 @@ ld_link_create(void)
 	}
 
 	struct ld_link *link = U_TYPED_CALLOC(struct ld_link);
+	link->reference.count = 1;
 	link->control = fd;
 	link->channel = -1;
 	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
@@ -558,14 +579,9 @@ error:
 	return NULL;
 }
 
-void
-ld_link_destroy(struct ld_link **link_ptr)
+static void
+destroy(struct ld_link *link)
 {
-	struct ld_link *link = *link_ptr;
-	if (link == NULL) {
-		return;
-	}
-
 	// Ends the reader's wait.
 	shutdown(link->control, SHUT_RDWR);
 	pthread_join(link->thread, NULL);
@@ -577,7 +593,22 @@ ld_link_destroy(struct ld_link **link_ptr)
 	pthread_mutex_destroy(&link->mutex);
 
 	free(link);
-	*link_ptr = NULL;
+}
+
+void
+ld_link_reference(struct ld_link **dst, struct ld_link *src)
+{
+	struct ld_link *old = *dst;
+	if (old == src) {
+		return;
+	}
+	if (src != NULL) {
+		xrt_reference_inc(&src->reference);
+	}
+	*dst = src;
+	if (old != NULL && xrt_reference_dec_and_is_zero(&old->reference)) {
+		destroy(old);
+	}
 }
 
 const struct ld_hello *
@@ -636,7 +667,7 @@ ld_link_set_session_running(struct ld_link *link, bool running)
 void
 ld_link_get_head(struct ld_link *link, int64_t at_timestamp_ns, struct xrt_space_relation *out_relation)
 {
-	struct ld_head_sample samples[LD_MAX_HEAD_SAMPLES];
+	struct ld_pose_sample samples[LD_MAX_HEAD_SAMPLES];
 	uint32_t count = 0;
 
 	pthread_mutex_lock(&link->mutex);
@@ -659,26 +690,20 @@ ld_link_get_head(struct ld_link *link, int64_t at_timestamp_ns, struct xrt_space
 		return;
 	}
 
-	// Between two samples, interpolate; outside them, predict from the nearest, but not far.
+	// Between two samples, interpolate; outside them, predict from the nearest.
 	uint32_t i = 0;
 	while (i + 1 < count && samples[i + 1].time_ns <= at_timestamp_ns) {
 		i++;
 	}
-	struct xrt_space_relation relation = relation_from(&samples[i]);
 	if (i + 1 < count && at_timestamp_ns > samples[i].time_ns) {
+		struct xrt_space_relation relation = relation_from(&samples[i]);
 		struct xrt_space_relation next = relation_from(&samples[i + 1]);
 		float t = (float)(at_timestamp_ns - samples[i].time_ns) /
 		          (float)(samples[i + 1].time_ns - samples[i].time_ns);
 		enum xrt_space_relation_flags flags = relation.relation_flags & next.relation_flags;
 		m_space_relation_interpolate(&relation, &next, t, flags, out_relation);
 	} else {
-		int64_t delta_ns = at_timestamp_ns - samples[i].time_ns;
-		if (delta_ns > MAX_PREDICTION_NS) {
-			delta_ns = MAX_PREDICTION_NS;
-		} else if (delta_ns < -MAX_PREDICTION_NS) {
-			delta_ns = -MAX_PREDICTION_NS;
-		}
-		m_predict_relation(&relation, time_ns_to_s(delta_ns), out_relation);
+		ld_pose_sample_predict(&samples[i], at_timestamp_ns, out_relation);
 	}
 
 	// The app stopped sending (immersive mode ended, say): this is only the last known pose.
@@ -686,6 +711,88 @@ ld_link_get_head(struct ld_link *link, int64_t at_timestamp_ns, struct xrt_space
 		out_relation->relation_flags &= ~(XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
 		                                  XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
 	}
+}
+
+void
+ld_pose_sample_predict(const struct ld_pose_sample *sample,
+                       int64_t at_timestamp_ns,
+                       struct xrt_space_relation *out_relation)
+{
+	struct xrt_space_relation relation = relation_from(sample);
+	int64_t delta_ns = at_timestamp_ns - sample->time_ns;
+	if (delta_ns > MAX_PREDICTION_NS) {
+		delta_ns = MAX_PREDICTION_NS;
+	} else if (delta_ns < -MAX_PREDICTION_NS) {
+		delta_ns = -MAX_PREDICTION_NS;
+	}
+	m_predict_relation(&relation, time_ns_to_s(delta_ns), out_relation);
+
+	if (os_monotonic_get_ns() - sample->time_ns > STALE_TRACKING_NS) {
+		out_relation->relation_flags &= ~(XRT_SPACE_RELATION_ORIENTATION_TRACKED_BIT |
+		                                  XRT_SPACE_RELATION_POSITION_TRACKED_BIT);
+	}
+}
+
+bool
+ld_link_get_controller(struct ld_link *link, uint32_t hand, struct ld_controller *out_controller,
+                       int64_t *out_time_ns)
+{
+	pthread_mutex_lock(&link->mutex);
+	bool has_controller = link->has_controllers && hand < 2;
+	if (has_controller) {
+		*out_controller = link->controllers.hands[hand];
+		*out_time_ns = link->controllers.time_ns;
+	}
+	pthread_mutex_unlock(&link->mutex);
+	return has_controller;
+}
+
+bool
+ld_link_get_hand(struct ld_link *link, uint32_t hand, struct ld_hand *out_hand, int64_t *out_time_ns)
+{
+	pthread_mutex_lock(&link->mutex);
+	bool has_hand = link->has_hands && hand < 2;
+	if (has_hand) {
+		*out_hand = link->hands.hands[hand];
+		*out_time_ns = link->hands.time_ns;
+	}
+	pthread_mutex_unlock(&link->mutex);
+	return has_hand;
+}
+
+bool
+ld_link_request_refresh_rate(struct ld_link *link, float rate)
+{
+	struct ld_refresh_rate request = {.type = LD_MESSAGE_REFRESH_RATE, .rate = rate};
+
+	// Under the lock, so that the reader can't close the channel meanwhile.
+	pthread_mutex_lock(&link->mutex);
+	bool sent = link->channel >= 0 && send_message(link->channel, &request, sizeof(request), -1);
+	pthread_mutex_unlock(&link->mutex);
+
+	if (sent) {
+		LD_INFO("Asking for %.1f Hz", rate);
+	}
+	return sent;
+}
+
+void
+ld_link_send_haptic(struct ld_link *link, uint32_t hand, int64_t duration_ns, float frequency, float amplitude)
+{
+	struct ld_haptic haptic = {
+	    .type = LD_MESSAGE_HAPTIC,
+	    .hand = hand,
+	    .duration_ns = duration_ns,
+	    .frequency = frequency,
+	    .amplitude = amplitude,
+	};
+
+	// Under the lock, so that the reader can't close the channel meanwhile.
+	pthread_mutex_lock(&link->mutex);
+	if (link->channel >= 0 && !send_message(link->channel, &haptic, sizeof(haptic), -1)) {
+		LD_DEBUG("A haptic pulse went nowhere: %s", strerror(errno));
+	}
+	pthread_mutex_unlock(&link->mutex);
 }
 
 void

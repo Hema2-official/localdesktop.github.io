@@ -616,6 +616,18 @@ target_get_current_refresh_rate(struct comp_target *ct, float *out_display_refre
 	return XRT_SUCCESS;
 }
 
+static xrt_result_t
+target_request_refresh_rate(struct comp_target *ct, float display_refresh_rate_hz)
+{
+	struct ld_target *ldt = ld_target(ct);
+
+	// The pacing follows the new period once the app's display frames come at it.
+	if (!ld_link_request_refresh_rate(ldt->link, display_refresh_rate_hz)) {
+		return XRT_ERROR_IPC_FAILURE;
+	}
+	return XRT_SUCCESS;
+}
+
 static VkResult
 target_queue_supports_present(struct comp_target *ct, struct vk_bundle_queue *queue, VkBool32 *out_supported)
 {
@@ -666,6 +678,7 @@ target_create(struct comp_compositor *c, struct ld_link *link)
 	ldt->base.set_session_running = target_set_session_running;
 	ldt->base.get_refresh_rates = target_get_refresh_rates;
 	ldt->base.get_current_refresh_rate = target_get_current_refresh_rate;
+	ldt->base.request_refresh_rate = target_request_refresh_rate;
 	ldt->base.queue_supports_present = target_queue_supports_present;
 	ldt->base.destroy = target_destroy;
 	ldt->base.c = c;

@@ -2,14 +2,15 @@
 //! so Android's GL can read them) and lends them to Monado in the guest as dma-bufs with a linear
 //! layout, the views side by side, together with a channel of their own (`protocol`): the guest
 //! link hands both over on its control connection. Every display frame the app sends the head's
-//! tracking on the channel; Monado sends each frame back with the poses it rendered it for, which
-//! the app submits it with, so the headset's compositor reprojects it.
+//! tracking and the controllers' state on the channel; Monado sends each frame back with the poses
+//! it rendered it for, which the app submits it with, so the headset's compositor reprojects it,
+//! and haptic pulses for the controllers.
 //!
 //! Linux may render into any buffer the app doesn't hold: the app holds a buffer from its frame
 //! message until its release. The channel closing on Monado's side (it quit) gives every buffer
 //! back, and the app offers a new channel for the next Monado.
 
-use super::protocol::{self, Message};
+use super::protocol::{self, Controller, Haptic, Message, PoseSample};
 use crate::android::guest;
 use anyhow::{bail, Context, Result};
 use openxr as xr;
@@ -90,17 +91,6 @@ pub struct View {
     pub fov: xr::Fovf,
 }
 
-/// The head's pose the runtime predicted for a time, in the stage space.
-pub struct HeadSample {
-    pub time_ns: i64,
-    pub pose: xr::Posef,
-    pub linear_velocity: xr::Vector3f,
-    /// In the stage space.
-    pub angular_velocity: xr::Vector3f,
-    /// Monado's `xrt_space_relation_flags`.
-    pub flags: u32,
-}
-
 /// What the app sends Linux every display frame. Times are CLOCK_MONOTONIC nanoseconds.
 pub struct Tracking {
     pub display_time_ns: i64,
@@ -110,7 +100,7 @@ pub struct Tracking {
     /// Relative to the head.
     pub view_poses: Vec<View>,
     /// In increasing time order.
-    pub head: Vec<HeadSample>,
+    pub head: Vec<PoseSample>,
 }
 
 /// A frame from Linux.
@@ -146,6 +136,10 @@ pub struct Frames {
     offer: u64,
     /// Monado has sent on the channel.
     heard: bool,
+    /// What Monado asked of the controllers' haptics since the last look.
+    haptics: Vec<Haptic>,
+    /// The refresh rate Monado asked for last, until the app takes it.
+    refresh_rate_request: Option<f32>,
 }
 
 impl Frames {
@@ -216,6 +210,8 @@ impl Frames {
                     channel: ours,
                     offer: 0,
                     heard: false,
+                    haptics: Vec::new(),
+                    refresh_rate_request: None,
                 };
                 frames.offer(theirs)?;
                 return Ok(frames);
@@ -310,6 +306,17 @@ impl Frames {
                         views,
                     });
                 }
+                Ok((protocol::HAPTIC_SIZE, _)) => {
+                    match Haptic::from_message(&message[..protocol::HAPTIC_SIZE]) {
+                        Some(haptic) => self.haptics.push(haptic),
+                        None => log::warn!("Immersive mode: an unknown message from Linux"),
+                    }
+                }
+                Ok((protocol::REFRESH_RATE_SIZE, _))
+                    if protocol::u32_at(&message, 0) == protocol::REFRESH_RATE =>
+                {
+                    self.refresh_rate_request = Some(protocol::f32_at(&message, 4));
+                }
                 Ok((length, _)) => log::warn!("Immersive mode: a {length}-byte message from Linux"),
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) => return self.disconnected(Some(error)),
@@ -383,21 +390,54 @@ impl Frames {
         }
         for index in 0..protocol::MAX_HEAD_SAMPLES {
             match tracking.head.get(index).filter(|_| index < samples) {
-                Some(sample) => {
-                    message.i64(sample.time_ns);
-                    message.pose(&sample.pose);
-                    message.vector(&sample.linear_velocity);
-                    message.vector(&sample.angular_velocity);
-                    message.u32(sample.flags);
-                }
+                Some(sample) => message.sample(sample),
                 None => message.zeros(64),
             }
         }
         debug_assert_eq!(message.0.len(), protocol::TRACKING_SIZE);
+        self.send(&message.0, "the tracking");
+    }
+
+    /// Tell Monado the controllers' state, read at `time_ns`.
+    pub fn send_controllers(&self, time_ns: i64, hands: &[Controller; 2]) {
+        let mut message = Message::default();
+        message.u32(protocol::CONTROLLERS);
+        message.u32(0);
+        message.i64(time_ns);
+        for hand in hands {
+            message.u32(hand.flags);
+            message.u32(hand.buttons);
+            message.f32(hand.trigger);
+            message.f32(hand.squeeze);
+            message.f32(hand.thumbstick.x);
+            message.f32(hand.thumbstick.y);
+            message.sample(&hand.grip);
+            message.sample(&hand.aim);
+        }
+        debug_assert_eq!(message.0.len(), protocol::CONTROLLERS_SIZE);
+        self.send(&message.0, "the controllers' state");
+    }
+
+    /// Tell Monado where the hands' joints are (a hands message).
+    pub fn send_hands(&self, message: &[u8]) {
+        self.send(message, "the hands");
+    }
+
+    /// What Monado asked of the controllers' haptics since the last look.
+    pub fn take_haptics(&mut self) -> Vec<Haptic> {
+        std::mem::take(&mut self.haptics)
+    }
+
+    /// The refresh rate Monado asked for since the last look, if it did.
+    pub fn take_refresh_rate_request(&mut self) -> Option<f32> {
+        self.refresh_rate_request.take()
+    }
+
+    fn send(&self, message: &[u8], what: &str) {
         // Nobody reads the channel until Monado has it.
-        if let Err(error) = protocol::send(&self.channel, &message.0, &[]) {
+        if let Err(error) = protocol::send(&self.channel, message, &[]) {
             if error.kind() != io::ErrorKind::WouldBlock {
-                log::warn!("Immersive mode: couldn't send the tracking: {error}");
+                log::warn!("Immersive mode: couldn't send {what}: {error}");
             }
         }
     }

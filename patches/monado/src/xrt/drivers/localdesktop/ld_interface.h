@@ -30,7 +30,7 @@ extern "C" {
 struct xrt_device;
 
 /*!
- * The connection to the app, owned by the HMD device.
+ * The connection to the app, which the headset and the controllers share.
  * @ingroup drv_localdesktop
  */
 struct ld_link;
@@ -63,17 +63,20 @@ bool
 ld_link_available(void);
 
 /*!
- * Connect to the app and take the headset's description; NULL if that fails.
+ * Connect to the app and take the headset's description; NULL if that fails. The caller has the
+ * first reference.
  * @ingroup drv_localdesktop
  */
 struct ld_link *
 ld_link_create(void);
 
 /*!
+ * Point @p dst at @p src, taking a reference to it and dropping the one to what @p dst had. The
+ * last reference closes the connection.
  * @ingroup drv_localdesktop
  */
 void
-ld_link_destroy(struct ld_link **link_ptr);
+ld_link_reference(struct ld_link **dst, struct ld_link *src);
 
 /*!
  * The app's description of the headset.
@@ -109,6 +112,46 @@ ld_link_set_session_running(struct ld_link *link, bool running);
  */
 void
 ld_link_get_head(struct ld_link *link, int64_t at_timestamp_ns, struct xrt_space_relation *out_relation);
+
+/*!
+ * A pose sample predicted to another time, not far.
+ * @ingroup drv_localdesktop
+ */
+void
+ld_pose_sample_predict(const struct ld_pose_sample *sample,
+                       int64_t at_timestamp_ns,
+                       struct xrt_space_relation *out_relation);
+
+/*!
+ * A controller's newest state (0 left, 1 right), and when it was read; false until the app sent
+ * one.
+ * @ingroup drv_localdesktop
+ */
+bool
+ld_link_get_controller(struct ld_link *link, uint32_t hand, struct ld_controller *out_controller,
+                       int64_t *out_time_ns);
+
+/*!
+ * A hand's newest joints (0 left, 1 right), and when they were read; false until the app sent
+ * them.
+ * @ingroup drv_localdesktop
+ */
+bool
+ld_link_get_hand(struct ld_link *link, uint32_t hand, struct ld_hand *out_hand, int64_t *out_time_ns);
+
+/*!
+ * Ask for one of the display's refresh rates; false while immersive mode is off.
+ * @ingroup drv_localdesktop
+ */
+bool
+ld_link_request_refresh_rate(struct ld_link *link, float rate);
+
+/*!
+ * Vibrate a controller, or stop it with amplitude 0.
+ * @ingroup drv_localdesktop
+ */
+void
+ld_link_send_haptic(struct ld_link *link, uint32_t hand, int64_t duration_ns, float frequency, float amplitude);
 
 /*!
  * The views' poses relative to the head.
@@ -153,11 +196,25 @@ ld_link_present(struct ld_link *link,
                 const struct xrt_fov *fovs);
 
 /*!
- * The HMD, which takes the link.
+ * The HMD, which takes a reference to the link.
  * @ingroup drv_localdesktop
  */
 struct xrt_device *
 ld_hmd_create(struct ld_link *link);
+
+/*!
+ * A controller (0 left, 1 right), which takes a reference to the link, tracked where @p head is.
+ * @ingroup drv_localdesktop
+ */
+struct xrt_device *
+ld_controller_create(struct ld_link *link, uint32_t hand, struct xrt_device *head);
+
+/*!
+ * A hand tracker (0 left, 1 right), which takes a reference to the link, tracked where @p head is.
+ * @ingroup drv_localdesktop
+ */
+struct xrt_device *
+ld_hand_create(struct ld_link *link, uint32_t hand, struct xrt_device *head);
 
 /*!
  * The link behind a device this driver made, NULL for any other device.

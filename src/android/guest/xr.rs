@@ -53,9 +53,14 @@ pub fn withdraw(id: u64) {
     }
 }
 
-/// Immersive mode's session started or ended.
+/// Immersive mode started or ended.
 pub fn set_immersive(on: bool) {
     IMMERSIVE.store(on, Ordering::Release);
+}
+
+/// Whether immersive mode is on: its activity has started, and not ended.
+pub fn immersive() -> bool {
+    IMMERSIVE.load(Ordering::Acquire)
 }
 
 /// The headset as immersive mode found it, for the next Monado.

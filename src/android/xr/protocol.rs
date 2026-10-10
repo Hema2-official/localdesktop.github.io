@@ -6,8 +6,8 @@
 //! Monado connects to the app's socket in the rootfs, the control connection: the app describes
 //! the headset (hello), Monado says when Linux apps run OpenXR sessions (session), and each time
 //! immersive mode starts, the app hands over a channel and the buffers frames go into
-//! (immersive). On the channel go tracking, frames and releases, until it closes with immersive
-//! mode.
+//! (immersive). On the channel go tracking, the controllers' state, the hands' joints, frames,
+//! releases, haptic pulses and refresh rate requests, until it closes with immersive mode.
 
 use openxr as xr;
 use std::ffi::c_void;
@@ -20,13 +20,34 @@ use std::ptr;
 pub const SOCKET: &str = "tmp/localdesktop-xr.sock";
 
 pub const MAGIC: u32 = 0x5258_4c44; // "LDXR"
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 pub const FRAME: u32 = 1;
 pub const RELEASE: u32 = 2;
 pub const TRACKING: u32 = 3;
 pub const IMMERSIVE: u32 = 4;
 pub const SESSION: u32 = 5;
+pub const CONTROLLERS: u32 = 6;
+pub const HAPTIC: u32 = 7;
+pub const REFRESH_RATE: u32 = 8;
+pub const HANDS: u32 = 9;
 pub const DRM_FORMAT_ABGR8888: u32 = 0x3432_4241;
+
+/// A controller's buttons and touches. Lower is A or X, upper B or Y; menu is the left one's.
+pub const BUTTON_LOWER_CLICK: u32 = 1 << 0;
+pub const BUTTON_LOWER_TOUCH: u32 = 1 << 1;
+pub const BUTTON_UPPER_CLICK: u32 = 1 << 2;
+pub const BUTTON_UPPER_TOUCH: u32 = 1 << 3;
+pub const BUTTON_MENU_CLICK: u32 = 1 << 4;
+pub const BUTTON_TRIGGER_TOUCH: u32 = 1 << 5;
+pub const BUTTON_THUMBSTICK_CLICK: u32 = 1 << 6;
+pub const BUTTON_THUMBSTICK_TOUCH: u32 = 1 << 7;
+pub const BUTTON_THUMBREST_TOUCH: u32 = 1 << 8;
+/// The runtime has the controller (in a hand, or at least on).
+pub const CONTROLLER_ACTIVE: u32 = 1;
+/// The runtime tracks the hand.
+pub const HAND_ACTIVE: u32 = 1;
+/// As XR_EXT_hand_tracking has them.
+pub const HAND_JOINTS: usize = 26;
 
 pub const MAX_BUFFERS: usize = 8;
 pub const MAX_VIEWS: usize = 2;
@@ -38,6 +59,88 @@ pub const IMMERSIVE_SIZE: usize = 100;
 pub const SESSION_SIZE: usize = 8;
 pub const TRACKING_SIZE: usize = 376;
 pub const FRAME_SIZE: usize = 112;
+pub const CONTROLLERS_SIZE: usize = 320;
+pub const HAPTIC_SIZE: usize = 24;
+pub const REFRESH_RATE_SIZE: usize = 8;
+pub const JOINT_SIZE: usize = 36;
+pub const HANDS_SIZE: usize = 1904;
+
+/// A pose the runtime predicted for a time, with its velocities, in the stage space.
+#[derive(Clone, Copy, Default)]
+pub struct PoseSample {
+    pub time_ns: i64,
+    pub pose: xr::Posef,
+    pub linear_velocity: xr::Vector3f,
+    pub angular_velocity: xr::Vector3f,
+    /// Monado's `xrt_space_relation_flags`.
+    pub flags: u32,
+}
+
+impl PoseSample {
+    pub fn new(time_ns: i64, location: xr::SpaceLocation, velocity: xr::SpaceVelocity) -> Self {
+        Self {
+            time_ns,
+            pose: location.pose,
+            linear_velocity: velocity.linear_velocity,
+            angular_velocity: velocity.angular_velocity,
+            flags: relation_flags(location.location_flags, velocity.velocity_flags),
+        }
+    }
+}
+
+/// Monado's `xrt_space_relation_flags` for what OpenXR says of a location and its velocity.
+pub fn relation_flags(location: xr::SpaceLocationFlags, velocity: xr::SpaceVelocityFlags) -> u32 {
+    [
+        location.contains(xr::SpaceLocationFlags::ORIENTATION_VALID),
+        location.contains(xr::SpaceLocationFlags::POSITION_VALID),
+        velocity.contains(xr::SpaceVelocityFlags::LINEAR_VALID),
+        velocity.contains(xr::SpaceVelocityFlags::ANGULAR_VALID),
+        location.contains(xr::SpaceLocationFlags::ORIENTATION_TRACKED),
+        location.contains(xr::SpaceLocationFlags::POSITION_TRACKED),
+    ]
+    .iter()
+    .enumerate()
+    .filter(|(_, set)| **set)
+    .fold(0, |flags, (bit, _)| flags | 1 << bit)
+}
+
+/// A controller's state: `CONTROLLER_ACTIVE` in `flags`, `BUTTON_*` in `buttons`.
+#[derive(Clone, Copy, Default)]
+pub struct Controller {
+    pub flags: u32,
+    pub buttons: u32,
+    pub trigger: f32,
+    pub squeeze: f32,
+    pub thumbstick: xr::Vector2f,
+    pub grip: PoseSample,
+    pub aim: PoseSample,
+}
+
+/// What Monado asks of a controller's haptics.
+pub struct Haptic {
+    /// 0 left, 1 right.
+    pub hand: usize,
+    /// -1 for the shortest the runtime makes.
+    pub duration_ns: i64,
+    /// 0 for the runtime's choice.
+    pub frequency: f32,
+    /// 0 stops it.
+    pub amplitude: f32,
+}
+
+impl Haptic {
+    pub fn from_message(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != HAPTIC_SIZE || u32_at(bytes, 0) != HAPTIC {
+            return None;
+        }
+        Some(Self {
+            hand: u32_at(bytes, 4) as usize,
+            duration_ns: i64_at(bytes, 8),
+            frequency: f32_at(bytes, 16),
+            amplitude: f32_at(bytes, 20),
+        })
+    }
+}
 
 /// What the app tells Monado of the headset when it connects: each view's size to render at and
 /// field of view, and the refresh rates.
@@ -151,6 +254,14 @@ impl Message {
         for value in [orientation.x, orientation.y, orientation.z, orientation.w] {
             self.f32(value);
         }
+    }
+
+    pub fn sample(&mut self, sample: &PoseSample) {
+        self.i64(sample.time_ns);
+        self.pose(&sample.pose);
+        self.vector(&sample.linear_velocity);
+        self.vector(&sample.angular_velocity);
+        self.u32(sample.flags);
     }
 
     pub fn fov(&mut self, fov: &xr::Fovf) {
