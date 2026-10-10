@@ -89,6 +89,8 @@ android:
       - name: android.permission.FOREGROUND_SERVICE
       - name: android.permission.FOREGROUND_SERVICE_SPECIAL_USE
       - name: android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+      # "Install on Android" for apps on the desktop; Android asks the user about each one
+      - name: android.permission.REQUEST_INSTALL_PACKAGES
       - name: android.permission.WAKE_LOCK
       - name: android.permission.MANAGE_EXTERNAL_STORAGE
       - name: android.permission.READ_EXTERNAL_STORAGE

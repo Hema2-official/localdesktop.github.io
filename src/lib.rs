@@ -2,6 +2,7 @@ pub mod core {
     pub mod bus;
     pub mod clipboard;
     pub mod config;
+    pub mod control;
     pub mod dbus;
     pub mod hard_links;
     pub mod power_management;

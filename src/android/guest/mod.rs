@@ -12,6 +12,7 @@
 
 pub mod bus;
 pub mod clipboard;
+pub mod control;
 pub mod notifications;
 pub mod power;
 pub mod screen;
@@ -475,6 +476,8 @@ struct Jobs {
     power_on: bool,
     /// Not the session's: it serves the guest whether a desktop runs or not.
     system_bus: Option<system_bus::Job>,
+    /// Not the session's either: the `localdesktop` command.
+    control: Option<control::Job>,
 }
 
 impl Jobs {
@@ -522,6 +525,7 @@ impl Link {
         let screen = screen::Job::new(android_app);
         let notifications = notifications::Job::new(android_app);
         let system_bus = system_bus::Job::new(android_app);
+        let control = control::Job::new(android_app);
         // Android's runtime names the threads that attach to it "Thread-<n>".
         unsafe { libc::prctl(libc::PR_SET_NAME, c"guest-link".as_ptr()) };
         Self {
@@ -542,6 +546,7 @@ impl Link {
                 power: power::Job::new(),
                 power_on: false,
                 system_bus,
+                control,
             },
         }
     }
@@ -584,6 +589,9 @@ impl Link {
         jobs.power.turn(jobs.power_on);
         if let Some(job) = &mut jobs.system_bus {
             job.turn(config.battery.share);
+        }
+        if let Some(job) = &mut jobs.control {
+            job.open();
         }
         let wanted = jobs.clipboard_on || jobs.screen_on || jobs.notifications_on || jobs.power_on;
         if !wanted {
@@ -747,6 +755,9 @@ impl Link {
             if let Some(job) = &self.jobs.system_bus {
                 job.waits_for(&mut entries);
             }
+            if let Some(job) = &self.jobs.control {
+                job.waits_for(&mut entries);
+            }
 
             // Forever, unless something is under way.
             let deadline = [
@@ -812,6 +823,9 @@ impl Link {
                 self.jobs.power.ready(entry.fd);
                 if let Some(job) = &mut self.jobs.system_bus {
                     job.ready(entry.fd, entry.revents);
+                }
+                if let Some(job) = &mut self.jobs.control {
+                    job.ready(entry.fd);
                 }
             }
             if let Some(job) = &mut self.jobs.clipboard {
