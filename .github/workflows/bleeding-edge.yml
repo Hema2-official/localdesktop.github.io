@@ -7,6 +7,9 @@
 # headsets (scripts/build-xr-bundle.sh) that the APK names: headsets download it instead of
 # building it themselves.
 #
+# The exp-xr branch and its exp-xr-<anything> tags do the same for the VR builds (docs/exp-xr.md):
+# the same app, with VR support for headsets on top.
+#
 # The APK is signed with the fork's own key, so that updates install over each other. The key
 # comes from the repository secrets ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD,
 # ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD (the same names the official build uses).
@@ -17,8 +20,10 @@ on:
   push:
     branches:
       - bleeding-edge
+      - exp-xr
     tags:
       - "bleeding-edge-*"
+      - "exp-xr-*"
 
 permissions:
   contents: write
@@ -50,7 +55,7 @@ jobs:
       - name: Build the VR support bundle
         id: bundle
         run: |
-          file="localdesktop-xr-${GITHUB_REF_NAME}.tar.xz"
+          file="localdesktop-vr-support-${GITHUB_SHA::7}.tar.xz"
           sudo env XR_BUNDLE_WORK="$RUNNER_TEMP/xr-bundle" scripts/build-xr-bundle.sh "out/$file"
           echo "file=$file" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum "out/$file" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
@@ -79,13 +84,23 @@ jobs:
       - name: Name the build
         id: version
         run: |
+          case "$GITHUB_REF_NAME" in
+            exp-xr*)
+              channel=exp-xr
+              echo "title=Local Desktop (bleeding edge, VR)" >> "$GITHUB_OUTPUT" ;;
+            *)
+              channel=bleeding-edge
+              echo "title=Local Desktop (bleeding edge)" >> "$GITHUB_OUTPUT" ;;
+          esac
           base=$(cargo metadata --format-version=1 --no-deps | jq -r '.packages[0].version')
           stamp=$(date -u +%Y%m%d)
           run=$(printf '%02d' $((GITHUB_RUN_NUMBER % 100)))
-          echo "name=${base}-bleeding-edge.${stamp}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
-          # Grows with every build, so that a newer APK installs over an older one.
+          echo "name=${base}-${channel}.${stamp}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          # Grows with every build of either channel, so that a newer APK installs over an older
+          # one.
           echo "code=$(date -u +%y%m%d)${run}" >> "$GITHUB_OUTPUT"
-          echo "file=localdesktop-bleeding-edge-${stamp}-${GITHUB_SHA::7}.apk" >> "$GITHUB_OUTPUT"
+          echo "file=localdesktop-${channel}-${stamp}-${GITHUB_SHA::7}.apk" >> "$GITHUB_OUTPUT"
+          echo "guide=docs/${channel}.md" >> "$GITHUB_OUTPUT"
 
       - name: Setup signing keystore
         run: |
@@ -183,9 +198,9 @@ jobs:
           # commit's message: fetch the tag itself for its message, the notes.
           git fetch --force --no-tags --depth=1 origin "+refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           {
-            echo "**Local Desktop (bleeding edge)**, version ${{ steps.version.outputs.name }}, built from ${GITHUB_SHA::7}."
+            echo "**${{ steps.version.outputs.title }}**, version ${{ steps.version.outputs.name }}, built from ${GITHUB_SHA::7}."
             echo
-            echo "How to install it, what it is and what to expect: [docs/bleeding-edge.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/bleeding-edge.md)."
+            echo "How to install it, what it is and what to expect: [${{ steps.version.outputs.guide }}](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/${{ steps.version.outputs.guide }})."
             echo
             git tag -l --format='%(contents)' "$GITHUB_REF_NAME"
           } > notes.md
@@ -194,7 +209,7 @@ jobs:
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          name: Local Desktop (bleeding edge) ${{ github.ref_name }}
+          name: ${{ steps.version.outputs.title }} ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           body_path: notes.md
           prerelease: true
