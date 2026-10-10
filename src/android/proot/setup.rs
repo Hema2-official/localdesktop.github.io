@@ -1006,16 +1006,45 @@ fn install_adreno_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
     }
 
     // Everything the drivers load has to resolve, and Turnip has to find the GPU.
-    let check = ArchProcess {
-        command: "for f in /usr/lib/libvulkan_freedreno.so /usr/lib/libgallium-*.so; do \
-                      echo \"$f => $f (\"; ldd \"$f\"; done; \
-                  vulkaninfo --summary 2>/dev/null | grep -q 'driverName *= turnip' && echo TURNIP_OK"
-            .into(),
-        user: None,
-        log: None,
+    let check = || {
+        let output = ArchProcess {
+            command: "for f in /usr/lib/libvulkan_freedreno.so /usr/lib/libgallium-*.so; do \
+                          echo \"$f => $f (\"; ldd \"$f\"; done; \
+                      vulkaninfo --summary 2>/dev/null | grep -q 'driverName *= turnip' && echo TURNIP_OK"
+                .into(),
+            user: None,
+            log: None,
+        }
+        .run();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let mut output = check();
+    // A build made before Arch's last LLVM update links the previous LLVM, which Arch keeps as
+    // llvmN-libs.
+    if let Some(major) = missing_llvm(&output) {
+        sender
+            .send(SetupMessage::Progress(format!(
+                "The GPU drivers need LLVM {major}: installing its libraries"
+            )))
+            .unwrap_or(());
+        let log_sender = sender.clone();
+        let installed = ArchProcess {
+            command: format!(
+                "pacman -S --needed --noconfirm llvm{major}-libs \
+                 || pacman -Sy --needed --noconfirm llvm{major}-libs"
+            ),
+            user: None,
+            log: Some(Arc::new(move |it| {
+                log_sender.send(SetupMessage::Progress(it)).unwrap_or(());
+            })),
+        }
+        .run()
+        .status
+        .success();
+        if installed {
+            output = check();
+        }
     }
-    .run();
-    let output = String::from_utf8_lossy(&check.stdout);
     let broken = output.contains("not found") || !output.contains("TURNIP_OK");
     if broken {
         log::warn!("Mesa for Adreno doesn't work here:\n{output}");
@@ -1060,6 +1089,22 @@ fn install_adreno_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
         )))
         .unwrap_or(());
     Ok(())
+}
+
+/// The major version of a `libLLVM.so.N…` that `ldd` couldn't find.
+fn missing_llvm(ldd_output: &str) -> Option<u32> {
+    ldd_output.lines().find_map(|line| {
+        let (library, found) = line.trim().split_once(" => ")?;
+        if !found.starts_with("not found") {
+            return None;
+        }
+        library
+            .strip_prefix("libLLVM.so.")?
+            .split('.')
+            .next()?
+            .parse()
+            .ok()
+    })
 }
 
 /// Put Arch's own Mesa back, and let `pacman -Syu` update it again.
