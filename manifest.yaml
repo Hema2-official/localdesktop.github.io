@@ -58,6 +58,25 @@ android:
                   mime_type: "*/*"
                 - scheme: file
                   mime_type: "*/*"
+        # Immersive mode on VR headsets (src/android/xr.rs). Meta Horizon OS runs activities with the
+        # VR category full-field and the others as panels; the app switches between them. A task of
+        # its own, so the desktop's panel can come up over it and leaving doesn't take the panel along.
+        - name: app.polarbear.XrActivity
+          label: "Local Desktop"
+          exported: true
+          launch_mode: singleTask
+          task_affinity: ".xr"
+          orientation: landscape
+          config_changes: "density|keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|uiMode"
+          intent_filters:
+            - actions:
+                - android.intent.action.MAIN
+              categories:
+                - android.intent.category.DEFAULT
+                - com.oculus.intent.category.VR
+          meta_data:
+            - name: com.oculus.vr.focusaware
+              value: "true"
       services:
         - name: app.polarbear.SessionService
           exported: false
@@ -94,6 +113,26 @@ android:
       - name: android.permission.READ_EXTERNAL_STORAGE
       - name: android.permission.WRITE_EXTERNAL_STORAGE
         max_sdk_version: 28
+      # The OpenXR loader (assets/libs) asks the headset's runtime broker for its runtime.
+      - name: org.khronos.openxr.permission.OPENXR
+      - name: org.khronos.openxr.permission.OPENXR_SYSTEM
+      # Hands as well as controllers: without it, Horizon OS asks for controllers before opening
+      # the app ("Switch to Controllers"), even as a panel.
+      - name: com.oculus.permission.HAND_TRACKING
     uses_feature:
       - name: android.hardware.type.pc
         required: false
+      - name: android.hardware.vr.headtracking
+        required: false
+        version: 1
+      - name: oculus.software.handtracking
+        required: false
+    # What the OpenXR loader talks to: the runtime brokers, and the runtime's and API layers' services.
+    queries:
+      providers:
+        - authorities: "org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker"
+      intents:
+        - actions:
+            - org.khronos.openxr.OpenXRRuntimeService
+        - actions:
+            - org.khronos.openxr.OpenXRApiLayerService

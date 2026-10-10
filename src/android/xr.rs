@@ -1,0 +1,406 @@
+//! Immersive mode on VR headsets (Meta Horizon OS). `XrActivity` (Java) is the immersive
+//! activity; while it lives, a thread here runs an OpenXR session on the headset's runtime,
+//! through the Khronos loader in assets/libs.
+//!
+//! For now the session shows a slowly pulsing colour, with nothing from the desktop yet.
+
+use anyhow::{anyhow, bail, Context, Result};
+use glow::HasContext;
+use jni::objects::{GlobalRef, JClass, JObject};
+use jni::{JNIEnv, JavaVM};
+use khronos_egl as egl;
+use openxr as xr;
+use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+/// The session's thread, while `XrActivity` lives.
+static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+struct Session {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+/// How long `XrActivity.onDestroy` waits for the session to end. The loop sees the request
+/// within a frame; the UI thread mustn't hang on a runtime that doesn't answer.
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+const GL_RGBA8: u32 = 0x8058;
+const GL_SRGB8_ALPHA8: u32 = 0x8C43;
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_XrActivity_nativeStart(
+    env: JNIEnv,
+    _class: JClass,
+    activity: JObject,
+) {
+    // The process may have started with this activity, before any NativeActivity set up logging.
+    android_logger::init_once(
+        android_logger::Config::default().with_max_level(log::LevelFilter::Info),
+    );
+    stop_session();
+    let (vm, activity) = match env
+        .get_java_vm()
+        .and_then(|vm| Ok((vm, env.new_global_ref(activity)?)))
+    {
+        Ok(it) => it,
+        Err(error) => {
+            log::error!("Immersive mode: no JNI handles for the session: {error}");
+            return;
+        }
+    };
+    let stop = Arc::new(AtomicBool::new(false));
+    let spawned = thread::Builder::new().name("openxr".into()).spawn({
+        let stop = stop.clone();
+        move || {
+            if let Err(error) = run(&vm, &activity, &stop) {
+                log::error!("Immersive mode failed: {error:#}");
+            }
+        }
+    });
+    match spawned {
+        Ok(thread) => *SESSION.lock().unwrap() = Some(Session { stop, thread }),
+        Err(error) => log::error!("Immersive mode: no thread for the session: {error}"),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_polarbear_XrActivity_nativeStop(_env: JNIEnv, _class: JClass) {
+    stop_session();
+}
+
+fn stop_session() {
+    let Some(session) = SESSION.lock().unwrap().take() else {
+        return;
+    };
+    session.stop.store(true, Ordering::Relaxed);
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    while !session.thread.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if session.thread.is_finished() {
+        let _ = session.thread.join();
+    } else {
+        log::warn!("Immersive mode: the session didn't end in time; leaving it to finish");
+    }
+}
+
+/// One swapchain per eye, at the runtime's recommended size.
+struct Eye {
+    swapchain: xr::Swapchain<xr::OpenGlEs>,
+    images: Vec<u32>,
+    width: u32,
+    height: u32,
+}
+
+fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
+    // The loader and the runtime call into Java from this thread.
+    let _env = vm.attach_current_thread()?;
+    let platform = unsafe {
+        xr::AndroidPlatformInfo::new(
+            vm.get_java_vm_pointer().cast(),
+            activity.as_obj().as_raw().cast(),
+        )
+    };
+    let entry = unsafe { xr::Entry::load(&platform) }
+        .map_err(|error| anyhow!("loading the OpenXR loader: {error}"))?;
+    let available = entry.enumerate_extensions()?;
+    if !available.khr_opengl_es_enable {
+        bail!("the OpenXR runtime has no OpenGL ES support");
+    }
+    let mut enabled = xr::ExtensionSet::default();
+    enabled.khr_android_create_instance = true;
+    enabled.khr_opengl_es_enable = true;
+    let instance = entry.create_instance(
+        &xr::ApplicationInfo {
+            application_name: "Local Desktop",
+            application_version: 1,
+            engine_name: "Local Desktop",
+            engine_version: 1,
+            api_version: xr::Version::new(1, 0, 0),
+        },
+        &enabled,
+        &[],
+        &platform,
+    )?;
+    let properties = instance.properties()?;
+    let system = instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)?;
+    let views = instance
+        .enumerate_view_configuration_views(system, xr::ViewConfigurationType::PRIMARY_STEREO)?;
+    log::info!(
+        "Immersive mode: runtime {} {}, {} views of {}x{}",
+        properties.runtime_name,
+        properties.runtime_version,
+        views.len(),
+        views[0].recommended_image_rect_width,
+        views[0].recommended_image_rect_height
+    );
+    // Required before a session, even when nothing is checked against it.
+    let _ = instance.graphics_requirements::<xr::OpenGlEs>(system)?;
+
+    // Before the session, so it's dropped after it.
+    let gl = Gl::new().context("setting up OpenGL ES")?;
+    let (session, mut waiter, mut stream) = unsafe {
+        instance.create_session::<xr::OpenGlEs>(
+            system,
+            &xr::opengles::SessionCreateInfo::Android {
+                display: gl.display.as_ptr(),
+                config: gl.config.as_ptr(),
+                context: gl.context.as_ptr(),
+            },
+        )
+    }?;
+    let space =
+        session.create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)?;
+    let formats = session.enumerate_swapchain_formats()?;
+    let format = [GL_SRGB8_ALPHA8, GL_RGBA8]
+        .into_iter()
+        .find(|format| formats.contains(format))
+        .or(formats.first().copied())
+        .ok_or_else(|| anyhow!("the runtime offers no swapchain formats"))?;
+    let mut eyes = views
+        .iter()
+        .map(|view| {
+            let (width, height) = (
+                view.recommended_image_rect_width,
+                view.recommended_image_rect_height,
+            );
+            let swapchain = session.create_swapchain(&xr::SwapchainCreateInfo {
+                create_flags: xr::SwapchainCreateFlags::EMPTY,
+                usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                    | xr::SwapchainUsageFlags::SAMPLED,
+                format,
+                sample_count: 1,
+                width,
+                height,
+                face_count: 1,
+                array_size: 1,
+                mip_count: 1,
+            })?;
+            let images = swapchain.enumerate_images()?;
+            Ok(Eye {
+                swapchain,
+                images,
+                width,
+                height,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut events = xr::EventDataBuffer::new();
+    let mut running = false;
+    let mut exit_requested = false;
+    let started = Instant::now();
+    let mut frames = 0u32;
+    let mut counted_since = Instant::now();
+    loop {
+        if stop.load(Ordering::Relaxed) && !exit_requested {
+            if !running {
+                break;
+            }
+            session.request_exit()?;
+            exit_requested = true;
+        }
+        while let Some(event) = instance.poll_event(&mut events)? {
+            match event {
+                xr::Event::SessionStateChanged(change) => {
+                    log::info!("Immersive mode: session {:?}", change.state());
+                    match change.state() {
+                        xr::SessionState::READY => {
+                            session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
+                            running = true;
+                        }
+                        xr::SessionState::STOPPING => {
+                            session.end()?;
+                            running = false;
+                        }
+                        xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+                xr::Event::InstanceLossPending(_) => return Ok(()),
+                _ => {}
+            }
+        }
+        if !running {
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
+        let frame = waiter.wait()?;
+        stream.begin()?;
+        if !frame.should_render {
+            stream.end(
+                frame.predicted_display_time,
+                xr::EnvironmentBlendMode::OPAQUE,
+                &[],
+            )?;
+            continue;
+        }
+        let (_, located) = session.locate_views(
+            xr::ViewConfigurationType::PRIMARY_STEREO,
+            frame.predicted_display_time,
+            &space,
+        )?;
+        let pulse = 0.5 + 0.5 * (started.elapsed().as_secs_f32() * 0.8).sin();
+        for eye in &mut eyes {
+            let index = eye.swapchain.acquire_image()?;
+            eye.swapchain.wait_image(xr::Duration::INFINITE)?;
+            gl.clear(
+                eye.images[index as usize],
+                eye.width,
+                eye.height,
+                [0.05, 0.2 + 0.2 * pulse, 0.3, 1.0],
+            )?;
+            eye.swapchain.release_image()?;
+        }
+        let projection_views = eyes
+            .iter()
+            .zip(&located)
+            .map(|(eye, view)| {
+                xr::CompositionLayerProjectionView::new()
+                    .pose(view.pose)
+                    .fov(view.fov)
+                    .sub_image(
+                        xr::SwapchainSubImage::new()
+                            .swapchain(&eye.swapchain)
+                            .image_array_index(0)
+                            .image_rect(xr::Rect2Di {
+                                offset: xr::Offset2Di { x: 0, y: 0 },
+                                extent: xr::Extent2Di {
+                                    width: eye.width as i32,
+                                    height: eye.height as i32,
+                                },
+                            }),
+                    )
+            })
+            .collect::<Vec<_>>();
+        stream.end(
+            frame.predicted_display_time,
+            xr::EnvironmentBlendMode::OPAQUE,
+            &[&xr::CompositionLayerProjection::new()
+                .space(&space)
+                .views(&projection_views)],
+        )?;
+
+        frames += 1;
+        if counted_since.elapsed() >= Duration::from_secs(10) {
+            log::info!(
+                "Immersive mode: {:.1} frames/s, display period {} ms",
+                f64::from(frames) / counted_since.elapsed().as_secs_f64(),
+                frame.predicted_display_period.as_nanos() / 1_000_000
+            );
+            frames = 0;
+            counted_since = Instant::now();
+        }
+    }
+    Ok(())
+}
+
+/// An OpenGL ES 3 context of the session's own, current on its thread, with a pbuffer surface
+/// (the runtime presents; nothing draws to a window).
+struct Gl {
+    egl: egl::DynamicInstance<egl::EGL1_4>,
+    display: egl::Display,
+    config: egl::Config,
+    context: egl::Context,
+    surface: egl::Surface,
+    gl: glow::Context,
+    framebuffer: glow::Framebuffer,
+}
+
+impl Gl {
+    fn new() -> Result<Self> {
+        const OPENGL_ES3_BIT: egl::Int = 0x40;
+        let library = unsafe { libloading::Library::new("libEGL.so") }?;
+        let egl = unsafe { egl::DynamicInstance::<egl::EGL1_4>::load_required_from(library) }
+            .map_err(|error| anyhow!("loading EGL: {error}"))?;
+        let display = unsafe { egl.get_display(egl::DEFAULT_DISPLAY) }
+            .ok_or_else(|| anyhow!("no EGL display"))?;
+        // The compositor shares the display: initializing again is harmless, terminating isn't.
+        egl.initialize(display)?;
+        let config = egl
+            .choose_first_config(
+                display,
+                &[
+                    egl::RED_SIZE,
+                    8,
+                    egl::GREEN_SIZE,
+                    8,
+                    egl::BLUE_SIZE,
+                    8,
+                    egl::ALPHA_SIZE,
+                    8,
+                    egl::RENDERABLE_TYPE,
+                    OPENGL_ES3_BIT,
+                    egl::SURFACE_TYPE,
+                    egl::PBUFFER_BIT,
+                    egl::NONE,
+                ],
+            )?
+            .ok_or_else(|| anyhow!("no EGL config for OpenGL ES 3"))?;
+        let context = egl.create_context(
+            display,
+            config,
+            None,
+            &[egl::CONTEXT_CLIENT_VERSION, 3, egl::NONE],
+        )?;
+        let surface = egl.create_pbuffer_surface(
+            display,
+            config,
+            &[egl::WIDTH, 16, egl::HEIGHT, 16, egl::NONE],
+        )?;
+        egl.make_current(display, Some(surface), Some(surface), Some(context))?;
+        let gl = unsafe {
+            glow::Context::from_loader_function(|name| {
+                egl.get_proc_address(name)
+                    .map_or(std::ptr::null(), |function| function as *const _)
+            })
+        };
+        let framebuffer = unsafe { gl.create_framebuffer() }.map_err(|error| anyhow!(error))?;
+        Ok(Self {
+            egl,
+            display,
+            config,
+            context,
+            surface,
+            gl,
+            framebuffer,
+        })
+    }
+
+    /// Fill one of the runtime's swapchain images with a colour.
+    fn clear(&self, texture: u32, width: u32, height: u32, color: [f32; 4]) -> Result<()> {
+        let texture = NonZeroU32::new(texture).ok_or_else(|| anyhow!("swapchain image 0"))?;
+        unsafe {
+            self.gl
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(self.framebuffer));
+            self.gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(glow::NativeTexture(texture)),
+                0,
+            );
+            self.gl.viewport(0, 0, width as i32, height as i32);
+            self.gl.clear_color(color[0], color[1], color[2], color[3]);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Gl {
+    fn drop(&mut self) {
+        unsafe { self.gl.delete_framebuffer(self.framebuffer) };
+        let _ = self.egl.make_current(self.display, None, None, None);
+        let _ = self.egl.destroy_surface(self.display, self.surface);
+        let _ = self.egl.destroy_context(self.display, self.context);
+    }
+}

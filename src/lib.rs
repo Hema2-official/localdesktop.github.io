@@ -21,6 +21,7 @@ pub mod android {
     pub mod main;
     pub mod session;
     pub mod terminal;
+    pub mod xr;
     pub mod app {
         pub mod build;
         pub mod run;

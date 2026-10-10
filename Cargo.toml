@@ -39,6 +39,9 @@ wayland-client = "0.31.8"
 wayland-protocols = { version = "0.32.6", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3.6", features = ["client"] }
 khronos-egl = { version = "6.0.0", features = ["dynamic"] }
+# Immersive mode on VR headsets (src/android/xr.rs), with the Khronos loader from assets/libs.
+openxr = { version = "0.22.0", default-features = false, features = ["loaded"] }
+glow = "0.16.0"
 libloading = "0.8.6"
 libc = "0.2"
 websocket = { version = "0.27.1", default-features = false, features = [
