@@ -60,7 +60,7 @@ pub enum Event {
     Battery,
     /// Another app shared something with the desktop.
     Shared,
-    /// Immersive mode has a channel and buffers for Monado.
+    /// Immersive mode started or ended, or has a channel and buffers for Monado.
     Immersive,
 }
 
@@ -675,7 +675,7 @@ impl Link {
                 shared::look();
             }
             if let (Event::Immersive, Some(job)) = (event, self.jobs.xr.as_mut()) {
-                job.offered();
+                job.changed();
             }
             let desktop = self.session.as_mut().and_then(Session::clipboard);
             match (event, self.jobs.clipboard()) {

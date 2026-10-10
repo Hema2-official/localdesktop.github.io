@@ -357,6 +357,25 @@ tell_sessions(struct ld_link *link, bool visible, bool focused)
 	}
 }
 
+//! Ask the sessions to exit: the user quit immersive mode while they ran.
+static void
+ask_sessions_to_exit(struct ld_link *link)
+{
+	pthread_mutex_lock(&link->mutex);
+	struct xrt_session_event_sink *events = link->events;
+	pthread_mutex_unlock(&link->mutex);
+
+	if (events == NULL) {
+		return;
+	}
+	LD_INFO("The user quit immersive mode: asking the apps to exit");
+	union xrt_session_event event = XRT_STRUCT_INIT;
+	event.type = XRT_SESSION_EVENT_REQUEST_EXIT;
+	if (xrt_session_event_sink_push(events, &event) != XRT_SUCCESS) {
+		LD_WARN("The sessions didn't take the request");
+	}
+}
+
 //! Immersive mode ended: every buffer is ours again, and frames go nowhere until it's back.
 static void
 drop_channel(struct ld_link *link)
@@ -408,6 +427,7 @@ read_control(struct ld_link *link)
 	union {
 		uint32_t type;
 		struct ld_immersive immersive;
+		struct ld_exit exit;
 		uint8_t bytes[MAX_MESSAGE_SIZE];
 	} message;
 	int fds[1 + LD_MAX_BUFFERS];
@@ -430,6 +450,10 @@ read_control(struct ld_link *link)
 	if (size == sizeof(message.immersive) && message.type == LD_MESSAGE_IMMERSIVE &&
 	    check_immersive(&message.immersive, fd_count)) {
 		install_channel(link, &message.immersive, fds);
+		return true;
+	}
+	if (size == sizeof(message.exit) && message.type == LD_MESSAGE_EXIT && fd_count == 0) {
+		ask_sessions_to_exit(link);
 		return true;
 	}
 

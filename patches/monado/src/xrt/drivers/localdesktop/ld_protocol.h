@@ -14,7 +14,8 @@
  * reproject it to where the head is when it's shown, over the headset's view of the surroundings
  * (passthrough) when the frame asks for it. The controllers' state and the hands' joints come
  * every display frame too, with whether the headset shows immersive mode; haptic pulses and
- * refresh rate requests go back. The channel closes when immersive mode ends.
+ * refresh rate requests go back. The channel closes when immersive mode ends. When the user
+ * quits immersive mode while apps run sessions, the app asks them to exit.
  *
  * Messages are little-endian structs, of a fixed size per type, without padding; descriptors
  * travel as SCM_RIGHTS. Times are CLOCK_MONOTONIC nanoseconds. Poses are in the app's stage space
@@ -32,7 +33,7 @@
 
 #define LD_SOCKET_PATH "/tmp/localdesktop-xr.sock"
 #define LD_PROTOCOL_MAGIC 0x52584c44u // "LDXR"
-#define LD_PROTOCOL_VERSION 5u
+#define LD_PROTOCOL_VERSION 6u
 
 #define LD_MAX_BUFFERS 8
 #define LD_MAX_VIEWS 2
@@ -66,6 +67,8 @@ enum ld_message_type
 	LD_MESSAGE_HANDS = 9,
 	//! Channel, app → Linux: @ref ld_state.
 	LD_MESSAGE_STATE = 10,
+	//! Control, app → Linux: @ref ld_exit.
+	LD_MESSAGE_EXIT = 11,
 };
 
 //! A controller's buttons and touches, in @ref ld_controller::buttons.
@@ -176,6 +179,16 @@ struct ld_session
 {
 	uint32_t type;
 	uint32_t running;
+};
+
+/*!
+ * Control, app → Linux: the user quit immersive mode while apps ran sessions (the headset's own
+ * menu, say). They should exit, as the headset's own apps do.
+ */
+struct ld_exit
+{
+	uint32_t type;
+	uint32_t reserved;
 };
 
 //! A pose the headset's runtime predicted for a time, with its velocities.
@@ -334,3 +347,4 @@ static_assert(sizeof(struct ld_refresh_rate) == 8, "ld_refresh_rate layout");
 static_assert(sizeof(struct ld_joint) == 36, "ld_joint layout");
 static_assert(sizeof(struct ld_hands) == 1904, "ld_hands layout");
 static_assert(sizeof(struct ld_state) == 8, "ld_state layout");
+static_assert(sizeof(struct ld_exit) == 8, "ld_exit layout");

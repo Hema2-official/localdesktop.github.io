@@ -8,7 +8,8 @@
 //! immersive mode starts, the app hands over a channel and the buffers frames go into
 //! (immersive). On the channel go tracking, the controllers' state, the hands' joints, frames
 //! (with whether to show them over the surroundings), releases, haptic pulses and refresh rate
-//! requests, until it closes with immersive mode.
+//! requests, until it closes with immersive mode. When the user quits immersive mode while apps
+//! run sessions, the app asks them to exit (exit).
 
 use openxr as xr;
 use std::ffi::c_void;
@@ -21,7 +22,7 @@ use std::ptr;
 pub const SOCKET: &str = "tmp/localdesktop-xr.sock";
 
 pub const MAGIC: u32 = 0x5258_4c44; // "LDXR"
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 pub const FRAME: u32 = 1;
 pub const RELEASE: u32 = 2;
 pub const TRACKING: u32 = 3;
@@ -32,6 +33,7 @@ pub const HAPTIC: u32 = 7;
 pub const REFRESH_RATE: u32 = 8;
 pub const HANDS: u32 = 9;
 pub const STATE: u32 = 10;
+pub const EXIT: u32 = 11;
 pub const DRM_FORMAT_ABGR8888: u32 = 0x3432_4241;
 
 /// A controller's buttons and touches. Lower is A or X, upper B or Y; menu is the left one's.

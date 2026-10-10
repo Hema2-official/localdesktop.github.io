@@ -4,6 +4,9 @@
 //! panel after they end. Each time immersive mode starts, its session offers Monado a channel and
 //! the buffers frames go into, which this hands over. The messages are in
 //! `crate::android::xr::protocol`.
+//!
+//! Immersive mode that ends while the apps' sessions run was quit by the user (the headset's own
+//! menu, say): Monado asks the apps to exit, as the headset's own apps do then.
 
 use super::{notify, poll_entry, Event};
 use crate::android::utils::java::AppClass;
@@ -56,6 +59,7 @@ pub fn withdraw(id: u64) {
 /// Immersive mode started or ended.
 pub fn set_immersive(on: bool) {
     IMMERSIVE.store(on, Ordering::Release);
+    notify(Event::Immersive);
 }
 
 /// Whether immersive mode is on: its activity has started, and not ended.
@@ -87,6 +91,8 @@ pub struct Job {
     running: bool,
     /// Whether immersive mode should be on, and from when.
     wanted: Option<(bool, Instant)>,
+    /// Whether immersive mode was on at the last look.
+    immersive: bool,
 }
 
 impl Job {
@@ -101,6 +107,7 @@ impl Job {
             monado: None,
             running: false,
             wanted: None,
+            immersive: false,
         })
     }
 
@@ -170,8 +177,33 @@ impl Job {
         });
     }
 
+    /// Immersive mode started or ended, or has an offer for Monado.
+    pub fn changed(&mut self) {
+        self.offered();
+        let immersive = IMMERSIVE.load(Ordering::Acquire);
+        if self.immersive && !immersive && self.running {
+            self.quit();
+        }
+        self.immersive = immersive;
+    }
+
+    /// The user quit immersive mode while apps ran sessions: the app leaves it only after they
+    /// end. Monado asks them to exit.
+    fn quit(&self) {
+        let Some(monado) = &self.monado else {
+            return;
+        };
+        log::info!("Immersive mode: quit while Linux apps run OpenXR sessions; they exit");
+        let mut message = protocol::Message::default();
+        message.u32(protocol::EXIT);
+        message.u32(0);
+        if let Err(error) = protocol::send(monado, &message.0, &[]) {
+            log::warn!("Immersive mode: couldn't ask Monado's apps to exit: {error}");
+        }
+    }
+
     /// Hand Monado what immersive mode's session offers, if both are there.
-    pub fn offered(&mut self) {
+    fn offered(&mut self) {
         let Some(monado) = &self.monado else {
             return;
         };
