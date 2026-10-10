@@ -108,6 +108,13 @@ bool
 ld_link_has_buffers(struct ld_link *link);
 
 /*!
+ * Whether immersive mode handed over buffers newer than those of @p generation.
+ * @ingroup drv_localdesktop
+ */
+bool
+ld_link_buffers_changed(struct ld_link *link, uint64_t generation);
+
+/*!
  * Tell the app whether apps run OpenXR sessions, so immersive mode should be on.
  * @ingroup drv_localdesktop
  */

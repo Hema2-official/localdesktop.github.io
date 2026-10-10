@@ -1,0 +1,135 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hema2 <49586027+Hema2-official@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 23:20:00 +0200
+Subject: [PATCH] c/main: Let targets skip frames whose layers didn't change
+
+An optional comp_target::can_skip_unchanged_frame. When a frame's layers
+are those of the last frame drawn (the same swapchain images, the same
+data) and the target says it can do without it, the renderer skips the
+frame as it does when the target isn't ready. For targets that show
+their newest frame, reprojected, until another comes, like Local
+Desktop's immersive mode on a headset whose runtime reprojects: drawing
+the same layers again only takes GPU time from the apps.
+---
+diff --git a/src/xrt/compositor/main/comp_renderer.c b/src/xrt/compositor/main/comp_renderer.c
+index 266ae0b..743046c 100644
+--- a/src/xrt/compositor/main/comp_renderer.c
++++ b/src/xrt/compositor/main/comp_renderer.c
+@@ -170,6 +170,16 @@ struct comp_renderer
+ 	bool shared_present_semaphore_wait_once;
+ 
+ 	//! @}
++
++	//! @name The last frame drawn, for targets that may skip unchanged frames
++	//! @{
++
++	bool has_drawn;
++	enum xrt_blend_mode drawn_blend_mode;
++	uint32_t drawn_layer_count;
++	struct comp_layer drawn_layers[XRT_MAX_LAYERS];
++
++	//! @}
+ };
+ 
+ 
+@@ -1049,7 +1059,36 @@ dispatch_compute(struct comp_renderer *r,
+  *
+  */
+ 
+-XRT_CHECK_RESULT xrt_result_t
++XRT_CHECK_RESULT //! Whether the layers are those of the last frame drawn, and the target can do without them.
++static bool
++unchanged_frame(struct comp_renderer *r)
++{
++	const struct comp_layer_accum *layers = &r->c->base.layer_accum;
++
++	if (!r->has_drawn || layers->layer_count != r->drawn_layer_count ||
++	    layers->data.env_blend_mode != r->drawn_blend_mode ||
++	    memcmp(layers->layers, r->drawn_layers, sizeof(layers->layers[0]) * layers->layer_count) != 0) {
++		return false;
++	}
++	return comp_target_can_skip_unchanged_frame(r->c->target);
++}
++
++//! Remember the layers just drawn, for targets that may skip unchanged frames.
++static void
++remember_drawn_layers(struct comp_renderer *r)
++{
++	const struct comp_layer_accum *layers = &r->c->base.layer_accum;
++
++	if (r->c->target->can_skip_unchanged_frame == NULL) {
++		return;
++	}
++	r->has_drawn = true;
++	r->drawn_blend_mode = layers->data.env_blend_mode;
++	r->drawn_layer_count = layers->layer_count;
++	memcpy(r->drawn_layers, layers->layers, sizeof(layers->layers[0]) * layers->layer_count);
++}
++
++xrt_result_t
+ comp_renderer_draw(struct comp_renderer *r)
+ {
+ 	COMP_TRACE_MARKER();
+@@ -1067,8 +1106,9 @@ comp_renderer_draw(struct comp_renderer *r)
+ 	// Tell the target we are starting to render, for frame timing.
+ 	comp_target_mark_begin(ct, c->frame.rendering.id, os_monotonic_get_ns());
+ 
+-	// Are we ready to render? No - skip rendering.
+-	if (!comp_target_check_ready(r->c->target)) {
++	// Are we ready to render? No - skip rendering. Nor is there anything to render when the
++	// target still shows the same layers.
++	if (!comp_target_check_ready(r->c->target) || unchanged_frame(r)) {
+ 		// Need to emulate rendering for the timing.
+ 		//! @todo This should be discard.
+ 		comp_target_mark_submit_begin(ct, c->frame.rendering.id, os_monotonic_get_ns());
+@@ -1160,6 +1200,9 @@ comp_renderer_draw(struct comp_renderer *r)
+ 
+ 	bool present_success = renderer_present_swapchain_image(r, c->frame.rendering.desired_present_time_ns,
+ 	                                                        c->frame.rendering.present_slop_ns);
++	if (present_success) {
++		remember_drawn_layers(r);
++	}
+ 
+ 	// Save for timestamps below.
+ 	uint64_t frame_id = c->frame.rendering.id;
+diff --git a/src/xrt/compositor/main/comp_target.h b/src/xrt/compositor/main/comp_target.h
+index 043506c..3a2550f 100644
+--- a/src/xrt/compositor/main/comp_target.h
++++ b/src/xrt/compositor/main/comp_target.h
+@@ -332,6 +332,15 @@ struct comp_target
+ 	 */
+ 	void (*set_session_running)(struct comp_target *ct, bool running);
+ 
++	/*!
++	 * Optional: whether a frame whose layers are those of the last frame drawn may go
++	 * undrawn, as on displays that show their newest frame, reprojected, until another
++	 * comes. Asked for each such frame.
++	 *
++	 * @param      ct       The compositor target.
++	 */
++	bool (*can_skip_unchanged_frame)(struct comp_target *ct);
++
+ 	/*!
+ 	 * Get the available refresh rates for the compositor target
+ 	 *
+@@ -684,6 +693,20 @@ comp_target_set_session_running(struct comp_target *ct, bool running)
+ 	}
+ }
+ 
++/*!
++ * @copydoc comp_target::can_skip_unchanged_frame
++ *
++ * @public @memberof comp_target
++ * @ingroup comp_main
++ */
++static inline bool
++comp_target_can_skip_unchanged_frame(struct comp_target *ct)
++{
++	COMP_TRACE_MARKER();
++
++	return ct->can_skip_unchanged_frame != NULL && ct->can_skip_unchanged_frame(ct);
++}
++
+ static inline xrt_result_t
+ comp_target_get_refresh_rates(struct comp_target *ct, uint32_t *count, float *rates)
+ {

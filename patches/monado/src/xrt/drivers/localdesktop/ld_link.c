@@ -732,6 +732,15 @@ ld_link_has_buffers(struct ld_link *link)
 	return has_buffers;
 }
 
+bool
+ld_link_buffers_changed(struct ld_link *link, uint64_t generation)
+{
+	pthread_mutex_lock(&link->mutex);
+	bool changed = link->generation != generation;
+	pthread_mutex_unlock(&link->mutex);
+	return changed;
+}
+
 void
 ld_link_set_session_running(struct ld_link *link, bool running)
 {

@@ -37,6 +37,15 @@
 //! Display periods closer than this to the pacer's are the same.
 #define PERIOD_TOLERANCE_NS (100 * (int64_t)U_TIME_1US_IN_NS)
 
+/*!
+ * The app shows its newest frame, reprojected, until another comes, so frames whose layers didn't
+ * change go undrawn; but one goes at least this often, as a sign of life.
+ */
+#define UNCHANGED_FRAME_INTERVAL_NS (100 * (int64_t)U_TIME_1MS_IN_NS)
+
+//! How often the frame statistics go to the log, while frames come.
+#define STATS_INTERVAL_NS (10 * (int64_t)U_TIME_1S_IN_NS)
+
 struct ld_target
 {
 	//! Base "class", so that we are a target the compositor can use.
@@ -60,6 +69,18 @@ struct ld_target
 
 	//! The image between acquire and present, -1 for none.
 	int64_t acquired;
+	//! When the last frame went to the app.
+	int64_t presented_ns;
+	//! The present time the last frame was paced for.
+	int64_t paced_present_ns;
+
+	//! For the log every few seconds: frames drawn and left undrawn.
+	struct
+	{
+		int64_t since_ns;
+		uint32_t drawn;
+		uint32_t undrawn;
+	} stats;
 
 	//! Frames go to the app with a sync file from the renderer's semaphore; else after a queue idle.
 	bool export_fences;
@@ -77,6 +98,24 @@ static inline struct vk_bundle *
 get_vk(struct ld_target *ldt)
 {
 	return &ldt->base.c->base.vk;
+}
+
+//! Every few seconds: how many frames were drawn, and how many left undrawn as unchanged.
+static void
+log_stats(struct ld_target *ldt, int64_t now_ns)
+{
+	int64_t elapsed_ns = now_ns - ldt->stats.since_ns;
+	if (elapsed_ns < STATS_INTERVAL_NS) {
+		return;
+	}
+	// After a pause the numbers would mean little.
+	if (ldt->stats.since_ns > 0 && elapsed_ns < 2 * STATS_INTERVAL_NS) {
+		double seconds = time_ns_to_s(elapsed_ns);
+		COMP_INFO(ldt->base.c, "Frames: %.1f/s drawn, %.1f/s unchanged and left undrawn", ldt->stats.drawn / seconds,
+		          ldt->stats.undrawn / seconds);
+	}
+	U_ZERO(&ldt->stats);
+	ldt->stats.since_ns = now_ns;
 }
 
 
@@ -482,11 +521,30 @@ target_present(struct comp_target *ct,
 	ld_link_present(ldt->link, ldt->generation, index, fence, c->frame.rendering.predicted_display_time_ns,
 	                alpha_blend, (uint32_t)c->xdev->hmd->view_count, c->base.frame_params.poses,
 	                c->base.frame_params.fovs);
+	ldt->presented_ns = os_monotonic_get_ns();
+	ldt->stats.drawn++;
+	log_stats(ldt, ldt->presented_ns);
 
 	if (fence >= 0) {
 		close(fence);
 	}
 	return VK_SUCCESS;
+}
+
+static bool
+target_can_skip_unchanged_frame(struct comp_target *ct)
+{
+	struct ld_target *ldt = ld_target(ct);
+
+	// Newer buffers need a frame drawn into them.
+	int64_t now_ns = os_monotonic_get_ns();
+	bool skip = !ld_link_buffers_changed(ldt->link, ldt->generation) &&
+	            now_ns - ldt->presented_ns < UNCHANGED_FRAME_INTERVAL_NS;
+	if (skip) {
+		ldt->stats.undrawn++;
+		log_stats(ldt, now_ns);
+	}
+	return skip;
 }
 
 static VkResult
@@ -531,6 +589,16 @@ target_calc_frame_pacing(struct comp_target *ct,
 	             &predicted_display_time_ns,   //
 	             &predicted_display_period_ns, //
 	             &min_display_period_ns);      //
+
+	// Each frame gets a display frame of its own. The pacer follows the app's latch times, which
+	// come once per display frame, so a frame left undrawn would otherwise get the one it just
+	// had, whose wake-up time has passed, and the compositor would spin until the next latch.
+	while (desired_present_time_ns < ldt->paced_present_ns + predicted_display_period_ns / 2) {
+		desired_present_time_ns += predicted_display_period_ns;
+		wake_up_time_ns += predicted_display_period_ns;
+		predicted_display_time_ns += predicted_display_period_ns;
+	}
+	ldt->paced_present_ns = desired_present_time_ns;
 
 	*out_frame_id = frame_id;
 	*out_wake_up_time_ns = wake_up_time_ns;
@@ -679,6 +747,7 @@ target_create(struct comp_compositor *c, struct ld_link *link)
 	ldt->base.info_gpu = target_info_gpu;
 	ldt->base.set_title = target_set_title;
 	ldt->base.set_session_running = target_set_session_running;
+	ldt->base.can_skip_unchanged_frame = target_can_skip_unchanged_frame;
 	ldt->base.get_refresh_rates = target_get_refresh_rates;
 	ldt->base.get_current_refresh_rate = target_get_current_refresh_rate;
 	ldt->base.request_refresh_rate = target_request_refresh_rate;
