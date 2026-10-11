@@ -425,8 +425,9 @@ target_create_images(struct comp_target *ct,
 	for (uint32_t i = 0; i < LD_MAX_BUFFERS; i++) {
 		int fd = buffers.dma_bufs[i];
 		bool importing = format != VK_FORMAT_UNDEFINED && i < description->buffer_count && imported == i;
-		if (importing &&
-		    import_buffer(ldt, description, i, fd, format, create_info->image_usage) == VK_SUCCESS) {
+		// The renderer may copy frames into them too (target_reprojects).
+		VkImageUsageFlags usage = create_info->image_usage | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		if (importing && import_buffer(ldt, description, i, fd, format, usage) == VK_SUCCESS) {
 			imported++;
 		} else if (!importing && fd >= 0) {
 			close(fd);
@@ -551,6 +552,14 @@ target_can_skip_unchanged_frame(struct comp_target *ct)
 		log_stats(ldt, now_ns);
 	}
 	return skip;
+}
+
+static bool
+target_reprojects(struct comp_target *ct)
+{
+	// The app shows each frame with the poses it was rendered for, and the headset's compositor
+	// reprojects it.
+	return true;
 }
 
 static VkResult
@@ -754,6 +763,7 @@ target_create(struct comp_compositor *c, struct ld_link *link)
 	ldt->base.set_title = target_set_title;
 	ldt->base.set_session_running = target_set_session_running;
 	ldt->base.can_skip_unchanged_frame = target_can_skip_unchanged_frame;
+	ldt->base.reprojects = target_reprojects;
 	ldt->base.get_refresh_rates = target_get_refresh_rates;
 	ldt->base.get_current_refresh_rate = target_get_current_refresh_rate;
 	ldt->base.request_refresh_rate = target_request_refresh_rate;

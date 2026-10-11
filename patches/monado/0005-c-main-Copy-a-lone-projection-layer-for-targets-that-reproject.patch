@@ -1,0 +1,264 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Hema2 <49586027+Hema2-official@users.noreply.github.com>
+Date: Sun, 11 Oct 2026 03:00:00 +0200
+Subject: [PATCH] c/main: Copy a lone projection layer for targets that reproject
+
+An optional comp_target::reprojects. When what shows a target's images
+reprojects each with the poses it was rendered for, like Local Desktop's
+immersive mode on a headset whose runtime does, a frame of one projection
+layer goes to the target as the layer is: its views copied into the
+target's image, and the layer's poses and fields of view made the
+frame's. The distortion pass would warp it to the newest poses through
+three distortion lookups and three filtered reads per pixel, only for
+the headset to warp it again.
+
+Only views that are the size of the target's and sRGB-encoded RGBA, as
+the target's images hold them, with nothing to flip, scale, bias or
+premultiply, go this way. Colour swapchains get transfer-source usage so
+that they can.
+---
+diff --git a/src/xrt/compositor/main/comp_renderer.c b/src/xrt/compositor/main/comp_renderer.c
+index 743046c..1d1e831 100644
+--- a/src/xrt/compositor/main/comp_renderer.c
++++ b/src/xrt/compositor/main/comp_renderer.c
+@@ -180,6 +180,9 @@ struct comp_renderer
+ 	struct comp_layer drawn_layers[XRT_MAX_LAYERS];
+ 
+ 	//! @}
++
++	//! Whether the last frame went to the target copied as its lone projection layer was.
++	bool copied;
+ };
+ 
+ 
+@@ -1053,6 +1056,144 @@ dispatch_compute(struct comp_renderer *r,
+ }
+ 
+ 
++/*!
++ * The images and areas of the lone projection layer's views, if the frame may go to the target
++ * as the layer is: the target reprojects it, and each view is the size of the target's, sRGB-encoded
++ * RGBA as the target's images hold it, with nothing to flip, scale, bias or premultiply.
++ */
++static bool
++copyable_layer(struct comp_renderer *r,
++               uint32_t view_count,
++               const struct render_viewport_data viewports[XRT_MAX_VIEWS],
++               VkImage out_images[XRT_MAX_VIEWS])
++{
++	struct comp_compositor *c = r->c;
++	const struct comp_layer_accum *accum = &c->base.layer_accum;
++
++	if (!c->base.frame_params.one_projection_layer_fast_path || accum->layer_count != 1 ||
++	    (c->target->format != VK_FORMAT_R8G8B8A8_UNORM && c->target->format != VK_FORMAT_R8G8B8A8_SRGB) ||
++	    !comp_target_reprojects(c->target)) {
++		return false;
++	}
++
++	const struct comp_layer *layer = &accum->layers[0];
++	const struct xrt_layer_data *data = &layer->data;
++	enum xrt_layer_composition_flags unhandled =
++	    XRT_LAYER_COMPOSITION_UNPREMULTIPLIED_ALPHA_BIT | XRT_LAYER_COMPOSITION_COLOR_BIAS_SCALE;
++	if (data->type != XRT_LAYER_PROJECTION || data->flip_y || (data->flags & unhandled) != 0) {
++		return false;
++	}
++
++	for (uint32_t i = 0; i < view_count; i++) {
++		const struct xrt_layer_projection_view_data *vd = &data->proj.v[i];
++		struct comp_swapchain *sc = comp_swapchain(comp_layer_get_swapchain(layer, i));
++		if (sc == NULL || vd->sub.image_index >= sc->vkic.image_count ||
++		    sc->vkic.info.format != VK_FORMAT_R8G8B8A8_SRGB ||
++		    (sc->vkic.info.bits & XRT_SWAPCHAIN_USAGE_TRANSFER_SRC) == 0 ||
++		    vd->sub.rect.extent.w != (int32_t)viewports[i].w || vd->sub.rect.extent.h != (int32_t)viewports[i].h) {
++			return false;
++		}
++		out_images[i] = sc->vkic.images[vd->sub.image_index].handle;
++	}
++	return true;
++}
++
++static void
++copy_barrier(struct vk_bundle *vk,
++             VkCommandBuffer cmd,
++             VkImage image,
++             uint32_t array_index,
++             VkAccessFlags src_access,
++             VkAccessFlags dst_access,
++             VkImageLayout old_layout,
++             VkImageLayout new_layout,
++             VkPipelineStageFlags src_stage,
++             VkPipelineStageFlags dst_stage)
++{
++	VkImageMemoryBarrier barrier = {
++	    .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++	    .srcAccessMask = src_access,
++	    .dstAccessMask = dst_access,
++	    .oldLayout = old_layout,
++	    .newLayout = new_layout,
++	    .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++	    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++	    .image = image,
++	    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, array_index, 1},
++	};
++	vk->vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &barrier);
++}
++
++/*!
++ * Copy the lone projection layer's views into the target as they are, and make the layer's poses
++ * and fields of view the frame's, for a target that reprojects it (@ref copyable_layer).
++ */
++static XRT_CHECK_RESULT VkResult
++dispatch_copy(struct comp_renderer *r,
++              struct render_compute *render,
++              const struct render_viewport_data viewports[XRT_MAX_VIEWS],
++              const VkImage images[XRT_MAX_VIEWS])
++{
++	COMP_TRACE_MARKER();
++
++	struct comp_compositor *c = r->c;
++	struct vk_bundle *vk = &c->base.vk;
++	const struct xrt_layer_projection_data *proj = &c->base.layer_accum.layers[0].data.proj;
++	uint32_t view_count = render->r->view_count;
++	VkCommandBuffer cmd = render->r->cmd;
++	VkImage target_image = c->target->images[r->acquired_buffer].handle;
++
++	if (!render_compute_begin(render)) {
++		return VK_ERROR_INITIALIZATION_FAILED;
++	}
++
++	// The frame covers the whole target.
++	copy_barrier(vk, cmd, target_image, 0, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
++	             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
++	             VK_PIPELINE_STAGE_TRANSFER_BIT);
++
++	for (uint32_t i = 0; i < view_count; i++) {
++		const struct xrt_layer_projection_view_data *vd = &proj->v[i];
++
++		copy_barrier(vk, cmd, images[i], vd->sub.array_index, VK_ACCESS_SHADER_READ_BIT,
++		             VK_ACCESS_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
++		             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++		             VK_PIPELINE_STAGE_TRANSFER_BIT);
++
++		VkImageCopy region = {
++		    .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, vd->sub.array_index, 1},
++		    .srcOffset = {vd->sub.rect.offset.w, vd->sub.rect.offset.h, 0},
++		    .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
++		    .dstOffset = {(int32_t)viewports[i].x, (int32_t)viewports[i].y, 0},
++		    .extent = {viewports[i].w, viewports[i].h, 1},
++		};
++		vk->vkCmdCopyImage(cmd, images[i], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, target_image,
++		                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
++
++		copy_barrier(vk, cmd, images[i], vd->sub.array_index, VK_ACCESS_TRANSFER_READ_BIT,
++		             VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
++		             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_PIPELINE_STAGE_TRANSFER_BIT,
++		             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
++
++		c->base.frame_params.poses[i] = vd->pose;
++		c->base.frame_params.fovs[i] = vd->fov;
++	}
++
++	copy_barrier(vk, cmd, target_image, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT,
++	             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, c->target->final_layout, VK_PIPELINE_STAGE_TRANSFER_BIT,
++	             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
++
++	if (!render_compute_end(render)) {
++		return VK_ERROR_INITIALIZATION_FAILED;
++	}
++
++	VkResult ret = renderer_submit_queue(r, cmd, VK_PIPELINE_STAGE_TRANSFER_BIT);
++	VK_CHK_AND_RET(ret, "renderer_submit_queue");
++
++	return ret;
++}
++
++
+ /*
+  *
+  * Interface functions.
+@@ -1150,12 +1291,26 @@ comp_renderer_draw(struct comp_renderer *r)
+ 	    fast_path,        //
+ 	    &c->scratch);     //
+ 
+-	bool use_compute = r->settings->use_compute;
++	struct render_viewport_data copy_viewports[XRT_MAX_VIEWS];
++	VkImage copy_images[XRT_MAX_VIEWS];
++	calc_viewport_data(r, copy_viewports, view_count);
++	bool copy = copyable_layer(r, view_count, copy_viewports, copy_images);
++	if (copy != r->copied) {
++		COMP_INFO(c, copy ? "Copying the lone projection layer to the target as it is"
++		                  : "Rendering the layers into the target");
++		r->copied = copy;
++	}
++
++	// Copies record into the compute command buffer.
++	bool use_compute = r->settings->use_compute || copy;
+ 	struct render_gfx render_g = {0};
+ 	struct render_compute render_c = {0};
+ 
+ 	VkResult res = VK_SUCCESS;
+-	if (use_compute) {
++	if (copy) {
++		render_compute_init(&render_c, &c->nr);
++		res = dispatch_copy(r, &render_c, copy_viewports, copy_images);
++	} else if (use_compute) {
+ 		render_compute_init(&render_c, &c->nr);
+ 		res = dispatch_compute(r, &render_c, &frame_state, fov_source);
+ 	} else {
+diff --git a/src/xrt/compositor/main/comp_target.h b/src/xrt/compositor/main/comp_target.h
+index 3a2550f..6ada987 100644
+--- a/src/xrt/compositor/main/comp_target.h
++++ b/src/xrt/compositor/main/comp_target.h
+@@ -341,6 +341,16 @@ struct comp_target
+ 	 */
+ 	bool (*can_skip_unchanged_frame)(struct comp_target *ct);
+ 
++	/*!
++	 * Optional: whether what shows the target's images reprojects each with the poses it was
++	 * rendered for. A frame of one projection layer may then go to it as the layer is: its
++	 * views copied, unwarped, with the layer's poses and fields of view as the frame's
++	 * (@ref comp_frame_params). Asked for each such frame.
++	 *
++	 * @param      ct       The compositor target.
++	 */
++	bool (*reprojects)(struct comp_target *ct);
++
+ 	/*!
+ 	 * Get the available refresh rates for the compositor target
+ 	 *
+@@ -707,6 +717,20 @@ comp_target_can_skip_unchanged_frame(struct comp_target *ct)
+ 	return ct->can_skip_unchanged_frame != NULL && ct->can_skip_unchanged_frame(ct);
+ }
+ 
++/*!
++ * @copydoc comp_target::reprojects
++ *
++ * @public @memberof comp_target
++ * @ingroup comp_main
++ */
++static inline bool
++comp_target_reprojects(struct comp_target *ct)
++{
++	COMP_TRACE_MARKER();
++
++	return ct->reprojects != NULL && ct->reprojects(ct);
++}
++
+ static inline xrt_result_t
+ comp_target_get_refresh_rates(struct comp_target *ct, uint32_t *count, float *rates)
+ {
+diff --git a/src/xrt/compositor/util/comp_swapchain.c b/src/xrt/compositor/util/comp_swapchain.c
+index a70a302..70c2f55 100644
+--- a/src/xrt/compositor/util/comp_swapchain.c
++++ b/src/xrt/compositor/util/comp_swapchain.c
+@@ -702,6 +702,10 @@ comp_swapchain_get_create_properties(const struct xrt_swapchain_create_info *inf
+ 	U_ZERO(xsccp);
+ 	xsccp->image_count = image_count;
+ 	xsccp->extra_bits = XRT_SWAPCHAIN_USAGE_SAMPLED;
++	// The renderer may copy colour images to targets that reproject them themselves.
++	if ((info->bits & XRT_SWAPCHAIN_USAGE_COLOR) != 0) {
++		xsccp->extra_bits |= XRT_SWAPCHAIN_USAGE_TRANSFER_SRC;
++	}
+ 
+ 	return XRT_SUCCESS;
+ }
