@@ -2,9 +2,11 @@
 //! activity; while it lives, a thread here runs an OpenXR session on the headset's runtime,
 //! through the Khronos loader in assets/libs.
 //!
-//! The session shows the frames Monado in Linux renders into buffers it lends it (`frames`),
-//! each with the poses it was rendered for, over the headset's view of the surroundings
-//! (passthrough) when the frame asks for it, and a slowly pulsing colour while there are none.
+//! The session shows the frames Monado in Linux renders into buffers it lends it (`frames`): a
+//! surface swapchain's, which the headset's compositor reads them from (`surface`), or else the
+//! app's own, which it copies them out of. Each shows with the poses it was rendered for, over
+//! the headset's view of the surroundings (passthrough) when the frame asks for it, and a slowly
+//! pulsing colour while there are none.
 //! Monado gets the head's tracking and the controllers' state from it every display frame
 //! (`controllers`). The guest link enters immersive mode when Monado asks for it, and hands it the
 //! buffers (`guest::xr`).
@@ -13,6 +15,7 @@ mod controllers;
 mod frames;
 mod hands;
 pub mod protocol;
+mod surface;
 
 use crate::android::guest;
 use anyhow::{anyhow, bail, Context, Result};
@@ -60,6 +63,12 @@ const GL_SRGB8_ALPHA8: u32 = 0x8C43;
 
 /// Buffers lent to Linux: one the app copies from, one Linux renders into, one spare.
 const FRAME_BUFFERS: usize = 3;
+/// A surface swapchain's buffers lent to Linux: one the compositor shows, one queued for a coming
+/// display frame, and two Linux renders into.
+const SURFACE_BUFFERS: usize = 4;
+/// How long the app waits, in display periods, for the newest frame's renderer to finish before
+/// the display frame that shows it; else it shows from a later one.
+const FRAME_FINISH_WAIT: f64 = 0.25;
 
 /// How long Linux's last frame stays up when no newer one comes (its app quit, say).
 const FRAME_TIMEOUT: Duration = Duration::from_secs(1);
@@ -145,7 +154,7 @@ struct Eye {
 
 fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     // The loader and the runtime call into Java from this thread.
-    let _env = vm.attach_current_thread()?;
+    let mut env = vm.attach_current_thread()?;
     let platform = unsafe {
         xr::AndroidPlatformInfo::new(
             vm.get_java_vm_pointer().cast(),
@@ -166,6 +175,8 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     enabled.ext_performance_settings = available.ext_performance_settings;
     enabled.ext_hand_tracking = available.ext_hand_tracking;
     enabled.fb_passthrough = available.fb_passthrough;
+    enabled.khr_android_surface_swapchain = available.khr_android_surface_swapchain;
+    enabled.fb_android_surface_swapchain_create = available.fb_android_surface_swapchain_create;
     let instance = entry.create_instance(
         &xr::ApplicationInfo {
             application_name: "Local Desktop",
@@ -271,6 +282,12 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     // Lent once the session shows frames, when the views' fields of view are known.
     let mut transport: Option<frames::Frames> = None;
     let mut transport_failed = false;
+    // The surface swapchain whose buffers Linux renders into, and the newest frame in one, until
+    // its renderer finishes.
+    let mut surface: Option<surface::Surface> = None;
+    let mut surface_failed = false;
+    let mut pending: Option<frames::Frame> = None;
+    let mut surface_stats = SurfaceStats::default();
     // What the newest frame from Linux was rendered for, which the swapchains hold, whether it
     // goes over the surroundings, and when it came.
     let mut shown: Option<Vec<frames::View>> = None;
@@ -340,7 +357,9 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
         }
         if !running {
             // Linux keeps its buffers while nothing shows.
-            drop_frames(&mut transport);
+            if drop_frames(&mut transport, &mut pending) && surface.is_some() {
+                (transport, surface) = (None, None);
+            }
             thread::sleep(Duration::from_millis(50));
             continue;
         }
@@ -349,7 +368,9 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
         let latch_time_ns = monotonic_ns();
         stream.begin()?;
         if !frame_state.should_render {
-            drop_frames(&mut transport);
+            if drop_frames(&mut transport, &mut pending) && surface.is_some() {
+                (transport, surface) = (None, None);
+            }
             stream.end(
                 frame_state.predicted_display_time,
                 xr::EnvironmentBlendMode::OPAQUE,
@@ -369,15 +390,20 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
             match lend_buffers(
                 &instance,
                 &session,
+                &mut env,
+                activity.as_obj(),
                 &mut gl,
                 &eyes,
                 &eye_views,
                 period,
                 passthrough,
+                !surface_failed,
             ) {
-                Ok(mut it) => {
+                Ok((mut it, lent_surface)) => {
                     it.send_state(visibility);
                     transport = Some(it);
+                    surface_failed |= lent_surface.is_none();
+                    surface = lent_surface;
                 }
                 Err(error) => {
                     log::warn!("Immersive mode: no frames from Linux: {error:#}");
@@ -424,7 +450,14 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                 }
             }
         }
+        let mut disconnected = false;
         match (update, transport.as_mut()) {
+            // The compositor reads it once its renderer finishes.
+            (frames::Update::Frame(frame), Some(transport)) if surface.is_some() => {
+                if let Some(older) = pending.replace(frame) {
+                    transport.give_back(older.buffer, None);
+                }
+            }
             (frames::Update::Frame(frame), Some(transport)) => {
                 if let Some(fence) = frame.fence {
                     gl.wait(fence)?;
@@ -444,9 +477,49 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                 shown_alpha_blend = frame.alpha_blend;
                 shown_since = Instant::now();
             }
-            (frames::Update::Disconnected, _) => shown = None,
+            (frames::Update::Disconnected, _) => {
+                shown = None;
+                disconnected = true;
+            }
             _ if shown_since.elapsed() > FRAME_TIMEOUT => shown = None,
             _ => {}
+        }
+        if disconnected && surface.is_some() {
+            // The next Monado gets new buffers: the compositor may hold some of these.
+            (pending, transport, surface) = (None, None, None);
+        }
+        if let (Some(lent), Some(transport_)) = (surface.as_ref(), transport.as_mut()) {
+            let display_time_ns = clock.to_monotonic_ns(display_time);
+            let shown_now = lent.reclaim(&mut env, transport_).and_then(|()| {
+                queue_frame(
+                    lent,
+                    &mut env,
+                    transport_,
+                    &mut pending,
+                    display_time_ns,
+                    period,
+                    &mut surface_stats,
+                )
+            });
+            match shown_now {
+                Ok(Some(frame)) => {
+                    lateness_ns += display_time_ns - frame.display_time_ns;
+                    from_linux += 1;
+                    shown = Some(frame.views);
+                    shown_alpha_blend = frame.alpha_blend;
+                    shown_since = Instant::now();
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!(
+                        "Immersive mode: the surface swapchain failed, copying frames from now \
+                         on: {error:#}"
+                    );
+                    surface_failed = true;
+                    shown = None;
+                    (pending, transport, surface) = (None, None, None);
+                }
+            }
         }
 
         let layer_views: Vec<frames::View> = match &shown {
@@ -479,24 +552,43 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                     .collect()
             }
         };
-        let projection_views = eyes
+        // Linux's frame where it is, else what the app drew.
+        let on_surface = surface.is_some() && transport.is_some() && shown.is_some();
+        let sub_images: Vec<(&xr::Swapchain<xr::OpenGlEs>, xr::Rect2Di)> =
+            match (&surface, &transport) {
+                (Some(lent), Some(transport)) if on_surface => transport
+                    .views
+                    .iter()
+                    .map(|area| (&lent.swapchain, rect(area.x, area.width, area.height)))
+                    .collect(),
+                _ => eyes
+                    .iter()
+                    .map(|eye| (&eye.swapchain, rect(0, eye.width, eye.height)))
+                    .collect(),
+            };
+        let projection_views = sub_images
             .iter()
             .zip(&layer_views)
-            .map(|(eye, view)| {
+            .map(|((swapchain, rect), view)| {
+                // A Surface's rows go top to bottom, and the compositor takes them bottom to top,
+                // as it does swapchains' (it ignores XR_FB_composition_layer_image_layout here):
+                // the view's top and bottom swapped turn it the right way up.
+                let fov = match on_surface {
+                    true => xr::Fovf {
+                        angle_up: view.fov.angle_down,
+                        angle_down: view.fov.angle_up,
+                        ..view.fov
+                    },
+                    false => view.fov,
+                };
                 xr::CompositionLayerProjectionView::new()
                     .pose(view.pose)
-                    .fov(view.fov)
+                    .fov(fov)
                     .sub_image(
                         xr::SwapchainSubImage::new()
-                            .swapchain(&eye.swapchain)
+                            .swapchain(swapchain)
                             .image_array_index(0)
-                            .image_rect(xr::Rect2Di {
-                                offset: xr::Offset2Di { x: 0, y: 0 },
-                                extent: xr::Extent2Di {
-                                    width: eye.width as i32,
-                                    height: eye.height as i32,
-                                },
-                            }),
+                            .image_rect(*rect),
                     )
             })
             .collect::<Vec<_>>();
@@ -560,6 +652,17 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
                 lateness_ns as f64 / f64::from(from_linux.max(1)) / 1e6,
                 period.as_nanos() as f64 / 1e6
             );
+            if surface.is_some() {
+                let SurfaceStats {
+                    finished,
+                    waited,
+                    deferred,
+                } = std::mem::take(&mut surface_stats);
+                log::info!(
+                    "Immersive mode: frames queued finished {finished}, after a wait {waited}; \
+                     put off {deferred} times"
+                );
+            }
             (displayed, from_linux, lateness_ns) = (0, 0, 0);
             counted_since = Instant::now();
         }
@@ -567,12 +670,82 @@ fn run(vm: &JavaVM, activity: &GlobalRef, stop: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
-/// Give Linux back the frames it sends while nothing shows them.
-fn drop_frames(transport: &mut Option<frames::Frames>) {
-    if let Some(transport) = transport.as_mut() {
-        if let frames::Update::Frame(frame) = transport.update() {
+/// How frames went to the surface swapchain: finished, or after the app waited for their
+/// renderers; and how often one waited for the next display frame.
+#[derive(Default)]
+struct SurfaceStats {
+    finished: u32,
+    waited: u32,
+    deferred: u32,
+}
+
+/// Queue the newest frame from Linux on the surface swapchain, to show from this display frame on;
+/// the frame, if it went. One whose renderer isn't done goes once it finishes, which the app waits
+/// a little for, and else from a later display frame.
+fn queue_frame(
+    lent: &surface::Surface,
+    env: &mut JNIEnv,
+    transport: &frames::Frames,
+    pending: &mut Option<frames::Frame>,
+    display_time_ns: i64,
+    period: xr::Duration,
+    stats: &mut SurfaceStats,
+) -> Result<Option<frames::Frame>> {
+    let Some(frame) = pending.take() else {
+        return Ok(None);
+    };
+    // From halfway to this display frame on, so that the compositor's own idea of its time doesn't
+    // put it a frame early or late.
+    let show_from_ns = display_time_ns - period.as_nanos() / 2;
+    let unfinished = frame
+        .fence
+        .as_ref()
+        .filter(|fence| !surface::signalled(fence, Duration::ZERO));
+    let Some(fence) = unfinished else {
+        stats.finished += 1;
+        lent.queue(env, transport, frame.buffer, show_from_ns)?;
+        return Ok(Some(frame));
+    };
+    let wait = Duration::from_nanos((period.as_nanos() as f64 * FRAME_FINISH_WAIT) as u64);
+    if surface::signalled(fence, wait) {
+        stats.waited += 1;
+        lent.queue(env, transport, frame.buffer, show_from_ns)?;
+        return Ok(Some(frame));
+    }
+    stats.deferred += 1;
+    *pending = Some(frame);
+    Ok(None)
+}
+
+/// Give Linux back the frames it sends while nothing shows them. Whether Monado went away.
+fn drop_frames(
+    transport: &mut Option<frames::Frames>,
+    pending: &mut Option<frames::Frame>,
+) -> bool {
+    let Some(transport) = transport.as_mut() else {
+        return false;
+    };
+    if let Some(frame) = pending.take() {
+        transport.give_back(frame.buffer, None);
+    }
+    match transport.update() {
+        frames::Update::Frame(frame) => {
             transport.give_back(frame.buffer, None);
+            false
         }
+        frames::Update::Disconnected => true,
+        frames::Update::Nothing => false,
+    }
+}
+
+/// `width` x `height` from `x` in a swapchain's image.
+fn rect(x: u32, width: u32, height: u32) -> xr::Rect2Di {
+    xr::Rect2Di {
+        offset: xr::Offset2Di { x: x as i32, y: 0 },
+        extent: xr::Extent2Di {
+            width: width as i32,
+            height: height as i32,
+        },
     }
 }
 
@@ -633,17 +806,22 @@ impl Surroundings {
     }
 }
 
-/// Buffers for the views side by side, each at its swapchain's size, for Monado; and the headset
-/// as it is, for the next Monado's start.
+/// Buffers for the views side by side, each at its swapchain's size, for Monado: a surface
+/// swapchain's where the runtime has them and `surface` is on, else the app's own; and the
+/// headset as it is, for the next Monado's start.
+#[allow(clippy::too_many_arguments)]
 fn lend_buffers(
     instance: &xr::Instance,
     session: &xr::Session<xr::OpenGlEs>,
+    env: &mut JNIEnv,
+    activity: &JObject,
     gl: &mut Gl,
     eyes: &[Eye],
     eye_views: &[xr::View],
     period: xr::Duration,
     passthrough: bool,
-) -> Result<frames::Frames> {
+    surface: bool,
+) -> Result<(frames::Frames, Option<surface::Surface>)> {
     let mut x = 0;
     let areas: Vec<frames::ViewArea> = eyes
         .iter()
@@ -681,11 +859,49 @@ fn lend_buffers(
         refresh_rates,
         passthrough,
     });
-    let transport = frames::Frames::new(areas, refresh_rate, FRAME_BUFFERS)?;
+    if surface {
+        let width = areas
+            .iter()
+            .map(|area| area.x + area.width)
+            .max()
+            .unwrap_or(0);
+        let height = areas.iter().map(|area| area.height).max().unwrap_or(0);
+        let lent = surface::Surface::new(
+            instance,
+            session,
+            env,
+            activity,
+            width,
+            height,
+            SURFACE_BUFFERS,
+        )
+        .and_then(|(surface, buffers)| {
+            let source = frames::Source::Lend(buffers);
+            Ok((
+                frames::Frames::new(areas.clone(), refresh_rate, source)?,
+                surface,
+            ))
+        });
+        match lent {
+            Ok((transport, surface)) => {
+                log::info!(
+                    "Immersive mode: the compositor reads Linux's frames from their buffers"
+                );
+                return Ok((transport, Some(surface)));
+            }
+            Err(error) => {
+                log::warn!(
+                    "Immersive mode: no surface swapchain, copying frames instead: {error:#}"
+                )
+            }
+        }
+    }
+    let source = frames::Source::Allocate(FRAME_BUFFERS);
+    let transport = frames::Frames::new(areas, refresh_rate, source)?;
     for buffer in &transport.buffers {
         gl.import(buffer.hardware_buffer)?;
     }
-    Ok(transport)
+    Ok((transport, None))
 }
 
 /// When this display frame shows, the eyes relative to the head, and the head in `space` over

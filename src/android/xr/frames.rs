@@ -1,18 +1,20 @@
-//! The frames Linux renders for immersive mode. The app allocates the buffers (AHardwareBuffers,
-//! so Android's GL can read them) and lends them to Monado in the guest as dma-bufs with a linear
-//! layout, the views side by side, together with a channel of their own (`protocol`): the guest
-//! link hands both over on its control connection. Every display frame the app sends the head's
-//! tracking and the controllers' state on the channel; Monado sends each frame back with the poses
-//! it rendered it for, which the app submits it with, so the headset's compositor reprojects it,
-//! and haptic pulses for the controllers.
+//! The frames Linux renders for immersive mode. The app lends Monado in the guest buffers
+//! (AHardwareBuffers) as dma-bufs, the views side by side, together with a channel of their own
+//! (`protocol`): the guest link hands both over on its control connection. The buffers are a
+//! surface swapchain's, which the headset's compositor reads frames from (`surface`), or else the
+//! app's own, which it copies frames out of with Android's GL. Every display frame the app sends
+//! the head's tracking and the controllers' state on the channel; Monado sends each frame back
+//! with the poses it rendered it for, which the app submits it with, so the headset's compositor
+//! reprojects it, and haptic pulses for the controllers.
 //!
 //! Linux may render into any buffer the app doesn't hold: the app holds a buffer from its frame
-//! message until its release. The channel closing on Monado's side (it quit) gives every buffer
-//! back, and the app offers a new channel for the next Monado.
+//! message until its release, which for a surface swapchain's waits for the compositor to give it
+//! back. The channel closing on Monado's side (it quit) gives every buffer back, and the app
+//! offers a new channel for the next Monado, with the same buffers if they are its own.
 
 use super::protocol::{self, Controller, Haptic, Message, PoseSample};
 use crate::android::guest;
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use openxr as xr;
 use std::ffi::c_void;
 use std::io;
@@ -46,7 +48,8 @@ const USAGE_VENDOR_UBWC: u64 = 1 << 28;
 /// Compressed buffers take half the memory traffic of linear ones, in the frames' two copies.
 /// They need gralloc to say which layout it chose, which Qualcomm's does; with another, the
 /// buffers are linear.
-const USAGE_COMPRESSED: u64 = USAGE_GPU_SAMPLED_IMAGE | USAGE_GPU_FRAMEBUFFER | USAGE_VENDOR_UBWC;
+pub(super) const USAGE_COMPRESSED: u64 =
+    USAGE_GPU_SAMPLED_IMAGE | USAGE_GPU_FRAMEBUFFER | USAGE_VENDOR_UBWC;
 const USAGE_LINEAR: u64 = USAGE_GPU_SAMPLED_IMAGE | USAGE_GPU_FRAMEBUFFER | USAGE_CPU_READ_RARELY;
 
 /// A flattened GraphicBuffer, as `AHardwareBuffer_sendHandleToUnixSocket` sends it: 13 words
@@ -60,26 +63,41 @@ const QCOM_FLAG_UBWC: u32 = 0x0800_0000;
 /// Tells the offers of one set of buffers from those of the next.
 static OFFERS: AtomicU64 = AtomicU64::new(0);
 
-struct Ndk {
+pub(super) struct Ndk {
     allocate: unsafe extern "C" fn(*const BufferDesc, *mut *mut c_void) -> i32,
     describe: unsafe extern "C" fn(*const c_void, *mut BufferDesc),
-    release: unsafe extern "C" fn(*mut c_void),
+    pub(super) acquire: unsafe extern "C" fn(*mut c_void),
+    pub(super) release: unsafe extern "C" fn(*mut c_void),
     send_handle: unsafe extern "C" fn(*const c_void, i32) -> i32,
+    pub(super) from_hardware_buffer:
+        unsafe extern "C" fn(*mut jni::sys::JNIEnv, jni::sys::jobject) -> *mut c_void,
+    /// API level 31.
+    get_id: Option<unsafe extern "C" fn(*const c_void, *mut u64) -> i32>,
     _library: libloading::Library,
 }
 
 impl Ndk {
-    fn load() -> Result<Self> {
+    pub(super) fn load() -> Result<Self> {
         unsafe {
             let library = libloading::Library::new("libandroid.so")?;
             Ok(Self {
                 allocate: *library.get(b"AHardwareBuffer_allocate\0")?,
                 describe: *library.get(b"AHardwareBuffer_describe\0")?,
+                acquire: *library.get(b"AHardwareBuffer_acquire\0")?,
                 release: *library.get(b"AHardwareBuffer_release\0")?,
                 send_handle: *library.get(b"AHardwareBuffer_sendHandleToUnixSocket\0")?,
+                from_hardware_buffer: *library.get(b"AHardwareBuffer_fromHardwareBuffer\0")?,
+                get_id: library.get(b"AHardwareBuffer_getId\0").ok().map(|it| *it),
                 _library: library,
             })
         }
+    }
+
+    /// The buffer's id, unique in the process, if the system says.
+    pub(super) fn id(&self, hardware_buffer: *const c_void) -> Option<u64> {
+        let mut id = 0;
+        let get_id = self.get_id?;
+        (unsafe { get_id(hardware_buffer, &mut id) } == 0).then_some(id)
     }
 }
 
@@ -87,6 +105,8 @@ impl Ndk {
 pub struct Buffer {
     /// The `AHardwareBuffer`, for importing into GL.
     pub hardware_buffer: *mut c_void,
+    /// Its id, where the system says.
+    pub id: Option<u64>,
     dma_buf: OwnedFd,
     /// Linux handed it over in a frame message and hasn't had it back.
     held: bool,
@@ -141,8 +161,19 @@ pub enum Update {
     Disconnected,
 }
 
+/// Where the buffers come from.
+pub enum Source {
+    /// The app allocates this many.
+    Allocate(usize),
+    /// These, acquired, which belong to a surface swapchain (`surface`).
+    Lend(Vec<*mut c_void>),
+}
+
 pub struct Frames {
     ndk: Ndk,
+    /// Whether the buffers are a surface swapchain's, which the next Monado doesn't get: the
+    /// compositor may hold some of them.
+    lent: bool,
     pub width: u32,
     pub height: u32,
     stride: u32,
@@ -166,13 +197,28 @@ pub struct Frames {
 }
 
 impl Frames {
-    /// `count` buffers for `views` side by side, offered to Monado.
-    pub fn new(views: Vec<ViewArea>, refresh_rate: f32, count: usize) -> Result<Self> {
-        if count == 0 || count > protocol::MAX_BUFFERS {
-            bail!("{count} buffers");
-        }
-        if views.is_empty() || views.len() > protocol::MAX_VIEWS {
-            bail!("{} views", views.len());
+    /// Buffers for `views` side by side, offered to Monado.
+    pub fn new(views: Vec<ViewArea>, refresh_rate: f32, source: Source) -> Result<Self> {
+        let ndk = Ndk::load().context("looking up AHardwareBuffer")?;
+        let count = match &source {
+            Source::Allocate(count) => *count,
+            Source::Lend(hardware_buffers) => hardware_buffers.len(),
+        };
+        let lent = matches!(source, Source::Lend(_));
+        let refused = if count == 0 || count > protocol::MAX_BUFFERS {
+            Some(anyhow!("{count} buffers"))
+        } else if views.is_empty() || views.len() > protocol::MAX_VIEWS {
+            Some(anyhow!("{} views", views.len()))
+        } else {
+            None
+        };
+        if let Some(error) = refused {
+            if let Source::Lend(hardware_buffers) = source {
+                for hardware_buffer in hardware_buffers {
+                    unsafe { (ndk.release)(hardware_buffer) };
+                }
+            }
+            return Err(error);
         }
         let width = views
             .iter()
@@ -180,72 +226,10 @@ impl Frames {
             .max()
             .unwrap_or(0);
         let height = views.iter().map(|view| view.height).max().unwrap_or(0);
-        let ndk = Ndk::load().context("looking up AHardwareBuffer")?;
-        let mut desc = BufferDesc {
-            width,
-            height,
-            layers: 1,
-            format: FORMAT_R8G8B8A8_UNORM,
-            usage: USAGE_COMPRESSED,
-            ..Default::default()
+        let (buffers, stride, compressed) = match source {
+            Source::Allocate(count) => allocate(&ndk, width, height, count)?,
+            Source::Lend(hardware_buffers) => lend(&ndk, width, height, hardware_buffers)?,
         };
-        let mut buffers: Vec<Buffer> = Vec::with_capacity(count);
-        let mut stride = 0;
-        let mut compressed = false;
-        let release_all = |buffers: &[Buffer]| {
-            for buffer in buffers {
-                unsafe { (ndk.release)(buffer.hardware_buffer) };
-            }
-        };
-        while buffers.len() < count {
-            let mut hardware_buffer = ptr::null_mut();
-            let status = unsafe { (ndk.allocate)(&desc, &mut hardware_buffer) };
-            if status != 0 && desc.usage == USAGE_COMPRESSED {
-                // A gralloc that refuses the vendor bit: linear ones, then.
-                release_all(&buffers);
-                buffers.clear();
-                desc.usage = USAGE_LINEAR;
-                continue;
-            }
-            if status != 0 {
-                release_all(&buffers);
-                bail!("allocating a {width}x{height} buffer: error {status}");
-            }
-            let mut actual = BufferDesc::default();
-            unsafe { (ndk.describe)(hardware_buffer, &mut actual) };
-            stride = actual.stride * 4;
-            let (dma_buf, layout) = match dma_buf_of(&ndk, hardware_buffer) {
-                Ok(it) => it,
-                Err(error) => {
-                    unsafe { (ndk.release)(hardware_buffer) };
-                    release_all(&buffers);
-                    return Err(error.context("taking a buffer's dma-buf"));
-                }
-            };
-            let this_compressed = match layout {
-                Some(it) => it,
-                None if desc.usage == USAGE_LINEAR => false,
-                None => {
-                    // Gralloc doesn't say which layout it chose: start again with linear ones.
-                    unsafe { (ndk.release)(hardware_buffer) };
-                    release_all(&buffers);
-                    buffers.clear();
-                    desc.usage = USAGE_LINEAR;
-                    continue;
-                }
-            };
-            if !buffers.is_empty() && this_compressed != compressed {
-                unsafe { (ndk.release)(hardware_buffer) };
-                release_all(&buffers);
-                bail!("gralloc compressed some of the buffers and not others");
-            }
-            compressed = this_compressed;
-            buffers.push(Buffer {
-                hardware_buffer,
-                dma_buf,
-                held: false,
-            });
-        }
         log::info!(
             "Immersive mode: {count} buffers of {width}x{height}, {}",
             if compressed { "compressed" } else { "linear" }
@@ -254,6 +238,7 @@ impl Frames {
             Ok((ours, theirs)) => {
                 let mut frames = Self {
                     ndk,
+                    lent,
                     width,
                     height,
                     stride,
@@ -273,8 +258,13 @@ impl Frames {
             }
             Err(error) => error,
         };
-        release_all(&buffers);
+        release_all(&ndk, &buffers);
         Err(anyhow::Error::from(channel).context("making the frames' channel"))
+    }
+
+    /// The buffer with this id.
+    pub fn index_of(&self, id: u64) -> Option<usize> {
+        self.buffers.iter().position(|buffer| buffer.id == Some(id))
     }
 
     /// Hand Monado (through the guest link) the other end of the channel, and the buffers.
@@ -390,7 +380,7 @@ impl Frames {
     }
 
     /// Monado closed the channel, or it broke: every buffer is the app's again, and the next
-    /// Monado gets a new channel.
+    /// Monado gets a new channel, with the buffers if they are the app's own.
     fn disconnected(&mut self, error: Option<io::Error>) -> Update {
         match error {
             None if self.heard => log::info!("Immersive mode: Monado is gone"),
@@ -401,6 +391,9 @@ impl Frames {
             buffer.held = false;
         }
         self.heard = false;
+        if self.lent {
+            return Update::Disconnected;
+        }
         match protocol::channel() {
             Ok((ours, theirs)) => {
                 self.channel = ours;
@@ -522,6 +515,148 @@ impl Drop for Frames {
             unsafe { (self.ndk.release)(buffer.hardware_buffer) };
         }
     }
+}
+
+fn release_all(ndk: &Ndk, buffers: &[Buffer]) {
+    for buffer in buffers {
+        unsafe { (ndk.release)(buffer.hardware_buffer) };
+    }
+}
+
+/// `count` buffers of `width` x `height`, compressed where gralloc can say so; their stride in
+/// bytes, and whether they are compressed.
+fn allocate(ndk: &Ndk, width: u32, height: u32, count: usize) -> Result<(Vec<Buffer>, u32, bool)> {
+    let mut desc = BufferDesc {
+        width,
+        height,
+        layers: 1,
+        format: FORMAT_R8G8B8A8_UNORM,
+        usage: USAGE_COMPRESSED,
+        ..Default::default()
+    };
+    let mut buffers: Vec<Buffer> = Vec::with_capacity(count);
+    let mut stride = 0;
+    let mut compressed = false;
+    while buffers.len() < count {
+        let mut hardware_buffer = ptr::null_mut();
+        let status = unsafe { (ndk.allocate)(&desc, &mut hardware_buffer) };
+        if status != 0 && desc.usage == USAGE_COMPRESSED {
+            // A gralloc that refuses the vendor bit: linear ones, then.
+            release_all(ndk, &buffers);
+            buffers.clear();
+            desc.usage = USAGE_LINEAR;
+            continue;
+        }
+        if status != 0 {
+            release_all(ndk, &buffers);
+            bail!("allocating a {width}x{height} buffer: error {status}");
+        }
+        let mut actual = BufferDesc::default();
+        unsafe { (ndk.describe)(hardware_buffer, &mut actual) };
+        stride = actual.stride * 4;
+        let (dma_buf, layout) = match dma_buf_of(ndk, hardware_buffer) {
+            Ok(it) => it,
+            Err(error) => {
+                unsafe { (ndk.release)(hardware_buffer) };
+                release_all(ndk, &buffers);
+                return Err(error.context("taking a buffer's dma-buf"));
+            }
+        };
+        let this_compressed = match layout {
+            Some(it) => it,
+            None if desc.usage == USAGE_LINEAR => false,
+            None => {
+                // Gralloc doesn't say which layout it chose: start again with linear ones.
+                unsafe { (ndk.release)(hardware_buffer) };
+                release_all(ndk, &buffers);
+                buffers.clear();
+                desc.usage = USAGE_LINEAR;
+                continue;
+            }
+        };
+        if !buffers.is_empty() && this_compressed != compressed {
+            unsafe { (ndk.release)(hardware_buffer) };
+            release_all(ndk, &buffers);
+            bail!("gralloc compressed some of the buffers and not others");
+        }
+        compressed = this_compressed;
+        buffers.push(Buffer {
+            hardware_buffer,
+            id: ndk.id(hardware_buffer),
+            dma_buf,
+            held: false,
+        });
+    }
+    Ok((buffers, stride, compressed))
+}
+
+/// Buffers made elsewhere, of at least `width` x `height`, all laid out the same way, which
+/// gralloc must say; their stride in bytes, and whether they are compressed. Takes the references
+/// it's given, also when it fails.
+fn lend(
+    ndk: &Ndk,
+    width: u32,
+    height: u32,
+    hardware_buffers: Vec<*mut c_void>,
+) -> Result<(Vec<Buffer>, u32, bool)> {
+    let mut buffers: Vec<Buffer> = Vec::with_capacity(hardware_buffers.len());
+    let mut layouts = Vec::new();
+    let mut failure = None;
+    for hardware_buffer in hardware_buffers {
+        if failure.is_some() {
+            unsafe { (ndk.release)(hardware_buffer) };
+            continue;
+        }
+        let mut desc = BufferDesc::default();
+        unsafe { (ndk.describe)(hardware_buffer, &mut desc) };
+        let id = ndk.id(hardware_buffer);
+        let checked = if desc.width < width || desc.height < height {
+            Err(anyhow!("a {}x{} buffer", desc.width, desc.height))
+        } else if desc.format != FORMAT_R8G8B8A8_UNORM || desc.layers != 1 {
+            Err(anyhow!(
+                "a buffer of format {}, {} layers",
+                desc.format,
+                desc.layers
+            ))
+        } else if id.is_none() {
+            Err(anyhow!("no ids for the buffers"))
+        } else {
+            dma_buf_of(ndk, hardware_buffer).context("taking a buffer's dma-buf")
+        };
+        match checked {
+            Ok((dma_buf, layout)) => {
+                layouts.push((desc.stride * 4, layout));
+                buffers.push(Buffer {
+                    hardware_buffer,
+                    id,
+                    dma_buf,
+                    held: false,
+                });
+            }
+            Err(error) => {
+                unsafe { (ndk.release)(hardware_buffer) };
+                failure = Some(error);
+            }
+        }
+    }
+    let failure = failure.or_else(|| {
+        if layouts.iter().any(|(_, layout)| layout.is_none()) {
+            Some(anyhow!("gralloc doesn't say how the buffers are laid out"))
+        } else if layouts.windows(2).any(|pair| pair[0] != pair[1]) {
+            Some(anyhow!("the buffers are laid out differently"))
+        } else {
+            None
+        }
+    });
+    if let Some(error) = failure {
+        release_all(ndk, &buffers);
+        return Err(error);
+    }
+    let (stride, compressed) = layouts
+        .first()
+        .map(|(stride, layout)| (*stride, layout.unwrap_or(false)))
+        .unwrap_or_default();
+    Ok((buffers, stride, compressed))
 }
 
 /// The dma-buf behind an AHardwareBuffer, and whether gralloc compressed it (UBWC) where it says.
