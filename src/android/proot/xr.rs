@@ -55,7 +55,13 @@ const MONADO_WRAPPER: &str = "usr/local/bin/localdesktop-monado";
 const MONADO_WRAPPER_SCRIPT: &str = r#"#!/bin/sh
 # Monado, the OpenXR runtime of Linux apps on this headset, as the desktop session starts it.
 # XRT_NO_STDIN: it would watch stdin for commands, and epoll refuses the session's /dev/null.
+# The U_PACING_APP settings let apps render as fast as they can: the headset reprojects each frame
+# to the display frames it shows on, and Monado's pacing would give an app that needs a little
+# more than a display period two of them (60 frames a second at 120 Hz, 72 at 144).
 mkdir -p "$HOME/.cache"
+: "${U_PACING_APP_USE_MIN_FRAME_PERIOD:=1}"
+: "${U_PACING_APP_IMMEDIATE_WAIT_FRAME_RETURN_BELOW_REFRESH:=1}"
+export U_PACING_APP_USE_MIN_FRAME_PERIOD U_PACING_APP_IMMEDIATE_WAIT_FRAME_RETURN_BELOW_REFRESH
 XRT_NO_STDIN=1 exec monado-service > "$HOME/.cache/monado-service.log" 2>&1
 "#;
 const MONADO_AUTOSTART: &str = "etc/xdg/autostart/localdesktop-monado.desktop";
