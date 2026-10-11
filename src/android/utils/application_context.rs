@@ -148,6 +148,12 @@ pub fn set_cpu_boost(cpu_boost: &str) {
     }
 }
 
+/// The application context, if `ApplicationContext::build` ran: a process may start with the
+/// immersive activity, which doesn't build it.
+pub fn try_get_application_context() -> Option<ApplicationContext> {
+    APPLICATION_CONTEXT.read().ok()?.clone()
+}
+
 pub fn get_application_context() -> ApplicationContext {
     return APPLICATION_CONTEXT
         .read()

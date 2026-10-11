@@ -187,6 +187,21 @@ impl Headset {
         }
     }
 
+    /// With the refresh rates up to `max` Hz, and `max` too where the list stops below it: a
+    /// display may take rates its runtime doesn't list.
+    pub fn up_to(mut self, max: u32) -> Self {
+        let max = max as f32;
+        // The listed rates are whole numbers of hertz, give or take their float.
+        self.refresh_rates.retain(|rate| *rate < max + 0.5);
+        if self.refresh_rates.iter().all(|rate| *rate < max - 0.5) {
+            self.refresh_rates.push(max);
+        }
+        let extra = self.refresh_rates.len().saturating_sub(MAX_REFRESH_RATES);
+        self.refresh_rates.drain(..extra);
+        self.refresh_rate = self.refresh_rate.min(max);
+        self
+    }
+
     pub fn hello(&self) -> Vec<u8> {
         let mut message = Message::default();
         message.u32(MAGIC);

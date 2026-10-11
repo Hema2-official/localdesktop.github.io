@@ -18,6 +18,7 @@ pub mod protocol;
 mod surface;
 
 use crate::android::guest;
+use crate::android::utils::application_context::try_get_application_context;
 use anyhow::{anyhow, bail, Context, Result};
 use glow::HasContext;
 use jni::objects::{GlobalRef, JClass, JObject};
@@ -976,10 +977,18 @@ fn request_refresh_rate(instance: &xr::Instance, session: &xr::Session<xr::OpenG
     }
 }
 
-/// Switch the display to `START_REFRESH_RATE`, where it offers it.
+/// Switch the display to `START_REFRESH_RATE`, or the highest rate below it as far as the
+/// settings' `[vr] max_refresh_rate` goes, where it offers one.
 fn start_refresh_rate(instance: &xr::Instance, session: &xr::Session<xr::OpenGlEs>) {
-    if listed_refresh_rates(instance, session).contains(&START_REFRESH_RATE) {
-        request_refresh_rate(instance, session, START_REFRESH_RATE);
+    let max = try_get_application_context()
+        .and_then(|context| context.local_config.vr.max_refresh_rate())
+        .map_or(START_REFRESH_RATE, |max| START_REFRESH_RATE.min(max as f32));
+    let start = listed_refresh_rates(instance, session)
+        .into_iter()
+        .filter(|rate| *rate < max + 0.5)
+        .reduce(f32::max);
+    if let Some(rate) = start {
+        request_refresh_rate(instance, session, rate);
     }
 }
 

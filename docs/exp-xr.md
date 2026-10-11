@@ -15,8 +15,9 @@ VR. On a phone it behaves like the bleeding-edge build it's based on.
   which takes about 15 minutes.
 - **A Linux app that starts a VR session switches the headset to immersive mode**, and you're
   back at the desktop's panel when it ends. Apps render at the headset's resolution and 90 Hz, or
-  at the refresh rate they ask for (72, 80 or 120 Hz on a Quest 3), with your head, the
-  controllers and your hands tracked, and controllers vibrate when apps ask.
+  at the refresh rate they ask for (72, 80 or 120 Hz on a Quest 3, and higher with a setting: see
+  [Refresh rates](#refresh-rates)), with your head, the controllers and your hands tracked, and
+  controllers vibrate when apps ask.
 - **Passthrough**: apps that draw over your surroundings (OpenXR's alpha blend mode) appear in
   your room.
 - The Meta button pauses an app as it does any VR app: Resume goes back to it. Quit asks the
@@ -37,8 +38,8 @@ VR. On a phone it behaves like the bleeding-edge build it's based on.
 
 ## What to expect
 
-- It's an experiment, tested on one Meta Quest 3 (Horizon OS v81). Other Quests should work the
-  same; other headsets aren't tried.
+- It's an experiment, tested on one Meta Quest 3 (Horizon OS v81 and 2.7). Other Quests should
+  work the same; other headsets aren't tried.
 - 120 Hz asks more of the headset than 90 Hz: an app that can't keep up shows its frames late,
   as stutter, and the headset may lower the rate when it gets hot.
 - VR drains the battery fast: keep the headset charging for long sessions.
@@ -46,6 +47,23 @@ VR. On a phone it behaves like the bleeding-edge build it's based on.
   build on the headset).
 - If an app doesn't switch the headset, look at Monado's log, `~/.cache/monado-service.log`,
   and the app's (`adb logcat | grep "Immersive mode"`).
+
+## Refresh rates
+
+Apps choose from the refresh rates the headset lists: 72, 80, 90 and 120 Hz on a Quest 3. A
+Quest 3 on Horizon OS 2.7 or later also runs at rates it doesn't list, up to 207 Hz, and
+`max_refresh_rate` in the Linux system's `/etc/localdesktop/localdesktop.toml` offers apps one of
+those. It also caps the others, so a lower value saves battery: with 90, apps choose from 72, 80
+and 90 Hz.
+
+```toml title="/etc/localdesktop/localdesktop.toml"
+[vr]
+max_refresh_rate = 144
+```
+
+It applies from the next start. Apps that pick the highest rate they're offered (Open Saber does)
+then run at it, so they need to keep up with it: at 144 Hz, a frame every 7 ms. The GPU runs at
+its highest clock for that, which costs battery and heat.
 
 ## Building it yourself
 

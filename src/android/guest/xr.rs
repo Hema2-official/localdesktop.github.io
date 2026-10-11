@@ -9,6 +9,7 @@
 //! menu, say): Monado asks the apps to exit, as the headset's own apps do then.
 
 use super::{notify, poll_entry, Event};
+use crate::android::utils::application_context::get_application_context;
 use crate::android::utils::java::AppClass;
 use crate::android::xr::protocol::{self, Headset};
 use crate::core::config::ARCH_FS_ROOT;
@@ -234,10 +235,17 @@ impl Job {
             return;
         }
         let monado = unsafe { OwnedFd::from_raw_fd(fd) };
-        let headset = fs::read(headset_file())
+        let mut headset = fs::read(headset_file())
             .ok()
             .and_then(|it| Headset::from_hello(&it))
             .unwrap_or_else(Headset::guess);
+        if let Some(max) = get_application_context().local_config.vr.max_refresh_rate() {
+            headset = headset.up_to(max);
+            log::info!(
+                "Immersive mode: refresh rates up to {max} Hz: {:?}",
+                headset.refresh_rates
+            );
+        }
         if let Err(error) = protocol::send(&monado, &headset.hello(), &[]) {
             log::warn!("Immersive mode: couldn't describe the headset to Monado: {error}");
             return;

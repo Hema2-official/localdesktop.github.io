@@ -77,6 +77,9 @@ pub struct LocalConfig {
     #[serde(default)]
     pub battery: BatteryConfig,
 
+    #[serde(default)]
+    pub vr: VrConfig,
+
     /// What happens if we don't assign this `#[serde(default)]` attribute?
     /// The answer: If the user omits the `[command]` group, the WHOLE config fails to parse
     /// => The default `[user]` group is applied (with `username=root`) even if the `[user]` settings are completely valid.
@@ -292,6 +295,28 @@ impl Default for BatteryConfig {
     }
 }
 
+/// VR on headsets: Linux VR apps in immersive mode (`android::xr`).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Default)]
+pub struct VrConfig {
+    /// The highest refresh rate Linux VR apps may switch the headset's display to, in Hz. They
+    /// choose from the rates the headset lists up to it, and from this one too where the list
+    /// stops below it: a Meta Quest 3 on Horizon OS 2.7 or later takes any rate from 72 to 207 Hz,
+    /// though it lists only up to 120. Unset, they choose from the headset's list.
+    #[serde(default)]
+    pub max_refresh_rate: Option<u32>,
+}
+
+/// The refresh rates a display can run at, as far as `max_refresh_rate` goes.
+const VR_REFRESH_RATES: std::ops::RangeInclusive<u32> = 60..=240;
+
+impl VrConfig {
+    /// `max_refresh_rate`, if it's one a display could run at.
+    pub fn max_refresh_rate(&self) -> Option<u32> {
+        self.max_refresh_rate
+            .filter(|rate| VR_REFRESH_RATES.contains(rate))
+    }
+}
+
 impl PerformanceConfig {
     /// The minimum utilization (out of 1024) the scheduler assumes for the Linux programs.
     pub fn utilization_floor(&self) -> u32 {
@@ -488,6 +513,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("screen", &["sleep_when_idle"]),
     ("notifications", &["forward"]),
     ("battery", &["share"]),
+    ("vr", &["max_refresh_rate"]),
     ("command", &["check", "install", "launch"]),
 ];
 
@@ -513,6 +539,7 @@ fn lenient(content: &str) -> LocalConfig {
         screen: section(&table, "screen"),
         notifications: section(&table, "notifications"),
         battery: section(&table, "battery"),
+        vr: section(&table, "vr"),
         command: section(&table, "command"),
         problems: Vec::new(),
     }
@@ -546,6 +573,17 @@ fn check(original: &str) -> Vec<String> {
     if let Some(preset) = preset.and_then(|it| it.as_str()) {
         if !matches!(preset.trim(), "" | "xfce" | "plasma") {
             problems.push(format!("Unknown desktop preset \"{preset}\", using xfce"));
+        }
+    }
+    let rate = table.get("vr").and_then(|it| it.get("max_refresh_rate"));
+    if let Some(rate) = rate.and_then(|it| it.as_integer()) {
+        if !u32::try_from(rate).is_ok_and(|rate| VR_REFRESH_RATES.contains(&rate)) {
+            problems.push(format!(
+                "VR refresh rate {rate} Hz is out of range ({}-{}), so apps choose from the \
+                 headset's list",
+                VR_REFRESH_RATES.start(),
+                VR_REFRESH_RATES.end()
+            ));
         }
     }
     problems
@@ -855,6 +893,30 @@ mod tests {
             let config = parse_config(full_config_path);
             assert!(!config.screen.sleep_when_idle);
             assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+    }
+
+    #[test]
+    fn should_leave_vr_refresh_rates_to_the_headset_unless_capped() {
+        with_config_file("[user]\nusername = \"alice\"\n", |full_config_path| {
+            assert_eq!(parse_config(full_config_path).vr.max_refresh_rate(), None);
+        });
+        with_config_file("[vr]\nmax_refresh_rate = 144\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert_eq!(config.vr.max_refresh_rate(), Some(144));
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+        with_config_file("[vr]\nmax_refresh_rate = 1000\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert_eq!(config.vr.max_refresh_rate(), None);
+            assert_eq!(
+                config.problems,
+                vec![
+                    "VR refresh rate 1000 Hz is out of range (60-240), so apps choose from the \
+                     headset's list"
+                        .to_string()
+                ]
+            );
         });
     }
 
