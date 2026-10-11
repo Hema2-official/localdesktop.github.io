@@ -54,10 +54,13 @@ const USAGE_LINEAR: u64 = USAGE_GPU_SAMPLED_IMAGE | USAGE_GPU_FRAMEBUFFER | USAG
 
 /// A flattened GraphicBuffer, as `AHardwareBuffer_sendHandleToUnixSocket` sends it: 13 words
 /// (the magic, size, stride, format, layers, usage, id, generation, the native handle's counts),
-/// then the native handle's ints. Qualcomm's gralloc begins those with its magic and its flags.
+/// then the native handle's ints. Qualcomm's gralloc has its magic and then its flags among the
+/// first of those: its handle's layout differs between releases.
 const GRAPHIC_BUFFER_MAGICS: [u32; 2] = [0x4742_3031, 0x4742_4652]; // "GB01", "GBFR"
 const GRAPHIC_BUFFER_HANDLE_INTS: usize = 13;
 const QCOM_HANDLE_MAGIC: u32 = 0x676d_736d; // "gmsm"
+/// How many of the handle's first ints may come before the magic.
+const QCOM_MAGIC_SEARCH: usize = 4;
 const QCOM_FLAG_UBWC: u32 = 0x0800_0000;
 
 /// Tells the offers of one set of buffers from those of the next.
@@ -680,10 +683,13 @@ fn dma_buf_of(ndk: &Ndk, hardware_buffer: *mut c_void) -> Result<(OwnedFd, Optio
             .map(|bytes| u32::from_ne_bytes(bytes.try_into().unwrap()))
     };
     let ints = GRAPHIC_BUFFER_HANDLE_INTS;
-    let qualcomm = word(0).is_some_and(|magic| GRAPHIC_BUFFER_MAGICS.contains(&magic))
-        && word(11).is_some_and(|count| count >= 2)
-        && word(ints) == Some(QCOM_HANDLE_MAGIC);
-    let compressed =
-        qualcomm.then(|| word(ints + 1).is_some_and(|flags| flags & QCOM_FLAG_UBWC != 0));
+    let count = match word(0) {
+        Some(magic) if GRAPHIC_BUFFER_MAGICS.contains(&magic) => word(11).unwrap_or(0) as usize,
+        _ => 0,
+    };
+    let flags = (ints..ints + count.min(QCOM_MAGIC_SEARCH))
+        .find(|&index| word(index) == Some(QCOM_HANDLE_MAGIC))
+        .and_then(|index| word(index + 1));
+    let compressed = flags.map(|flags| flags & QCOM_FLAG_UBWC != 0);
     Ok((fds.remove(0), compressed))
 }
