@@ -27,9 +27,9 @@ use std::time::{Duration, Instant};
 
 use winit::platform::android::activity::AndroidApp;
 
-use crate::android::proot::process::close_app_fds_on_exec;
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config;
+use crate::core::descriptors::close_app_fds_on_exec;
 
 macro_rules! pw_info {
     ($step:expr, $($arg:tt)*) => {

@@ -1,5 +1,5 @@
 use crate::android::utils::application_context::get_application_context;
-use crate::core::{config, hard_links};
+use crate::core::{config, descriptors::close_app_fds_on_exec, hard_links};
 use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -11,66 +11,6 @@ use std::sync::Arc;
 use winit::platform::android::activity::AndroidApp;
 
 pub type Log = Arc<dyn Fn(String) + Send + Sync>;
-
-/// For a child between fork and exec: mark every descriptor but its stdio close-on-exec. Android
-/// opens the app's files, sockets and GPU buffers without that flag, and the Linux programs, and
-/// whatever they start, would hold on to them. Only system calls, since the app's other threads
-/// may hold locks the child would wait for: `/proc/self/fd` is read with `getdents64` into a
-/// buffer on the stack.
-pub fn close_app_fds_on_exec() {
-    // SAFETY: plain system calls on the child's own descriptors, and reads within `buffer`, at
-    // offsets the kernel gives.
-    unsafe {
-        let directory = libc::open(
-            c"/proc/self/fd".as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-        );
-        if directory < 0 {
-            // Every descriptor there can be, then.
-            let mut limit: libc::rlimit = std::mem::zeroed();
-            let last = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 {
-                limit.rlim_cur.min(1 << 16) as libc::c_int
-            } else {
-                1024
-            };
-            for fd in 3..last {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-            return;
-        }
-        // Records of linux_dirent64: d_ino (8 bytes), d_off (8), d_reclen (2), d_type (1), d_name.
-        let mut buffer = [0u64; 512];
-        loop {
-            let read = libc::syscall(
-                libc::SYS_getdents64,
-                directory,
-                buffer.as_mut_ptr(),
-                std::mem::size_of_val(&buffer),
-            );
-            if read <= 0 {
-                break;
-            }
-            let bytes = buffer.as_ptr().cast::<u8>();
-            let mut offset = 0;
-            while offset < read as usize {
-                let record = bytes.add(offset);
-                let name = record.add(19);
-                // A descriptor's number; "." and ".." aren't any.
-                let mut fd: libc::c_int = 0;
-                let mut digits = 0;
-                while let digit @ b'0'..=b'9' = *name.add(digits) {
-                    fd = fd * 10 + libc::c_int::from(digit - b'0');
-                    digits += 1;
-                }
-                if digits > 0 && *name.add(digits) == 0 && fd > 2 && fd != directory {
-                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-                }
-                offset += usize::from(record.add(16).cast::<u16>().read_unaligned());
-            }
-        }
-        libc::close(directory);
-    }
-}
 
 /// Ask the scheduler to treat `thread` (0 for the calling one), and every thread and process it
 /// starts, as needing at least `floor` (out of 1024) of a core's capacity when it runs: see

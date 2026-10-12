@@ -4,6 +4,8 @@ pub mod core {
     pub mod config;
     pub mod control;
     pub mod dbus;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub mod descriptors;
     pub mod gpu_drivers;
     pub mod hard_links;
     pub mod power_management;
