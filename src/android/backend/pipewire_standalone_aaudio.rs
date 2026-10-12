@@ -17,6 +17,7 @@ use std::net::Shutdown;
 use std::os::raw::c_int;
 use std::os::unix::fs as unix_fs;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use winit::platform::android::activity::AndroidApp;
 
+use crate::android::proot::process::close_app_fds_on_exec;
 use crate::android::utils::application_context::get_application_context;
 use crate::core::config;
 
@@ -750,6 +752,12 @@ fn spawn_aaudio_sink(binary: &Path, env: &PipewireAaudioEnv) -> Result<Child, St
 }
 
 fn spawn_logged(mut command: Command, name: &'static str) -> Result<Child, String> {
+    unsafe {
+        command.pre_exec(|| {
+            close_app_fds_on_exec();
+            Ok(())
+        });
+    }
     let mut child = command.spawn().map_err(|e| format!("spawn {name}: {e}"))?;
     let pid = child.id();
     pw_info!("spawn", "{name} child pid={pid}");
