@@ -7,6 +7,7 @@ pub mod core {
     pub mod hard_links;
     pub mod power_management;
     pub mod power_profiles;
+    pub mod settings;
     pub mod sharing;
     pub mod upower;
 }
@@ -23,6 +24,7 @@ pub mod android {
 
     pub mod main;
     pub mod session;
+    pub mod settings;
     pub mod terminal;
     pub mod app {
         pub mod build;

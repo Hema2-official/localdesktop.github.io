@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Desktop settings</title>
+    <!-- The app's settings (SettingsActivity.java): the page asks the app through
+         `localdesktop`, which src/android/settings.rs answers. Everything here is in the
+         config file, /etc/localdesktop/localdesktop.toml, which this page edits line by line. -->
+    <style>
+      :root {
+        --background: #1c1c1c;
+        --card: #262626;
+        --line: #333;
+        --text: #ececec;
+        --muted: #a4a4a4;
+        --accent: #7cc4ff;
+        --warning: #ffcb6b;
+        --error: #ff8a80;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px 16px 32px;
+        background: var(--background);
+        color: var(--text);
+        font: 16px/1.4 system-ui, sans-serif;
+      }
+      main {
+        max-width: 640px;
+        margin: 0 auto;
+      }
+      h1 {
+        margin: 8px 0 16px;
+        font-size: 24px;
+        font-weight: 600;
+      }
+      h2 {
+        margin: 24px 4px 4px;
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--accent);
+      }
+      .applies {
+        margin: 0 4px 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .card {
+        background: var(--card);
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        border-top: 1px solid var(--line);
+      }
+      .row:first-child {
+        border-top: none;
+      }
+      .row.column {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .label {
+        flex: 1;
+        min-width: 0;
+      }
+      .label .title {
+        display: block;
+      }
+      .label .description {
+        display: block;
+        margin-top: 2px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .error {
+        color: var(--error);
+        font-size: 13px;
+      }
+      .notice {
+        margin: 0 0 12px;
+        padding: 12px 16px;
+        border-radius: 12px;
+        background: var(--card);
+        border-left: 4px solid var(--warning);
+      }
+      .notice.problem {
+        border-left-color: var(--error);
+      }
+      .notice p {
+        margin: 0 0 8px;
+      }
+      .notice ul {
+        margin: 0 0 8px;
+        padding-left: 20px;
+        font-size: 14px;
+      }
+      .notice p:last-child,
+      .notice ul:last-child {
+        margin-bottom: 0;
+      }
+      /* A switch. */
+      input[type="checkbox"] {
+        appearance: none;
+        flex: none;
+        width: 44px;
+        height: 26px;
+        margin: 0;
+        border-radius: 13px;
+        background: #555;
+        position: relative;
+        transition: background 0.15s;
+      }
+      input[type="checkbox"]::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #ddd;
+        transition: left 0.15s;
+      }
+      input[type="checkbox"]:checked {
+        background: var(--accent);
+      }
+      input[type="checkbox"]:checked::after {
+        left: 21px;
+        background: #fff;
+      }
+      /* A choice of a few. */
+      .choices {
+        display: flex;
+        flex: none;
+        border: 1px solid #555;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .choices button {
+        padding: 6px 12px;
+        border: none;
+        border-left: 1px solid #555;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 14px;
+      }
+      .choices button:first-child {
+        border-left: none;
+      }
+      .choices button[aria-pressed="true"] {
+        background: var(--accent);
+        color: #10202c;
+        font-weight: 600;
+      }
+      input[type="text"],
+      input[type="number"],
+      textarea {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid #555;
+        border-radius: 8px;
+        background: #1f1f1f;
+        color: var(--text);
+        font: inherit;
+      }
+      input[type="number"] {
+        width: 110px;
+        flex: none;
+      }
+      textarea {
+        min-height: 88px;
+        font: 13px/1.4 monospace;
+        resize: vertical;
+      }
+      .inline {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      button.action {
+        padding: 8px 14px;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        background: transparent;
+        color: var(--accent);
+        font: inherit;
+        font-size: 15px;
+      }
+      button.action:disabled {
+        opacity: 0.4;
+      }
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      code {
+        font-size: 13px;
+        word-break: break-all;
+      }
+      a {
+        color: var(--accent);
+      }
+      footer {
+        margin-top: 24px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      [hidden] {
+        display: none !important;
+      }
+      fieldset {
+        margin: 0;
+        padding: 0;
+        border: none;
+        min-width: 0;
+      }
+    </style>
+  </head>
+
+  <body>
+    <main>
+      <h1>Local Desktop settings</h1>
+
+      <div id="message" class="notice problem" hidden><p id="message-text"></p></div>
+      <div id="unready" class="notice" hidden>
+        <p>
+          Local Desktop isn't set up yet. Open it once: these settings are here once it has
+          installed its Linux system.
+        </p>
+      </div>
+      <div id="problems" class="notice problem" hidden>
+        <p>Problems in localdesktop.toml. The rest of it still applies.</p>
+        <ul id="problem-list"></ul>
+      </div>
+      <div id="pending-restart" class="notice" hidden>
+        <p>Restart the desktop to apply: <span id="pending-restart-list"></span>.</p>
+        <div class="buttons">
+          <button class="action" data-op="restart">Restart the desktop</button>
+        </div>
+      </div>
+      <div id="pending-start" class="notice" hidden>
+        <p>
+          Applies the next time Local Desktop starts: <span id="pending-start-list"></span>.
+          Quit it, then open it again.
+        </p>
+        <div class="buttons">
+          <button class="action" data-op="quit">Quit Local Desktop</button>
+        </div>
+      </div>
+
+      <fieldset id="settings">
+        <h2>Desktop</h2>
+        <p class="applies">Applies the next time Local Desktop starts.</p>
+        <div class="card">
+          <div class="row">
+            <span class="label">
+              <span class="title">Desktop</span>
+              <span class="description">A change installs the other desktop, which takes a while.</span>
+            </span>
+            <div class="choices" data-setting="desktop.preset">
+              <button data-value="plasma">Plasma</button>
+              <button data-value="xfce">Xfce</button>
+            </div>
+          </div>
+          <div class="row column">
+            <label class="label" for="username">
+              <span class="title">User name</span>
+              <span class="description">
+                Who the desktop runs as, with sudo. A new name makes a new user.
+              </span>
+            </label>
+            <div class="inline">
+              <input
+                id="username"
+                type="text"
+                data-setting="user.username"
+                maxlength="32"
+                autocapitalize="none"
+                autocomplete="off"
+                autocorrect="off"
+                spellcheck="false"
+                enterkeyhint="done"
+              />
+              <button class="action" data-save="username">Save</button>
+            </div>
+            <span class="error" data-error="user.username"></span>
+          </div>
+        </div>
+
+        <h2>Android and the desktop</h2>
+        <p class="applies">Applies when the desktop restarts.</p>
+        <div class="card">
+          <label class="row">
+            <span class="label">
+              <span class="title">Share the clipboard</span>
+              <span class="description">Copy on one side, paste on the other: text and images.</span>
+            </span>
+            <input type="checkbox" role="switch" data-setting="clipboard.sync" />
+          </label>
+          <label class="row">
+            <span class="label">
+              <span class="title">Desktop notifications on Android</span>
+              <span class="description">While Local Desktop isn't in front.</span>
+            </span>
+            <input type="checkbox" role="switch" data-setting="notifications.forward" />
+          </label>
+          <label class="row">
+            <span class="label">
+              <span class="title">The phone's battery on the desktop</span>
+              <span class="description">In the desktop's battery widget, with power profiles.</span>
+            </span>
+            <input type="checkbox" role="switch" data-setting="battery.share" />
+          </label>
+          <label class="row">
+            <span class="label">
+              <span class="title">Let the screen turn off</span>
+              <span class="description">
+                After Android's screen timeout, when nobody uses the desktop and nothing in it
+                (a video) keeps it awake.
+              </span>
+            </span>
+            <input type="checkbox" role="switch" data-setting="screen.sleep_when_idle" />
+          </label>
+        </div>
+
+        <h2>Performance</h2>
+        <p class="applies">
+          CPU boost: when the desktop restarts. Fast path lookups: the next time Local Desktop
+          starts.
+        </p>
+        <div class="card">
+          <div class="row column">
+            <span class="label">
+              <span class="title">CPU boost</span>
+              <span class="description">
+                How hard Android runs the Linux programs: Max is quickest and uses the most
+                battery. The desktop's battery widget switches it too.
+              </span>
+            </span>
+            <div class="choices" data-setting="performance.cpu_boost">
+              <button data-value="off">Off</button>
+              <button data-value="balanced">Balanced</button>
+              <button data-value="max">Max</button>
+            </div>
+          </div>
+          <label class="row">
+            <span class="label">
+              <span class="title">Fast path lookups</span>
+              <span class="description">
+                A quicker realpath() for every program, which tools that resolve many paths
+                (Node.js, Vite) notice most.
+              </span>
+            </span>
+            <input type="checkbox" role="switch" data-setting="performance.fast_realpath" />
+          </label>
+        </div>
+
+        <div id="gpu" hidden>
+          <h2>GPU</h2>
+          <p class="applies">Applies the next time Local Desktop starts.</p>
+          <div class="card">
+            <label class="row">
+              <span class="label">
+                <span class="title">Drivers for the Adreno</span>
+                <span class="description">
+                  Mesa for Adreno GPUs: Vulkan (Turnip), and OpenGL through Zink with the
+                  <code>gpu</code> command. Off puts Arch's Mesa back.
+                </span>
+              </span>
+              <input type="checkbox" role="switch" data-setting="graphics.adreno_drivers" />
+            </label>
+          </div>
+        </div>
+
+        <h2>SSH</h2>
+        <p class="applies">Applies the next time Local Desktop starts.</p>
+        <div class="card">
+          <label class="row">
+            <span class="label">
+              <span class="title">SSH server</span>
+              <span class="description">
+                For the desktop's user. It starts when a key below, or a password login, lets
+                someone in.
+              </span>
+            </span>
+            <input type="checkbox" role="switch" data-setting="ssh.enabled" />
+          </label>
+          <div class="row" id="ssh-login" hidden>
+            <span class="label">
+              <span class="title">Log in with</span>
+              <span class="description"><code id="ssh-command"></code></span>
+            </span>
+          </div>
+          <div class="row column">
+            <div class="inline">
+              <label class="label" for="port">
+                <span class="title">Port</span>
+                <span class="description">From 1024 to 65535.</span>
+              </label>
+              <input id="port" type="number" min="1024" max="65535" data-setting="ssh.port" />
+              <button class="action" data-save="port">Save</button>
+            </div>
+            <span class="error" data-error="ssh.port"></span>
+          </div>
+          <label class="row">
+            <span class="label">
+              <span class="title">Password login</span>
+              <span class="description">The user's password works too. Keys are safer.</span>
+            </span>
+            <input type="checkbox" role="switch" data-setting="ssh.password_login" />
+          </label>
+          <div class="row column">
+            <label class="label" for="keys">
+              <span class="title">Keys</span>
+              <span class="description">
+                Public keys that may log in, one per line (what id_ed25519.pub and the like
+                hold).
+              </span>
+            </label>
+            <textarea
+              id="keys"
+              data-setting="ssh.authorized_keys"
+              autocapitalize="none"
+              autocomplete="off"
+              autocorrect="off"
+              spellcheck="false"
+            ></textarea>
+            <div class="buttons">
+              <button class="action" data-save="keys">Save keys</button>
+            </div>
+            <span class="error" data-error="ssh.authorized_keys"></span>
+          </div>
+        </div>
+      </fieldset>
+
+      <h2>More</h2>
+      <div class="card">
+        <div class="row">
+          <div class="buttons">
+            <button class="action" data-op="terminal" data-running>Open the terminal</button>
+            <button class="action" data-op="restart" data-running>Restart the desktop</button>
+            <button class="action" data-open="desktop" data-stopped>Start Local Desktop</button>
+            <button class="action" data-open="app-info">Android settings for Local Desktop</button>
+          </div>
+        </div>
+        <div class="row">
+          <span class="label">
+            <span class="description">
+              Everything here, and the commands that start the desktop, is in
+              <code>/etc/localdesktop/localdesktop.toml</code>:
+              <a href="https://localdesktop.github.io/docs/user/configurations">what it takes</a>.
+            </span>
+          </span>
+        </div>
+      </div>
+
+      <footer id="version"></footer>
+    </main>
+
+    <script>
+      const app = window.localdesktop;
+      const names = {
+        "desktop.preset": "Desktop",
+        "user.username": "User name",
+        "clipboard.sync": "Share the clipboard",
+        "notifications.forward": "Desktop notifications",
+        "battery.share": "The phone's battery",
+        "screen.sleep_when_idle": "Let the screen turn off",
+        "performance.cpu_boost": "CPU boost",
+        "performance.fast_realpath": "Fast path lookups",
+        "graphics.adreno_drivers": "Drivers for the Adreno",
+        "ssh.enabled": "SSH server",
+        "ssh.port": "SSH port",
+        "ssh.password_login": "Password login",
+        "ssh.authorized_keys": "SSH keys",
+      };
+      let state = null;
+
+      function ask(request) {
+        if (!app) {
+          return { error: "This page only works inside Local Desktop" };
+        }
+        try {
+          return JSON.parse(app.call(JSON.stringify(request)));
+        } catch (error) {
+          return { error: String(error) };
+        }
+      }
+
+      // A message at the top, or none.
+      function say(text) {
+        document.getElementById("message").hidden = !text;
+        document.getElementById("message-text").textContent = text || "";
+        if (text) {
+          window.scrollTo(0, 0);
+        }
+      }
+
+      function showError(setting, message) {
+        const element = document.querySelector(`[data-error="${setting}"]`);
+        if (element) {
+          element.textContent = message || "";
+        } else {
+          say(message);
+        }
+      }
+
+      // `keep`: a setting whose field keeps what was typed, to correct.
+      function show(next, keep) {
+        if (next.error) {
+          say(next.error);
+          return;
+        }
+        state = next;
+        document.getElementById("unready").hidden = state.ready;
+        document.getElementById("settings").disabled = !state.ready;
+        const problems = state.problems || [];
+        document.getElementById("problems").hidden = problems.length === 0;
+        const list = document.getElementById("problem-list");
+        list.replaceChildren(
+          ...problems.map((problem) => {
+            const item = document.createElement("li");
+            item.textContent = problem;
+            return item;
+          })
+        );
+        for (const [applies, id] of [
+          ["restart", "pending-restart"],
+          ["next-start", "pending-start"],
+        ]) {
+          const waiting = (state.pending || []).filter((it) => it.applies === applies);
+          document.getElementById(id).hidden = waiting.length === 0;
+          document.getElementById(`${id}-list`).textContent = waiting
+            .map((it) => names[it.setting] || it.setting)
+            .join(", ");
+        }
+        document.getElementById("gpu").hidden = !state.adreno;
+        for (const element of document.querySelectorAll("[data-running]")) {
+          element.hidden = !state.running;
+        }
+        for (const element of document.querySelectorAll("[data-stopped]")) {
+          element.hidden = state.running;
+        }
+
+        const values = state.values;
+        for (const input of document.querySelectorAll('input[type="checkbox"][data-setting]')) {
+          input.checked = values[input.dataset.setting] === true;
+        }
+        for (const group of document.querySelectorAll(".choices[data-setting]")) {
+          for (const button of group.querySelectorAll("button")) {
+            button.setAttribute(
+              "aria-pressed",
+              String(values[group.dataset.setting] === button.dataset.value)
+            );
+          }
+        }
+        // Fields keep what is being typed into them.
+        for (const field of document.querySelectorAll(
+          'input[type="text"][data-setting], input[type="number"][data-setting], textarea[data-setting]'
+        )) {
+          if (document.activeElement !== field && field.dataset.setting !== keep) {
+            field.value = values[field.dataset.setting] ?? "";
+          }
+        }
+
+        const login = document.getElementById("ssh-login");
+        const address = state.ssh && app ? app.address() : null;
+        login.hidden = !(state.ssh && values["ssh.enabled"]);
+        document.getElementById("ssh-command").textContent = state.ssh
+          ? `ssh -p ${state.ssh.port} ${state.ssh.user}@${address || "<the phone's address>"}`
+          : "";
+        const version = (app && app.version()) || state.version;
+        document.getElementById("version").textContent = `Local Desktop ${version}`;
+      }
+
+      function set(setting, value) {
+        const next = ask({ op: "set", setting, value });
+        if (next.error) {
+          showError(setting, next.error);
+          // Back to what the file says, but for what was typed.
+          show(state, setting);
+          return false;
+        }
+        showError(setting, "");
+        show(next);
+        return true;
+      }
+
+      for (const input of document.querySelectorAll('input[type="checkbox"][data-setting]')) {
+        input.addEventListener("change", () => set(input.dataset.setting, input.checked));
+      }
+      for (const group of document.querySelectorAll(".choices[data-setting]")) {
+        for (const button of group.querySelectorAll("button")) {
+          button.addEventListener("click", () => set(group.dataset.setting, button.dataset.value));
+        }
+      }
+
+      const username = document.getElementById("username");
+      const port = document.getElementById("port");
+      const keys = document.getElementById("keys");
+      const saves = {
+        username: () => {
+          username.value = username.value.trim().toLowerCase();
+          set("user.username", username.value);
+        },
+        port: () => set("ssh.port", Number(port.value)),
+        keys: () => set("ssh.authorized_keys", keys.value),
+      };
+      for (const button of document.querySelectorAll("[data-save]")) {
+        button.addEventListener("click", saves[button.dataset.save]);
+      }
+      for (const [field, save] of [
+        [username, saves.username],
+        [port, saves.port],
+      ]) {
+        field.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") {
+            field.blur();
+            save();
+          }
+        });
+      }
+
+      function refresh() {
+        show(ask({ op: "get" }));
+      }
+      for (const button of document.querySelectorAll("[data-op]")) {
+        button.addEventListener("click", () => {
+          const op = button.dataset.op;
+          const reply = ask({ op });
+          say(reply.error);
+          if (reply.error) {
+            return;
+          } else if (op === "terminal") {
+            app.open(reply.url);
+          } else if (op === "restart") {
+            // The desktop starts only while it's in front: its compositor waits otherwise.
+            app.open("desktop");
+          }
+        });
+      }
+      for (const button of document.querySelectorAll("[data-open]")) {
+        button.addEventListener("click", () => app && app.open(button.dataset.open));
+      }
+      // Back from the terminal or another app, where the file or the desktop may have changed.
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+          refresh();
+        }
+      });
+      refresh();
+    </script>
+  </body>
+</html>

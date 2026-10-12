@@ -3,6 +3,7 @@ android:
   assets:
     - assets/setup-progress.html
     - assets/terminal.html
+    - assets/settings.html
     - assets/phantom-process-killer.html
     - assets/xterm
     - assets/unsupported.html
@@ -33,6 +34,19 @@ android:
           window_soft_input_mode: adjustResize
           # Keep the page (and the terminal session in it) when the phone rotates or a keyboard attaches
           config_changes: "orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
+        - name: app.polarbear.SettingsActivity # Local Desktop's settings, which need no desktop
+          # Android's App info opens it (its gear), so another app starts it
+          exported: true
+          launch_mode: singleTop
+          # A task of its own: the launcher's shortcut clears the task it opens in
+          task_affinity: ":settings"
+          window_soft_input_mode: adjustResize
+          config_changes: "orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
+          intent_filters:
+            - actions:
+                - android.intent.action.APPLICATION_PREFERENCES
+              categories:
+                - android.intent.category.DEFAULT
         - name: app.polarbear.ShareActivity # Files and links from other apps, for the desktop
           # No label of its own: share sheets show the app's, which differs between builds
           exported: true

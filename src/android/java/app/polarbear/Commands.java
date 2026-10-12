@@ -7,7 +7,6 @@ import android.content.Intent;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
 import android.widget.Toast;
 import java.io.File;
 import java.util.ArrayList;
@@ -29,11 +28,11 @@ final class Commands {
         start(activity, intent, "No app on Android opens " + uri.getScheme() + " links");
     }
 
+    /** Local Desktop's settings, in a task of their own (a window of their own in DeX). */
     static void openSettings(Context activity) {
-        Uri app = Uri.fromParts("package", activity.getPackageName(), null);
-        Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, app)
+        Intent intent = new Intent(activity, SettingsActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        start(activity, intent, "Android's settings for Local Desktop didn't open");
+        start(activity, intent, "Local Desktop's settings didn't open");
     }
 
     static void openTerminal(Context activity, String url) {

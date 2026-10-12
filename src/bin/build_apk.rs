@@ -1210,6 +1210,9 @@ pub mod apk {
             pub color_mode: Option<String>,
             #[serde(rename(serialize = "android:theme"))]
             pub theme: Option<String>,
+            /// `:name` is a task of the app's own, apart from its main one.
+            #[serde(rename(serialize = "android:taskAffinity"))]
+            pub task_affinity: Option<String>,
         }
 
         /// Android [provider element](https://developer.android.com/guide/topics/manifest/provider-element).

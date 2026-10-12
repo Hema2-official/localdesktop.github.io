@@ -97,6 +97,7 @@ public class SessionService extends Service {
         details = intent;
         startForeground(buildNotification());
         PhantomProcessKiller.check(this);
+        Shortcuts.publish(this);
         showConfigProblems();
         return START_NOT_STICKY;
     }
@@ -193,9 +194,13 @@ public class SessionService extends Service {
                         + "\n\nThe rest of the config still applies. The file is "
                         + "/etc/localdesktop/localdesktop.toml; Local Desktop reads it when it "
                         + "starts and when the desktop restarts."));
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        // The settings page lists the problems too, and fixes most of them.
+        Intent settings = new Intent(this, SettingsActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        builder.addAction(0, "Settings", PendingIntent.getActivity(this, 5, settings, flags));
         String terminalUrl = details.getStringExtra(EXTRA_TERMINAL_URL);
         if (terminalUrl != null) {
-            int flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
             Intent terminal = new Intent(this, WebPageActivity.class)
                     .putExtra(WebPageActivity.EXTRA_URL, terminalUrl)
                     .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
@@ -274,10 +279,15 @@ public class SessionService extends Service {
     }
 
     private String ipv4Address() {
+        return ipv4Address(this);
+    }
+
+    /** The phone's IPv4 address on its network, or null. */
+    static String ipv4Address(Context context) {
         if (Build.VERSION.SDK_INT < 23) {
             return null;
         }
-        ConnectivityManager connectivity = getSystemService(ConnectivityManager.class);
+        ConnectivityManager connectivity = context.getSystemService(ConnectivityManager.class);
         Network network = connectivity.getActiveNetwork();
         LinkProperties properties = network == null ? null : connectivity.getLinkProperties(network);
         if (properties == null) {

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
+    path::Path,
+    sync::Mutex,
 };
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -469,11 +471,46 @@ pub fn parse_config(full_config_path: String) -> LocalConfig {
     let original = fs::read_to_string(&full_config_path).unwrap_or_default();
     let lines = process_config_file(full_config_path);
     let content = lines.join("\n");
-    // A mistake anywhere used to replace the whole config with the defaults (say, the Xfce
-    // preset on a Plasma install). Now it only costs its own section, and gets reported.
-    let mut config = toml::from_str::<LocalConfig>(&content).unwrap_or_else(|_| lenient(&content));
+    let mut config = parse_text(&content);
     config.problems = check(&original);
     config.with_preset_commands()
+}
+
+/// The config a file's text gives, without the `try_` keys' one go and without the preset's
+/// commands (the settings page shows what the file says).
+pub fn parse_text(content: &str) -> LocalConfig {
+    // A mistake anywhere used to replace the whole config with the defaults (say, the Xfce
+    // preset on a Plasma install). Now it only costs its own section, and gets reported.
+    toml::from_str::<LocalConfig>(content).unwrap_or_else(|_| lenient(content))
+}
+
+/// What's wrong with a config file's text, for the user.
+pub fn problems(content: &str) -> Vec<String> {
+    check(content)
+}
+
+/// Change the config file with `edit`, which gets its text (empty if there's none yet), all at
+/// once: the settings page and the battery widget's power profiles both write to it.
+pub fn update_file(
+    path: &Path,
+    edit: impl FnOnce(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    static WRITING: Mutex<()> = Mutex::new(());
+    let _writing = WRITING.lock().unwrap_or_else(|it| it.into_inner());
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error.to_string()),
+    };
+    let updated = edit(&content)?;
+    if updated == content {
+        return Ok(());
+    }
+    // Readers never see half a file.
+    let written = path.with_extension("toml.new");
+    fs::write(&written, updated)
+        .and_then(|()| fs::rename(&written, path))
+        .map_err(|error| error.to_string())
 }
 
 /// The keys each section takes. Anything else is most likely a typo, which serde would

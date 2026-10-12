@@ -2,6 +2,16 @@
 title: Configurations
 ---
 
+## Settings page
+
+Local Desktop's settings change the config file below for you: the desktop and its user, what Android and the desktop share, the CPU boost, the GPU drivers and the SSH server. They open without starting the desktop, from:
+
+- the app icon: touch and hold it, then **Settings**;
+- Android's App info for Local Desktop: **Configure in Local Desktop** (on some phones a gear at the top);
+- the desktop's menu: **Local Desktop Settings**, or `localdesktop open-settings` in a terminal.
+
+The page says when a change takes effect: some when the desktop restarts (it has a button for that), the others the next time Local Desktop starts, since it has to install or set something up first (a new user, the other desktop, the SSH server). It also lists the problems the config file has. The commands that start the desktop, and everything else below, stay in the file.
+
 ## Config file
 
 On launch, Local Desktop reads the config file located at:

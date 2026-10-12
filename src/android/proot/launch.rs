@@ -3,7 +3,9 @@ use crate::android::guest;
 use crate::android::guest::bus::{self, Bus};
 use crate::android::session;
 use crate::core::dbus::{self, Writer};
-use crate::android::utils::application_context::{get_application_context, reload_local_config};
+use crate::android::utils::application_context::{
+    get_application_context, reload_local_config_for_restart,
+};
 use crate::core::config::ARCH_FS_ROOT;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
@@ -330,7 +332,7 @@ pub fn restart() {
         return;
     }
     // Pick up whatever was fixed in the config meanwhile.
-    reload_local_config();
+    reload_local_config_for_restart();
     session::refresh();
     launch();
     RESTARTING.store(false, Ordering::Release);

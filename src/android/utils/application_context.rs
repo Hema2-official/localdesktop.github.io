@@ -137,6 +137,30 @@ pub fn reload_local_config() {
     }
 }
 
+/// Read the config file again for restarting the desktop, but keep the user and the desktop
+/// it runs as now: setup has to make a new user or install a new desktop first, which it does
+/// the next time the app starts.
+pub fn reload_local_config_for_restart() {
+    let mut local_config = read_local_config(format!("{}{}", ARCH_FS_ROOT, CONFIG_FILE));
+    if let Some(context) = APPLICATION_CONTEXT
+        .write()
+        .expect("Failed to write application context")
+        .as_mut()
+    {
+        let running = &context.local_config;
+        if local_config.user.username != running.user.username {
+            log::info!("The new user takes over the next time Local Desktop starts");
+            local_config.user = running.user.clone();
+        }
+        if local_config.desktop.preset() != running.desktop.preset() {
+            log::info!("The new desktop takes over the next time Local Desktop starts");
+            local_config.desktop = running.desktop.clone();
+            local_config.command = running.command.clone();
+        }
+        context.local_config = local_config;
+    }
+}
+
 /// Go by `cpu_boost` from now on, as the config file says now (`android::power_profile`).
 pub fn set_cpu_boost(cpu_boost: &str) {
     if let Some(context) = APPLICATION_CONTEXT
@@ -146,6 +170,12 @@ pub fn set_cpu_boost(cpu_boost: &str) {
     {
         context.local_config.performance.cpu_boost = cpu_boost.into();
     }
+}
+
+/// The context, if the app's activity has started in this process: the settings page runs
+/// without it too.
+pub fn try_application_context() -> Option<ApplicationContext> {
+    APPLICATION_CONTEXT.read().ok()?.clone()
 }
 
 pub fn get_application_context() -> ApplicationContext {

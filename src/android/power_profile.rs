@@ -8,10 +8,9 @@
 
 use crate::android::proot::process::set_utilization_floor;
 use crate::android::utils::application_context::{get_application_context, set_cpu_boost};
-use crate::core::config::{with_value, PerformanceConfig, ARCH_FS_ROOT, CONFIG_FILE};
+use crate::core::config::{update_file, with_value, PerformanceConfig, ARCH_FS_ROOT, CONFIG_FILE};
 use crate::core::power_profiles::Profile;
 use std::fs;
-use std::io;
 use std::path::Path;
 
 /// The profile the config's CPU boost stands for.
@@ -43,21 +42,16 @@ pub fn apply(profile: Profile) {
 }
 
 /// `cpu_boost` in the config file, the rest of it as it was.
-fn save(cpu_boost: &str) -> io::Result<()> {
+fn save(cpu_boost: &str) -> Result<(), String> {
     let path = Path::new(ARCH_FS_ROOT).join(CONFIG_FILE.trim_start_matches('/'));
-    let content = fs::read_to_string(&path)?;
-    let updated = with_value(
-        &content,
-        "performance",
-        "cpu_boost",
-        &format!("\"{cpu_boost}\""),
-    );
-    if updated == content {
-        return Ok(());
-    }
-    let written = path.with_extension("toml.new");
-    fs::write(&written, updated)?;
-    fs::rename(&written, &path)
+    update_file(&path, |content| {
+        Ok(with_value(
+            content,
+            "performance",
+            "cpu_boost",
+            &format!("\"{cpu_boost}\""),
+        ))
+    })
 }
 
 /// Whether the process is a Linux program: proot runs each through its loader, which is then the

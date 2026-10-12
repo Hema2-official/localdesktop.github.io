@@ -29,7 +29,10 @@ public class WebPageActivity extends Activity {
     private static final String DEVELOPER_OPTIONS = "localdesktop:developer-options";
 
     private WebView webView;
-    /** Keystrokes as typed, no autocorrect or word suggestions: what a terminal needs. */
+    /**
+     * Keystrokes as typed, no autocorrect or word suggestions: what the terminal needs, and the
+     * settings' user name and keys.
+     */
     private boolean rawKeyboard;
 
     @Override
@@ -71,6 +74,7 @@ public class WebPageActivity extends Activity {
 
         FrameLayout container = new FrameLayout(this);
         container.setBackgroundColor(Color.rgb(0x1c, 0x1c, 0x1c));
+        prepare(webView);
         container.addView(webView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(container);
@@ -101,13 +105,21 @@ public class WebPageActivity extends Activity {
         load(intent);
     }
 
+    /** The page an intent asks for. */
+    protected String pageUrl(Intent intent) {
+        return intent.getStringExtra(EXTRA_URL);
+    }
+
+    /** Set up the WebView before it loads the first page. */
+    protected void prepare(WebView webView) {}
+
     private void load(Intent intent) {
-        String url = intent.getStringExtra(EXTRA_URL);
+        String url = pageUrl(intent);
         if (url == null || !url.startsWith(PAGE_PREFIX)) {
             finish();
             return;
         }
-        rawKeyboard = url.startsWith(TERMINAL_PAGE);
+        rawKeyboard = url.startsWith(TERMINAL_PAGE) || url.startsWith(SettingsActivity.PAGE);
         if (!url.equals(webView.getUrl())) {
             webView.loadUrl(url);
         }

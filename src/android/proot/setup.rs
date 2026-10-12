@@ -1494,12 +1494,12 @@ MimeType=application/vnd.android.package-archive;application/xapk-package-archiv
 NoDisplay=true
 Terminal=false
 ";
-/// Until the app has settings of its own: Android's for it.
+/// The app's settings page, which also links to Android's settings for it.
 const SETTINGS_ENTRY: &str = "[Desktop Entry]
 Type=Application
 Name=Local Desktop Settings
-GenericName=Android settings for Local Desktop
-Comment=Local Desktop's permissions, battery use and storage on Android
+GenericName=Settings of the Android app
+Comment=The desktop, its user, what it shares with Android, SSH and the GPU drivers
 Icon=smartphone
 Exec=localdesktop open-settings
 Categories=Settings;
@@ -1557,7 +1557,7 @@ Usage: localdesktop COMMAND
   open-url URL      open a web or mail link with Android's apps
   share FILE...     share files with an Android app, picked in Android's share sheet
   install FILE      install an Android app (.apk, .xapk, .apks); Android asks first
-  open-settings     open Android's settings for Local Desktop
+  open-settings     open Local Desktop's settings
   open-terminal     open Local Desktop's terminal
   restart-desktop   log out of the desktop and start it again
 EOF

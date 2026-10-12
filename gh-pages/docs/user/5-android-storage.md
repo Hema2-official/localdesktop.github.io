@@ -44,7 +44,7 @@ The desktop's programs, and you in a terminal, can ask Android for things with t
 | `localdesktop open-url URL` | Opens a web or mail link (`http`, `https`, `mailto`) with Android's apps, such as its browser. |
 | `localdesktop share FILE...` | Opens Android's share sheet for the files, to send them with an Android app: by mail, in a chat, to a cloud drive. |
 | `localdesktop install FILE` | Installs an Android app: an `.apk`, or a bundle of split APKs (`.xapk`, `.apks`). Android asks first, and the first time also whether Local Desktop may install apps at all. A bundle's OBB data isn't copied. |
-| `localdesktop open-settings` | Opens Android's settings for Local Desktop: its permissions, battery use and storage. The desktop's menu has it as "Local Desktop Settings". |
+| `localdesktop open-settings` | Opens Local Desktop's settings (see [Configurations](4-configurations.md#settings-page)); from there, Android's settings for the app: its permissions, battery use and storage. The desktop's menu has it as "Local Desktop Settings". |
 | `localdesktop open-terminal` | Opens Local Desktop's terminal, as its notification does. |
 | `localdesktop restart-desktop` | Logs out of the desktop and starts it again, as the notification's "Restart desktop" does. |
 
