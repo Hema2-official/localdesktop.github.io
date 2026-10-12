@@ -189,12 +189,16 @@ pub struct GraphicsConfig {
     /// `false` puts Arch's own Mesa back.
     #[serde(default = "default_true")]
     pub adreno_drivers: bool,
+    /// Look for a newer release once a week, which then installs the next time the app starts.
+    #[serde(default = "default_true")]
+    pub driver_updates: bool,
 }
 
 impl Default for GraphicsConfig {
     fn default() -> Self {
         Self {
             adreno_drivers: true,
+            driver_updates: true,
         }
     }
 }
@@ -519,7 +523,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("user", &["username"]),
     ("desktop", &["preset"]),
     ("ssh", &["enabled", "port", "password_login", "authorized_keys"]),
-    ("graphics", &["adreno_drivers"]),
+    ("graphics", &["adreno_drivers", "driver_updates"]),
     ("performance", &["cpu_boost", "fast_realpath"]),
     ("clipboard", &["sync"]),
     ("screen", &["sleep_when_idle"]),

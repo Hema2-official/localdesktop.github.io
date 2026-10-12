@@ -1,4 +1,5 @@
 use super::process::ArchProcess;
+use crate::android::gpu_drivers;
 use crate::android::guest;
 use crate::android::guest::bus::{self, Bus};
 use crate::android::session;
@@ -78,6 +79,7 @@ pub fn launch() {
 
         let local_config = get_application_context().local_config;
         super::ssh::start(&local_config);
+        gpu_drivers::check_if_due(&local_config);
         let username = local_config.user.username;
 
         let desktop = ArchProcess {

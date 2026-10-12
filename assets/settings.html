@@ -153,6 +153,9 @@
         font: inherit;
         font-size: 14px;
       }
+      .row.column .choices {
+        align-self: flex-start;
+      }
       .choices button:first-child {
         border-left: none;
       }
@@ -380,6 +383,24 @@
               </span>
               <input type="checkbox" role="switch" data-setting="graphics.adreno_drivers" />
             </label>
+            <label class="row">
+              <span class="label">
+                <span class="title">Look for newer drivers</span>
+                <span class="description">
+                  Once a week. A newer release installs the next time Local Desktop starts, on
+                  its setup page, which then asks for one more start; if it doesn't work here,
+                  the one before it comes back.
+                </span>
+              </span>
+              <input type="checkbox" role="switch" data-setting="graphics.driver_updates" />
+            </label>
+            <div class="row">
+              <span class="label">
+                <span class="title">Installed</span>
+                <span class="description" id="gpu-status"></span>
+              </span>
+              <button class="action" id="gpu-check">Check now</button>
+            </div>
           </div>
         </div>
 
@@ -480,6 +501,7 @@
         "performance.cpu_boost": "CPU boost",
         "performance.fast_realpath": "Fast path lookups",
         "graphics.adreno_drivers": "Drivers for the Adreno",
+        "graphics.driver_updates": "Look for newer drivers",
         "ssh.enabled": "SSH server",
         "ssh.port": "SSH port",
         "ssh.password_login": "Password login",
@@ -574,6 +596,8 @@
           }
         }
 
+        showDrivers(state.gpu, values["graphics.adreno_drivers"]);
+
         const login = document.getElementById("ssh-login");
         const address = state.ssh && app ? app.address() : null;
         login.hidden = !(state.ssh && values["ssh.enabled"]);
@@ -582,6 +606,48 @@
           : "";
         const version = (app && app.version()) || state.version;
         document.getElementById("version").textContent = `Local Desktop ${version}`;
+      }
+
+      // "3 days ago", or a date.
+      function ago(seconds) {
+        const days = Math.floor((Date.now() / 1000 - seconds) / 86400);
+        if (days < 1) {
+          return "today";
+        }
+        if (days < 14) {
+          return days === 1 ? "yesterday" : `${days} days ago`;
+        }
+        return `on ${new Date(seconds * 1000).toLocaleDateString()}`;
+      }
+
+      let checking = null;
+      function showDrivers(gpu, wanted) {
+        const lines = [];
+        if (!gpu.installed) {
+          lines.push(wanted ? "Not yet: they install the next time Local Desktop starts." : "Arch's Mesa.");
+        } else if (gpu.release) {
+          lines.push(`Mesa for Adreno, ${gpu.release}.`);
+        } else {
+          lines.push(`Mesa for Adreno, installed ${ago(gpu.installed_at)}.`);
+        }
+        if (gpu.update) {
+          lines.push(`${gpu.update} installs the next time Local Desktop starts.`);
+        }
+        if (gpu.checking) {
+          lines.push("Looking for a newer release...");
+        } else if (gpu.failed) {
+          lines.push(`Looking failed: ${gpu.failed}.`);
+        } else if (gpu.checked) {
+          lines.push(`Looked ${ago(gpu.checked)}${gpu.update ? "" : ": nothing newer"}.`);
+        }
+        document.getElementById("gpu-status").textContent = lines.join(" ");
+        const button = document.getElementById("gpu-check");
+        button.disabled = gpu.checking || !gpu.installed;
+        // Asks again while the look goes on.
+        clearTimeout(checking);
+        if (gpu.checking) {
+          checking = setTimeout(refresh, 1000);
+        }
       }
 
       function set(setting, value) {
@@ -650,6 +716,9 @@
           }
         });
       }
+      document
+        .getElementById("gpu-check")
+        .addEventListener("click", () => show(ask({ op: "gpu-check" })));
       for (const button of document.querySelectorAll("[data-open]")) {
         button.addEventListener("click", () => app && app.open(button.dataset.open));
       }

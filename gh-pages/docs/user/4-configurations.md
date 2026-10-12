@@ -4,7 +4,7 @@ title: Configurations
 
 ## Settings page
 
-Local Desktop's settings change the config file below for you: the desktop and its user, what Android and the desktop share, the CPU boost, the GPU drivers and the SSH server. They open without starting the desktop, from:
+Local Desktop's settings change the config file below for you: the desktop and its user, what Android and the desktop share, the CPU boost, the GPU drivers and their updates, and the SSH server. They open without starting the desktop, from:
 
 - the app icon: touch and hold it, then **Settings**;
 - Android's App info for Local Desktop: **Configure in Local Desktop** (on some phones a gear at the top);
@@ -84,11 +84,14 @@ On phones with a Qualcomm Adreno GPU, Local Desktop installs [Mesa for Android c
 
 `pacman -Syu` leaves these packages alone (they're in `IgnorePkg` in `/etc/pacman.conf`), so an update can't swap Arch's Mesa back in. If an update removes a library the drivers need, the next start installs the newest release again, or puts Arch's Mesa back if that doesn't help either.
 
-To use Arch's own Mesa instead:
+Once a week, a minute after the desktop starts, Local Desktop looks for a newer release; the settings page's **Check now** looks right away. A newer release installs the next time Local Desktop starts, on its setup page, which then asks for one more start. If it doesn't work with the system's libraries, the release before it goes back on, and that one isn't offered again.
+
+To use Arch's own Mesa instead, or to keep the drivers you have:
 
 ```toml title="/etc/localdesktop/localdesktop.toml"
 [graphics]
-adreno_drivers = false
+adreno_drivers = false # Arch's Mesa
+driver_updates = false # no looking for newer releases
 ```
 
 ## Performance

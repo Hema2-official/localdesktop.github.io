@@ -6,6 +6,7 @@
 //! starts nothing else. While the app runs in the same process, the page also restarts the
 //! desktop, opens the terminal and tells what waits for a restart.
 
+use crate::android::gpu_drivers;
 use crate::android::proot::{launch, ssh};
 use crate::android::terminal;
 use crate::android::utils::application_context::try_application_context;
@@ -32,6 +33,10 @@ pub fn handle(request: &str) -> String {
         Some("restart") => restart(),
         Some("quit") => quit(),
         Some("terminal") => terminal(),
+        Some("gpu-check") => {
+            gpu_drivers::check_in_background();
+            state()
+        }
         _ => json!({ "error": "Not a request the app knows" }),
     };
     reply.to_string()
@@ -63,6 +68,7 @@ fn state() -> Value {
         "pending": pending,
         "ssh": login,
         "adreno": Path::new("/dev/kgsl-3d0").exists(),
+        "gpu": gpu_drivers::status(),
         "version": VERSION,
     })
 }

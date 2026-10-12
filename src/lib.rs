@@ -4,6 +4,7 @@ pub mod core {
     pub mod config;
     pub mod control;
     pub mod dbus;
+    pub mod gpu_drivers;
     pub mod hard_links;
     pub mod power_management;
     pub mod power_profiles;
@@ -17,6 +18,7 @@ pub mod android {
     pub mod accessibility;
     pub mod battery;
     pub mod clipboard;
+    pub mod gpu_drivers;
     pub mod guest;
     pub mod notifications;
     pub mod power_profile;

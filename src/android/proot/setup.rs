@@ -6,6 +6,7 @@ use crate::{
             wayland::{Compositor, TouchMode, WaylandBackend},
             webview::{ErrorVariant, WebviewBackend},
         },
+        gpu_drivers,
         guest::shared,
         session,
         utils::application_context::{get_application_context, reload_local_config},
@@ -17,7 +18,9 @@ use crate::{
             ARCH_FS_ROOT, CONFIG_FILE, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
             PULSE_GUEST_SERVER,
         },
-        control, hard_links,
+        control,
+        gpu_drivers::{self as driver_releases, Release},
+        hard_links,
     },
 };
 use pathdiff::diff_paths;
@@ -772,12 +775,10 @@ fn setup_pipewire_package_lock(_: &SetupOptions) -> StageOutput {
 }
 
 /// Mesa that drives Adreno GPUs through KGSL, built by
-/// https://github.com/lfdevs/mesa-for-android-container. Arch's own Mesa only drives GPUs through
-/// `/dev/dri`, which Android doesn't give apps, so with it Turnip (Vulkan) and Freedreno (OpenGL)
-/// find no GPU.
-const ADRENO_MESA_RELEASES: &str =
-    "https://api.github.com/repos/lfdevs/mesa-for-android-container/releases?per_page=30";
-/// The packages its Arch release replaces (its `mesa-docs` isn't needed).
+/// https://github.com/lfdevs/mesa-for-android-container (`android::gpu_drivers` lists its
+/// releases). Arch's own Mesa only drives GPUs through `/dev/dri`, which Android doesn't give
+/// apps, so with it Turnip (Vulkan) and Freedreno (OpenGL) find no GPU. These are the packages
+/// its Arch release replaces (its `mesa-docs` isn't needed).
 const ADRENO_MESA_PACKAGES: &[&str] = &[
     "mesa",
     "vulkan-freedreno",
@@ -788,7 +789,7 @@ const ADRENO_MESA_PACKAGES: &[&str] = &[
 /// that each launch can tell with a few `stat`s whether an update replaced the drivers or removed
 /// a library they need (an LLVM update removing their `libLLVM`, say). Updated libraries keep
 /// their name and work on.
-const ADRENO_MESA_STATE: &str = "var/lib/localdesktop/adreno-mesa";
+pub(crate) const ADRENO_MESA_STATE: &str = "var/lib/localdesktop/adreno-mesa";
 /// When an install last failed; it isn't tried again for a day, since every try brings up the
 /// setup page (and without network it can't succeed).
 const ADRENO_MESA_FAILED: &str = "var/lib/localdesktop/adreno-mesa.failed";
@@ -814,7 +815,9 @@ fn setup_adreno_mesa(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     let wanted = get_application_context().local_config.graphics.adreno_drivers;
     let installed = fs_root.join(ADRENO_MESA_STATE).exists();
-    if wanted == installed && (!wanted || adreno_mesa_intact(fs_root)) {
+    // A newer release, which a look for one found (`android::gpu_drivers`).
+    let update = gpu_drivers::pending_update().filter(|_| wanted && installed);
+    if wanted == installed && (!wanted || adreno_mesa_intact(fs_root)) && update.is_none() {
         let helper = fs_root.join(GPU_HELPER);
         if wanted && fs::read_to_string(&helper).ok().as_deref() != Some(GPU_HELPER_SCRIPT) {
             write_executable(&helper, GPU_HELPER_SCRIPT);
@@ -831,7 +834,7 @@ fn setup_adreno_mesa(options: &SetupOptions) -> StageOutput {
     let sender = options.mpsc_sender.clone();
     Some(thread::spawn(move || {
         let result = if wanted {
-            install_adreno_mesa(&sender)
+            adreno_mesa(&sender, update.as_deref())
         } else {
             restore_arch_mesa(&sender)
         };
@@ -883,70 +886,62 @@ fn adreno_mesa_intact(fs_root: &Path) -> bool {
     files > 0
 }
 
-fn install_adreno_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
-    let fs_root = Path::new(ARCH_FS_ROOT);
-    sender
-        .send(SetupMessage::Progress(
-            "Installing GPU drivers for the Adreno (Mesa for Android containers)...".into(),
-        ))
-        .unwrap_or(());
-
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("Local Desktop")
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let releases: serde_json::Value = client
-        .get(ADRENO_MESA_RELEASES)
-        .send()
-        .and_then(|it| it.error_for_status())
-        .and_then(|it| it.text())
-        .map_err(|error| format!("couldn't list the releases: {error}"))
-        .and_then(|it| serde_json::from_str(&it).map_err(|error| error.to_string()))?;
-    // The newest regular release; the `turnip-` ones only carry the Vulkan driver.
-    let (tag, name, url, sha256) = releases
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|release| release["draft"] == false && release["prerelease"] == false)
-        .filter(|release| {
-            release["tag_name"]
-                .as_str()
-                .is_some_and(|tag| tag.starts_with("mesa-"))
-        })
-        .find_map(|release| {
-            let asset = release["assets"].as_array()?.iter().find(|asset| {
-                asset["name"]
-                    .as_str()
-                    .is_some_and(|name| name.ends_with("_archlinux_arm64.tar"))
-            })?;
-            let name = asset["name"].as_str()?.to_string();
-            // GitHub's own digest, or the checksum list in the release notes.
-            let sha256 = asset["digest"]
-                .as_str()
-                .and_then(|it| it.strip_prefix("sha256:"))
-                .map(str::to_string)
-                .or_else(|| {
-                    release["body"].as_str()?.lines().find_map(|line| {
-                        let (hash, file) = line.trim().split_once(char::is_whitespace)?;
-                        (file.trim() == name).then(|| hash.to_string())
-                    })
-                })?;
-            Some((
-                release["tag_name"].as_str()?.to_string(),
-                name,
-                asset["browser_download_url"].as_str()?.to_string(),
-                sha256.to_lowercase(),
-            ))
-        })
+/// Mesa for Adreno: the release `update`, or the newest one that hasn't proved broken here. One
+/// that doesn't work here isn't offered again, and the release before it goes back on, or else
+/// Arch's Mesa.
+fn adreno_mesa(sender: &Sender<SetupMessage>, update: Option<&str>) -> Result<(), String> {
+    let releases = gpu_drivers::releases()?;
+    let skipped = gpu_drivers::skipped();
+    let release = driver_releases::release(&releases, update, skipped.as_deref())
         .ok_or("no release for Arch Linux found")?;
+    if install_adreno_mesa(sender, &release)? {
+        gpu_drivers::note_installed(&release.tag);
+        return Ok(());
+    }
+    gpu_drivers::skip(&release.tag);
+    let previous = gpu_drivers::installed()
+        .filter(|it| *it != release.tag)
+        .and_then(|tag| driver_releases::release(&releases, Some(&tag), None));
+    if let Some(previous) = previous {
+        sender
+            .send(SetupMessage::Progress(format!(
+                "The GPU drivers of {} don't work here: back to {}",
+                release.tag, previous.tag
+            )))
+            .unwrap_or(());
+        if install_adreno_mesa(sender, &previous)? {
+            return Ok(());
+        }
+    }
+    restore_arch_mesa(sender)?;
+    Err(format!(
+        "the {} build doesn't work with this system's libraries, so Arch's Mesa is back",
+        release.tag
+    ))
+}
+
+/// Install a release of Mesa for Adreno: whether it works here (everything it loads resolves,
+/// and Turnip finds the GPU).
+fn install_adreno_mesa(sender: &Sender<SetupMessage>, release: &Release) -> Result<bool, String> {
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    let (tag, name, url, sha256) = (
+        &release.tag,
+        &release.name,
+        &release.url,
+        release.sha256.as_str(),
+    );
+    sender
+        .send(SetupMessage::Progress(format!(
+            "Installing GPU drivers for the Adreno (Mesa for Android containers, {tag})..."
+        )))
+        .unwrap_or(());
     log::info!("Installing Mesa for Adreno from release {tag}");
 
     let dir = fs_root.join("tmp/localdesktop-adreno-mesa");
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-    let archive = dir.join(&name);
-    download(&url, &archive, sender, "Downloading GPU drivers");
+    let archive = dir.join(name);
+    download(url, &archive, sender, "Downloading GPU drivers");
 
     let mut hasher = Sha256::new();
     let mut file = File::open(&archive).map_err(|error| error.to_string())?;
@@ -1045,13 +1040,9 @@ fn install_adreno_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
             output = check();
         }
     }
-    let broken = output.contains("not found") || !output.contains("TURNIP_OK");
-    if broken {
-        log::warn!("Mesa for Adreno doesn't work here:\n{output}");
-        restore_arch_mesa(sender)?;
-        return Err(format!(
-            "the {tag} build doesn't work with this system's libraries, so Arch's Mesa is back"
-        ));
+    if output.contains("not found") || !output.contains("TURNIP_OK") {
+        log::warn!("Mesa for Adreno {tag} doesn't work here:\n{output}");
+        return Ok(false);
     }
     let mut state = String::new();
     let mut paths: Vec<&str> = output
@@ -1088,7 +1079,7 @@ fn install_adreno_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
             "GPU drivers installed ({tag})"
         )))
         .unwrap_or(());
-    Ok(())
+    Ok(true)
 }
 
 /// The major version of a `libLLVM.so.N…` that `ldd` couldn't find.
