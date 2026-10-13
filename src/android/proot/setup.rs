@@ -2191,7 +2191,7 @@ const PLASMA_XDG_DIR: &str = "etc/localdesktop/plasma";
 const PLASMA_DEFAULTS: &[(&str, &str)] = &[
     (
         "kwinrc",
-        "[Wayland]\n# Plasma's on-screen keyboard, for touch-only use.\nInputMethod=/usr/share/applications/org.kde.plasma.keyboard.desktop\n# Show it for any input: touches reach KWin as mouse events, which it would otherwise ignore.\nVirtualKeyboardMode=2\n",
+        "[Wayland]\n# Plasma's on-screen keyboard, for touch-only use, drawn without the GPU (PLASMA_KEYBOARD).\nInputMethod=/usr/share/applications/localdesktop-keyboard.desktop\n# Show it for any input: touches reach KWin as mouse events, which it would otherwise ignore.\nVirtualKeyboardMode=2\n",
     ),
     (
         "kdeglobals",
@@ -2229,6 +2229,22 @@ const PLASMA_DEFAULTS: &[(&str, &str)] = &[
          [Module-wpad_detector]\nautoload=false\n",
     ),
 ];
+
+/// Plasma's on-screen keyboard as KWin starts it. It keeps its window and the GPU's buffers for it
+/// while hidden, most of the time; drawn by Qt Quick's 2D renderer instead of with Vulkan like the
+/// rest of Plasma, it looks the same and holds about 35 MiB less.
+const PLASMA_KEYBOARD: (&str, &str) = (
+    "usr/share/applications/localdesktop-keyboard.desktop",
+    "[Desktop Entry]
+Name=Plasma Keyboard (Local Desktop)
+Comment=Plasma's on-screen keyboard, drawn without the GPU to use less memory
+Exec=env -u QSG_RHI_BACKEND QT_QUICK_BACKEND=software plasma-keyboard
+Type=Application
+Icon=input-keyboard-virtual
+NoDisplay=true
+X-KDE-Wayland-VirtualKeyboard=true
+",
+);
 
 /// Autostart entries hidden by an entry of the same name in `PLASMA_XDG_DIR/autostart`.
 const PLASMA_HIDDEN_AUTOSTART: &[&str] = &[
@@ -2326,12 +2342,11 @@ exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
         fs::write(autostart_dir.join(name), "[Desktop Entry]\nHidden=true\n")
             .expect("Failed to hide a Plasma autostart entry");
     }
-    let (script_path, script) = PLASMA_UNPIN_MISSING_APPS;
-    let script_path = fs_root.join(script_path);
-    if let Some(parent) = script_path.parent() {
-        let _ = fs::create_dir_all(parent);
+    for (path, contents) in [PLASMA_UNPIN_MISSING_APPS, PLASMA_KEYBOARD] {
+        let path = fs_root.join(path);
+        create_parent_dirs(&path);
+        fs::write(path, contents).expect("Failed to write a Plasma file");
     }
-    fs::write(script_path, script).expect("Failed to write a Plasma update script");
 
     let home_dir = chroot_home_dir(fs_root, &local_config.user.username);
     seed_desktop_items(&home_dir, "org.kde.okular.desktop");
