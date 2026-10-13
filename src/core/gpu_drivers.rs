@@ -79,7 +79,7 @@ pub fn due(last_checked: Option<u64>, now: u64) -> bool {
 }
 
 /// Seconds since 1970 of a time as GitHub writes it, `2026-08-25T06:05:41Z`.
-fn unix_seconds(time: &str) -> Option<u64> {
+pub(crate) fn unix_seconds(time: &str) -> Option<u64> {
     let (date, clock) = time.strip_suffix('Z')?.split_once('T')?;
     let numbers = |text: &str, separator| -> Option<Vec<i64>> {
         text.split(separator).map(|it| it.parse().ok()).collect()

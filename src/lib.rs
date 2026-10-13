@@ -8,6 +8,7 @@ pub mod core {
     pub mod descriptors;
     pub mod gpu_drivers;
     pub mod hard_links;
+    pub mod mirrors;
     pub mod power_management;
     pub mod power_profiles;
     pub mod settings;
@@ -41,6 +42,7 @@ pub mod android {
     }
     pub mod proot {
         pub mod launch;
+        pub mod mirrors;
         pub mod process;
         pub mod setup;
         pub mod ssh;

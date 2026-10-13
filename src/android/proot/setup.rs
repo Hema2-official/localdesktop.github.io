@@ -533,6 +533,13 @@ exit 0"#
     None
 }
 
+/// The fastest package mirrors first, once per install: in the background, which the first
+/// package install waits for.
+fn setup_package_mirrors(_: &SetupOptions) -> StageOutput {
+    super::mirrors::rank_once_in_background();
+    None
+}
+
 fn install_dependencies(options: &SetupOptions) -> StageOutput {
     let SetupOptions { mpsc_sender, .. } = options;
 
@@ -566,6 +573,15 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
         const MAX_INSTALL_ATTEMPTS: usize = 10;
         // Files the last attempt found in its way, to overwrite in the next one.
         let in_the_way = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        if !super::mirrors::ranked() {
+            mpsc_sender
+                .send(SetupMessage::Progress(
+                    "Finding the fastest package mirrors...".to_string(),
+                ))
+                .unwrap_or(());
+        }
+        super::mirrors::rank_once();
 
         // Install dependencies until `check` succeeds.
         for attempt in 1..=MAX_INSTALL_ATTEMPTS {
@@ -2508,6 +2524,7 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
         Box::new(simulate_linux_sysdata_stage), // Step 2. Simulate Linux system data
         Box::new(apply_desktop_choice),         // Step 3. Write the desktop chosen on a fresh install
         Box::new(setup_user),                   // Step 3b. Create the session user, before anything lands in its home
+        Box::new(setup_package_mirrors), // Step 3c. The fastest package mirrors first, once
         Box::new(install_dependencies),         // Step 4. Install dependencies
         Box::new(setup_fast_realpath), // Step 4b. realpath(3) in one question to proot, for every program
         Box::new(setup_machine_id),             // Step 5. Seed /etc/machine-id for D-Bus clients
