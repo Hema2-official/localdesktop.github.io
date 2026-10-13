@@ -17,8 +17,9 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
 - **An SSH server** (`[ssh]`), a terminal and a "restart the desktop" button in the app's
   notification, so a broken desktop doesn't lock you out. Restart and Quit log the desktop out
   first, so programs can save or ask about unsaved work; cancelling on the desktop cancels them.
-- **The desktop keeps running when you swipe the app out of the recent apps**: open the app or
-  tap its notification to get back to it. Quit in the notification ends it.
+- **The desktop keeps running, sound included, when you switch apps or swipe the app out of the
+  recent apps**: open the app or tap its notification to get back to it. Quit in the notification
+  ends it.
 - **The desktop's notifications on Android** while the app isn't in front, and **the screen
   turning off** after Android's timeout when nobody uses the desktop (a playing video keeps it on).
 - **The phone's battery in the desktop's battery widgets** (`[battery] share`), with Plasma's
