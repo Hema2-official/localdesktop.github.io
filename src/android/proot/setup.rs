@@ -1627,9 +1627,7 @@ esac
         ),
     ] {
         let path = fs_root.join(path);
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
+        create_parent_dirs(&path);
         fs::write(path, entry).expect("Failed to write a desktop entry");
     }
     write_executable(
@@ -1853,10 +1851,22 @@ fn chroot_home_dir(fs_root: &Path, username: &str) -> PathBuf {
     }
 }
 
-fn write_executable(path: &Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+/// Creates the directories missing on the way to `path` with the mode packages give theirs
+/// (0755), not the 0700 the app's umask would; pacman warns when a package's directory
+/// differs from one already there.
+fn create_parent_dirs(path: &Path) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    let missing: Vec<&Path> = parent.ancestors().take_while(|it| !it.exists()).collect();
+    let _ = fs::create_dir_all(parent);
+    for directory in missing {
+        let _ = fs::set_permissions(directory, fs::Permissions::from_mode(0o755));
     }
+}
+
+fn write_executable(path: &Path, contents: &str) {
+    create_parent_dirs(path);
     fs::write(path, contents).expect("Failed to write executable script");
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
         .expect("Failed to mark executable script");
