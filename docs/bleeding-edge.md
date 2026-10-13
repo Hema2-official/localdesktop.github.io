@@ -12,6 +12,10 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
   files with far fewer stops. Package installs and Node.js tools run about twice as fast as in
   the official app, the desktop starts three times as fast, and the file quirks that broke
   `git`, `pnpm`, `makepkg`, KWin and others are fixed.
+- **Package downloads from the mirrors that answer fastest from where you are**: the first start
+  times Arch Linux ARM's mirrors and puts the fastest first. The Plasma desktop's 820 MB of
+  packages downloaded in 35 s on the test phone, against 2.5 to 14 minutes through the default
+  mirror redirector.
 - **One clipboard** for Android and the desktop (`[clipboard] sync`): text and images, both ways.
 - **A normal user**, named on the first start (or later in `[user] username`), with `sudo`.
 - **An SSH server** (`[ssh]`), a terminal and a "restart the desktop" button in the app's
