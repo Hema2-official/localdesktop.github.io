@@ -211,7 +211,8 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
 
 impl PolarBearApp {
     /// Let go of the activity's window: it's gone, or the activity is (`attach` hands the app
-    /// to the next one). The GL context stays for the next window.
+    /// to the next one). The GL context stays for the next window. The sound goes on, as the
+    /// desktop does: `launch::quit` stops it.
     pub fn detach(&mut self) {
         accessibility::set_runtime_active(false);
 
@@ -222,8 +223,6 @@ impl PolarBearApp {
             backend.key_counter = 0;
             backend.reset_touch_state();
             backend.pointer_pressed = false;
-            // Kill the standalone-client PipeWire/AAudio backend if it was started.
-            pipewire_standalone_aaudio::shutdown();
         }
     }
 }

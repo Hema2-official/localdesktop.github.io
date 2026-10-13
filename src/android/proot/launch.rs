@@ -1,4 +1,5 @@
 use super::process::ArchProcess;
+use crate::android::backend::pipewire_standalone_aaudio;
 use crate::android::gpu_drivers;
 use crate::android::guest;
 use crate::android::guest::bus::{self, Bus};
@@ -382,6 +383,7 @@ pub fn kill_children() {
 pub fn quit() -> ! {
     log::info!("Quitting");
     STOPPING.store(true, Ordering::Release);
+    pipewire_standalone_aaudio::shutdown();
     kill_children();
     std::process::exit(0);
 }
