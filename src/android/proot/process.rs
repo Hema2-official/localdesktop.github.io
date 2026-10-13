@@ -148,14 +148,20 @@ impl ArchProcess {
             .args(args)
             .output()
             .map(|o| {
-                log::info!(
-                    "try_proot_probe rootfs={}, program={}, status={:?}, stdout: {}, stderr: {}",
-                    rootfs.display(),
-                    guest_program,
-                    o.status.code(),
-                    String::from_utf8_lossy(&o.stdout),
-                    String::from_utf8_lossy(&o.stderr)
-                );
+                // The program's output only matters when it failed: ld.so's usage text
+                // would otherwise fill the log at every start.
+                if o.status.success() {
+                    log::info!("try_proot_probe program={}: ran", guest_program);
+                } else {
+                    log::info!(
+                        "try_proot_probe rootfs={}, program={}, status={:?}, stdout: {}, stderr: {}",
+                        rootfs.display(),
+                        guest_program,
+                        o.status.code(),
+                        String::from_utf8_lossy(&o.stdout),
+                        String::from_utf8_lossy(&o.stderr)
+                    );
+                }
                 o.status.success()
             })
             .unwrap_or_else(|e| {
