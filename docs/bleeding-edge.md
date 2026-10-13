@@ -37,7 +37,8 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
   (`.apk`, `.xapk`, `.apks`) install from the file manager, with Android asking first.
 - **A settings page** that needs no desktop: touch and hold the app icon, then Settings (or
   Android's App info, or the desktop's menu). It changes the config file line by line and says
-  when each change takes effect.
+  when each change takes effect. When something is broken, it reinstalls every package at the
+  next start, or puts the settings back to their defaults (keeping the old file).
 - **The GPU** (Turnip on Qualcomm phones) for Vulkan programs, and Plasma's own drawing.
 
 The details are in the commits of the branch; the user docs in `gh-pages/docs/user/` describe

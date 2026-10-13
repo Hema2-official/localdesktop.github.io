@@ -44,6 +44,18 @@ final class SettingsBridge {
         }
     }
 
+    /** Android's phantom process killer, as PhantomProcessKiller.state tells it. */
+    @JavascriptInterface
+    public String phantomProcessKiller() {
+        return PhantomProcessKiller.state(activity);
+    }
+
+    /** Whether the notice about the phantom process killer comes up when Local Desktop starts. */
+    @JavascriptInterface
+    public void remindOfPhantomProcessKiller(boolean on) {
+        PhantomProcessKiller.remind(activity, on);
+    }
+
     /** The phone's address on its network, for the SSH login, or null. */
     @JavascriptInterface
     public String address() {

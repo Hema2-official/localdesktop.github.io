@@ -12,6 +12,13 @@ Local Desktop's settings change the config file below for you: the desktop and i
 
 The page says when a change takes effect: some when the desktop restarts (it has a button for that), the others the next time Local Desktop starts, since it has to install or set something up first (a new user, the other desktop, the SSH server). It also lists the problems the config file has. The commands that start the desktop, and everything else below, stay in the file.
 
+When something is broken, its **Repair** section has two ways back:
+
+- **Reinstall the packages**: the next time Local Desktop starts, every package from Arch Linux ARM installs again, over files that went missing or broke. Your files, and settings you changed in `/etc`, stay. Packages from elsewhere (the AUR) aren't touched, nor the GPU drivers Local Desktop installs. It takes a few minutes and downloads only what isn't in pacman's package cache.
+- **Reset the settings**: everything back to its default, except the desktop and the user, and the commands in the file go. The old file is kept as `/etc/localdesktop/localdesktop.toml.bak`.
+
+On Android 12 and later, the page also has a card about Android's [phantom process killer](1-getting-started.md#disable-phantom-process-killer). Android doesn't let apps see whether it's turned off, so the card says only whether Local Desktop turns it off itself (when you've granted it `WRITE_SECURE_SETTINGS` over adb), and links to the ways to turn it off. Its switch brings back the notice about it that "Don't show again" turned off.
+
 ## Config file
 
 On launch, Local Desktop reads the config file located at:

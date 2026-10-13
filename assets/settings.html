@@ -201,6 +201,10 @@
       button.action:disabled {
         opacity: 0.4;
       }
+      button.action.danger {
+        border-color: var(--error);
+        color: var(--error);
+      }
       .buttons {
         display: flex;
         flex-wrap: wrap;
@@ -463,7 +467,68 @@
             <span class="error" data-error="ssh.authorized_keys"></span>
           </div>
         </div>
+
+        <h2>Repair</h2>
+        <div class="card">
+          <div class="row column">
+            <span class="label">
+              <span class="title">Reinstall the packages</span>
+              <span class="description">
+                Every package from Arch Linux ARM installs again the next time Local Desktop
+                starts, for a desktop or a program that lost or broke some of its files. Your
+                files and settings stay. It takes a few minutes, and downloads only what isn't in
+                the package cache.
+              </span>
+              <span class="description" id="reinstall-set" hidden>
+                Set for the next start.
+              </span>
+            </span>
+            <div class="buttons">
+              <button class="action" id="reinstall">Reinstall at the next start</button>
+              <button class="action" id="reinstall-cancel" hidden>Don't reinstall</button>
+            </div>
+          </div>
+          <div class="row column">
+            <span class="label">
+              <span class="title">Reset the settings</span>
+              <span class="description">
+                Everything on this page back to its default, except the desktop and the user,
+                and the commands in the file go. The old file stays next to it, as
+                <code>localdesktop.toml.bak</code>.
+              </span>
+              <span class="description" id="reset-done" hidden></span>
+            </span>
+            <div class="buttons" id="reset-ask">
+              <button class="action" id="reset">Reset the settings</button>
+            </div>
+            <div class="buttons" id="reset-confirm" hidden>
+              <button class="action danger" id="reset-yes">Reset them</button>
+              <button class="action" id="reset-no">Cancel</button>
+            </div>
+          </div>
+        </div>
       </fieldset>
+
+      <div id="phantom" hidden>
+        <h2>Android's phantom process killer</h2>
+        <div class="card">
+          <div class="row column">
+            <span class="label">
+              <span class="description" id="phantom-status"></span>
+            </span>
+            <div class="buttons" id="phantom-fix">
+              <button class="action" id="phantom-guide">How to turn it off</button>
+            </div>
+          </div>
+          <label class="row" id="phantom-remind-row">
+            <span class="label">
+              <span class="title">Remind me when Local Desktop starts</span>
+              <span class="description">A notice with the way to turn it off.</span>
+            </span>
+            <input type="checkbox" role="switch" id="phantom-remind" />
+          </label>
+        </div>
+      </div>
 
       <h2>More</h2>
       <div class="card">
@@ -561,12 +626,18 @@
           ["restart", "pending-restart"],
           ["next-start", "pending-start"],
         ]) {
-          const waiting = (state.pending || []).filter((it) => it.applies === applies);
+          const waiting = (state.pending || [])
+            .filter((it) => it.applies === applies)
+            .map((it) => names[it.setting] || it.setting);
+          if (applies === "next-start" && state.reinstall && state.running) {
+            waiting.push("Reinstalling the packages");
+          }
           document.getElementById(id).hidden = waiting.length === 0;
-          document.getElementById(`${id}-list`).textContent = waiting
-            .map((it) => names[it.setting] || it.setting)
-            .join(", ");
+          document.getElementById(`${id}-list`).textContent = waiting.join(", ");
         }
+        document.getElementById("reinstall").hidden = state.reinstall;
+        document.getElementById("reinstall-cancel").hidden = !state.reinstall;
+        document.getElementById("reinstall-set").hidden = !state.reinstall;
         document.getElementById("gpu").hidden = !state.adreno;
         for (const element of document.querySelectorAll("[data-running]")) {
           element.hidden = !state.running;
@@ -698,8 +769,70 @@
         });
       }
 
+      document
+        .getElementById("reinstall")
+        .addEventListener("click", () => show(ask({ op: "reinstall", on: true })));
+      document
+        .getElementById("reinstall-cancel")
+        .addEventListener("click", () => show(ask({ op: "reinstall", on: false })));
+
+      const resetDone = document.getElementById("reset-done");
+      function askToReset(asking) {
+        document.getElementById("reset-ask").hidden = asking;
+        document.getElementById("reset-confirm").hidden = !asking;
+      }
+      document.getElementById("reset").addEventListener("click", () => {
+        resetDone.hidden = true;
+        askToReset(true);
+      });
+      document.getElementById("reset-no").addEventListener("click", () => askToReset(false));
+      document.getElementById("reset-yes").addEventListener("click", () => {
+        askToReset(false);
+        const next = ask({ op: "reset" });
+        if (!next.error) {
+          for (const element of document.querySelectorAll("[data-error]")) {
+            element.textContent = "";
+          }
+          resetDone.textContent = next.kept
+            ? "Done. The old settings are in localdesktop.toml.bak."
+            : "They were the defaults already.";
+          resetDone.hidden = false;
+        }
+        show(next);
+      });
+
+      // Apps can't read whether it's off; the app knows whether it turns it off itself.
+      let phantomGuide = null;
+      function showPhantom() {
+        let killer = {};
+        try {
+          killer = JSON.parse(app.phantomProcessKiller());
+        } catch (error) {}
+        document.getElementById("phantom").hidden = !killer.applies;
+        document.getElementById("phantom-status").textContent = killer.turnedOff
+          ? "Off: Local Desktop turns it off whenever it starts, with the permission you granted it."
+          : "Android stops apps' background processes, Linux programs included, when there are " +
+            "more than 32 of them or they use a lot of CPU. Apps can't see whether it's turned " +
+            "off: if you turned it off, there's nothing more to do.";
+        document.getElementById("phantom-fix").hidden = killer.turnedOff;
+        document.getElementById("phantom-remind-row").hidden = killer.turnedOff;
+        document.getElementById("phantom-remind").checked = killer.reminds;
+        phantomGuide = killer.guide;
+      }
+      document.getElementById("phantom-guide").addEventListener("click", () => {
+        if (phantomGuide) {
+          app.open(phantomGuide);
+        }
+      });
+      document.getElementById("phantom-remind").addEventListener("change", (event) => {
+        app.remindOfPhantomProcessKiller(event.target.checked);
+      });
+
       function refresh() {
         show(ask({ op: "get" }));
+        if (app) {
+          showPhantom();
+        }
       }
       for (const button of document.querySelectorAll("[data-op]")) {
         button.addEventListener("click", () => {

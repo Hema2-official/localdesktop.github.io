@@ -561,8 +561,10 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
         .success()
     };
 
+    let reinstall_request = Path::new(ARCH_FS_ROOT).join(REINSTALL_REQUEST);
+    let mut reinstall = reinstall_request.exists();
     let mut broken = broken_packages();
-    if broken.is_empty() && installed() {
+    if !reinstall && broken.is_empty() && installed() {
         return None;
     }
 
@@ -573,6 +575,38 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
         const MAX_INSTALL_ATTEMPTS: usize = 10;
         // Files the last attempt found in its way, to overwrite in the next one.
         let in_the_way = Arc::new(Mutex::new(Vec::<String>::new()));
+        // A transaction killed midway can leave files that no package owns: those of a package
+        // it was extracting, or one moving between two packages it was upgrading. pacman then
+        // refuses every attempt with "exists in filesystem", so the next one overwrites exactly
+        // those files, where the command is a single pacman command (as the presets' are).
+        let run_pacman = |command: &str| {
+            let single_pacman = command.contains("pacman ") && !command.contains([';', '&', '|']);
+            let overwrite: String = std::mem::take(&mut *in_the_way.lock().unwrap())
+                .iter()
+                .filter(|_| single_pacman)
+                .map(|path| format!(" --overwrite '{}'", path.replace('\'', "'\\''")))
+                .collect();
+            if !overwrite.is_empty() {
+                log::warn!("Installing over files an interrupted install left:{overwrite}");
+            }
+            let sender = mpsc_sender.clone();
+            let found = in_the_way.clone();
+            ArchProcess {
+                command: format!("{command}{overwrite}"),
+                user: None,
+                log: Some(Arc::new(move |it| {
+                    if let Some(path) = file_in_the_way(&it) {
+                        found.lock().unwrap().push(path);
+                    }
+                    sender
+                        .send(SetupMessage::Progress(it))
+                        .expect("Failed to send log message");
+                })),
+            }
+            .run()
+            .status
+            .success()
+        };
 
         if !super::mirrors::ranked() {
             mpsc_sender
@@ -635,36 +669,20 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
                     broken.clear();
                 }
             }
-            // A transaction killed midway can leave files that no package owns: those of a package
-            // it was extracting, or one moving between two packages it was upgrading. pacman then
-            // refuses every attempt with "exists in filesystem", so the next one overwrites exactly
-            // those files, where `install` is a single pacman command (as the presets' are).
-            let single_pacman = install.contains("pacman ") && !install.contains([';', '&', '|']);
-            let overwrite: String = std::mem::take(&mut *in_the_way.lock().unwrap())
-                .iter()
-                .filter(|_| single_pacman)
-                .map(|path| format!(" --overwrite '{}'", path.replace('\'', "'\\''")))
-                .collect();
-            if !overwrite.is_empty() {
-                log::warn!("Installing over files an interrupted install left:{overwrite}");
+            if reinstall {
+                let reinstalled =
+                    reinstall_command(&mpsc_sender).is_some_and(|command| run_pacman(&command));
+                if reinstalled {
+                    log::info!("Packages: reinstalled");
+                    let _ = fs::remove_file(&reinstall_request);
+                    reinstall = false;
+                }
             }
-            let sender = mpsc_sender.clone();
-            let found = in_the_way.clone();
-            ArchProcess {
-                command: format!("{install}{overwrite}"),
-                user: None,
-                log: Some(Arc::new(move |it| {
-                    if let Some(path) = file_in_the_way(&it) {
-                        found.lock().unwrap().push(path);
-                    }
-                    sender
-                        .send(SetupMessage::Progress(it))
-                        .expect("Failed to send log message");
-                })),
+            if !reinstall {
+                run_pacman(&install);
             }
-            .run();
 
-            if broken.is_empty() && installed() {
+            if !reinstall && broken.is_empty() && installed() {
                 download_user_manual();
                 return;
             }
@@ -682,10 +700,16 @@ fn install_dependencies(options: &SetupOptions) -> StageOutput {
                     .expect("Failed to send dependency install progress");
                 thread::sleep(Duration::from_secs(wait));
             } else {
-                let error_message = format!(
-                    "Failed to install desktop dependencies after {} attempts. Please check your net connection and try restarting the app.",
-                    MAX_INSTALL_ATTEMPTS
-                );
+                let error_message = if reinstall {
+                    format!(
+                        "Reinstalling the packages failed {MAX_INSTALL_ATTEMPTS} times. Please check your net connection and restart the app, or call the reinstall off in the app's settings."
+                    )
+                } else {
+                    format!(
+                        "Failed to install desktop dependencies after {} attempts. Please check your net connection and try restarting the app.",
+                        MAX_INSTALL_ATTEMPTS
+                    )
+                };
                 mpsc_sender
                     .send(SetupMessage::Error(error_message.clone()))
                     .unwrap_or(());
@@ -701,6 +725,71 @@ fn file_in_the_way(line: &str) -> Option<String> {
     let (_, rest) = line.split_once(": /")?;
     let (path, _) = rest.split_once(" exists in filesystem")?;
     Some(format!("/{path}"))
+}
+
+/// Asked for on the settings page (`android::settings`): every package from the repositories
+/// again, the next time setup runs, for a system that lost or broke files of its packages.
+pub(crate) const REINSTALL_REQUEST: &str = "var/lib/localdesktop/reinstall-packages";
+
+/// The pacman command that installs every package from the repositories again, or None if
+/// pacman couldn't list them. Packages pacman.conf holds back stay as they are (Mesa for Adreno
+/// replaces Arch's), and so do those from elsewhere (the AUR), which it can't download.
+fn reinstall_command(sender: &Sender<SetupMessage>) -> Option<String> {
+    let lines = |command: &str| {
+        let output = ArchProcess {
+            command: command.into(),
+            user: None,
+            log: None,
+        }
+        .run();
+        let lines: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        (output.status.success(), lines)
+    };
+    // What comes from the repositories needs their databases.
+    let (listed, native) = lines("pacman -Sy --noconfirm >&2 && pacman -Qqn");
+    let (read, held) = lines("pacman-conf IgnorePkg");
+    if !listed || !read {
+        log::warn!("Packages: couldn't list the packages to reinstall");
+        return None;
+    }
+    // Exits with 1 when there are none.
+    let (_, foreign) = lines("pacman -Qqm");
+    let packages: Vec<&str> = native
+        .iter()
+        .map(String::as_str)
+        .filter(|it| !held.iter().any(|held| held == it))
+        .filter(|it| {
+            it.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "@._+-".contains(c))
+        })
+        .collect();
+    log::info!(
+        "Packages: reinstalling {}, not {} held back and {} from elsewhere",
+        packages.len(),
+        native.len() - packages.len(),
+        foreign.len()
+    );
+    if !foreign.is_empty() {
+        sender
+            .send(SetupMessage::Progress(format!(
+                "Not from Arch Linux ARM's repositories, so not reinstalled: {}",
+                foreign.join(" ")
+            )))
+            .unwrap_or(());
+    }
+    sender
+        .send(SetupMessage::Progress(format!(
+            "Reinstalling {} packages, as asked in the settings...",
+            packages.len()
+        )))
+        .unwrap_or(());
+    Some(format!(
+        "stdbuf -oL pacman -Syu --noconfirm --noprogressbar {}",
+        packages.join(" ")
+    ))
 }
 
 /// Packages whose entry in pacman's local database lacks `desc` or `files`, as `(directory,

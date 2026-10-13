@@ -10,6 +10,8 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Build;
 import android.provider.Settings;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 /**
  * Android 12+ kills apps' child processes when there are more than 32 of them across all apps or
@@ -43,6 +45,32 @@ final class PhantomProcessKiller {
         cancelNotice(context);
     }
 
+    /**
+     * What the settings page shows, as JSON: whether Android has the killer, whether Local Desktop
+     * turns it off (the permission was granted), whether the notice comes up at the start, and
+     * the guide.
+     */
+    static String state(Context context) {
+        try {
+            return new JSONObject()
+                    .put("applies", Build.VERSION.SDK_INT >= 31)
+                    .put("turnedOff", Build.VERSION.SDK_INT >= 32 && granted(context))
+                    .put("reminds", !preferences(context).getBoolean(DISMISSED, false))
+                    .put("guide", guideUrl(context))
+                    .toString();
+        } catch (JSONException e) {
+            return "{}";
+        }
+    }
+
+    /** Whether the notice comes up when Local Desktop starts, until it's dealt with. */
+    static void remind(Context context, boolean on) {
+        preferences(context).edit().putBoolean(DISMISSED, !on).apply();
+        if (!on) {
+            cancelNotice(context);
+        }
+    }
+
     /** The guide, with the commands for this package and Android version. */
     static String guideUrl(Context context) {
         return "file:///android_asset/phantom-process-killer.html?package="
@@ -51,9 +79,7 @@ final class PhantomProcessKiller {
 
     /** Android 12L+ keeps the switch in a global setting; Android 12 in device_config, which apps can't write. */
     private static boolean turnOff(Context context) {
-        if (Build.VERSION.SDK_INT < 32
-                || context.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS")
-                        != PackageManager.PERMISSION_GRANTED) {
+        if (Build.VERSION.SDK_INT < 32 || !granted(context)) {
             return false;
         }
         try {
@@ -61,6 +87,11 @@ final class PhantomProcessKiller {
         } catch (SecurityException e) {
             return false;
         }
+    }
+
+    private static boolean granted(Context context) {
+        return context.checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS")
+                == PackageManager.PERMISSION_GRANTED;
     }
 
     private static void showNotice(Context context) {

@@ -7,6 +7,7 @@
 //! desktop, opens the terminal and tells what waits for a restart.
 
 use crate::android::gpu_drivers;
+use crate::android::proot::setup::REINSTALL_REQUEST;
 use crate::android::proot::{launch, ssh};
 use crate::android::terminal;
 use crate::android::utils::application_context::try_application_context;
@@ -33,6 +34,8 @@ pub fn handle(request: &str) -> String {
         Some("restart") => restart(),
         Some("quit") => quit(),
         Some("terminal") => terminal(),
+        Some("reset") => reset(),
+        Some("reinstall") => reinstall(request["on"].as_bool().unwrap_or(false)),
         Some("gpu-check") => {
             gpu_drivers::check_in_background();
             state()
@@ -69,6 +72,8 @@ fn state() -> Value {
         "ssh": login,
         "adreno": Path::new("/dev/kgsl-3d0").exists(),
         "gpu": gpu_drivers::status(),
+        // Asked for: every package again at the next start.
+        "reinstall": Path::new(ARCH_FS_ROOT).join(REINSTALL_REQUEST).exists(),
         "version": VERSION,
     })
 }
@@ -95,6 +100,61 @@ fn set(request: &Value) -> Value {
             state()
         }
         Err(error) => json!({ "error": error }),
+    }
+}
+
+/// Every setting back to its default but the desktop and the user, with the file as it was kept
+/// next to it.
+fn reset() -> Value {
+    if !Path::new(ARCH_FS_ROOT).join("etc").is_dir() {
+        return json!({ "error": "Local Desktop isn't set up yet" });
+    }
+    let path = config_path();
+    let backup = path.with_extension("toml.bak");
+    let mut kept = false;
+    let result = config::update_file(&path, |content| {
+        let reset = settings::reset(content);
+        if reset != content {
+            fs::write(&backup, content)
+                .map_err(|error| format!("Couldn't keep the old file: {error}"))?;
+            kept = true;
+        }
+        Ok(reset)
+    });
+    match result {
+        Ok(()) => {
+            log::info!("Settings: reset the config, the old one kept: {kept}");
+            let mut reply = state();
+            reply["kept"] = kept.into();
+            reply
+        }
+        Err(error) => json!({ "error": error }),
+    }
+}
+
+/// Ask setup to install every package again at the next start, or not.
+fn reinstall(on: bool) -> Value {
+    let request = Path::new(ARCH_FS_ROOT).join(REINSTALL_REQUEST);
+    let result = if on {
+        if !Path::new(ARCH_FS_ROOT).join("etc").is_dir() {
+            return json!({ "error": "Local Desktop isn't set up yet" });
+        }
+        request
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::write(&request, ""))
+    } else {
+        fs::remove_file(&request).or_else(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(error),
+        })
+    };
+    match result {
+        Ok(()) => {
+            log::info!("Settings: reinstall the packages at the next start: {on}");
+            state()
+        }
+        Err(error) => json!({ "error": error.to_string() }),
     }
 }
 

@@ -194,6 +194,13 @@ pub fn set(content: &str, section: &str, key: &str, value: &Value) -> Result<Str
     Ok(config::with_value(content, section, key, &literal))
 }
 
+/// The config a fresh install with the file's desktop and user would start with: every other
+/// setting, and the commands, back to their defaults.
+pub fn reset(content: &str) -> String {
+    let file = config::parse_text(content);
+    config::first_config(file.desktop.preset(), &file.user.username)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +253,22 @@ mod tests {
         assert!(set(FILE, "ssh", "port", &json!(2222)).is_ok());
         assert!(set(FILE, "clipboard", "sync", &json!("yes")).is_err());
         assert!(set(FILE, "command", "launch", &json!("sh")).is_err());
+    }
+
+    #[test]
+    fn should_reset_all_but_the_desktop_and_the_user() {
+        let changed = set(FILE, "clipboard", "sync", &json!(false)).unwrap();
+        let changed = format!("{changed}[command]\nlaunch = \"sh\"\n");
+        let fresh = reset(&changed);
+        let read = config::parse_text(&fresh);
+        assert_eq!(read.desktop.preset, "plasma");
+        assert_eq!(read.user.username, "tester");
+        assert!(read.clipboard.sync);
+        assert!(!fresh.contains("[command]"));
+        assert!(config::problems(&fresh).is_empty());
+        // Even from a file that doesn't read.
+        let fresh = reset("[desktop\npreset = \"plasma\"\n");
+        assert_eq!(config::parse_text(&fresh).desktop.preset, "xfce");
     }
 
     #[test]
