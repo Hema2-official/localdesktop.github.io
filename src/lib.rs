@@ -1,4 +1,5 @@
 pub mod core {
+    pub mod backup;
     pub mod bus;
     pub mod clipboard;
     pub mod config;
@@ -19,6 +20,7 @@ pub mod core {
 #[cfg(target_os = "android")]
 pub mod android {
     pub mod accessibility;
+    pub mod backup;
     pub mod battery;
     pub mod clipboard;
     pub mod gpu_drivers;

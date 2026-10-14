@@ -17,6 +17,24 @@ When something is broken, its **Repair** section has two ways back:
 - **Reinstall the packages**: the next time Local Desktop starts, every package from Arch Linux ARM installs again, over files that went missing or broke. Your files, and settings you changed in `/etc`, stay. Packages from elsewhere (the AUR) aren't touched, nor the GPU drivers Local Desktop installs. It takes a few minutes and downloads only what isn't in pacman's package cache.
 - **Reset the settings**: everything back to its default, except the desktop and the user, and the commands in the file go. The old file is kept as `/etc/localdesktop/localdesktop.toml.bak`.
 
+### Backups
+
+The page's **Backup** section saves the whole Linux system into one file and brings it back:
+
+- **Back up** asks Android's file picker where the file goes: Downloads, an SD card, a USB stick, Drive. A running desktop logs out first, so that its programs can save (you can cancel on the desktop, which cancels the backup), and starts again when you go back to it. pacman's package cache is left out unless you switch it on; pacman downloads those packages again when it needs them. On the test phone, a Plasma system of 4.3 GB took under two minutes and made a file of 1.4 GB.
+- **Restore** asks for the file, says what's in it (when it was made, by which app, the desktop and the user), and lays the system out beside the current one, which goes on running meanwhile. The next time Local Desktop starts, the restored system takes its place, setup runs on it once more (and asks for a restart), and the previous system is deleted. Restoring needs room for both for a while.
+- The file is a standard archive (`.tar.zst`): any `tar` that reads zstd lists or unpacks it with the owners, modes and hard links Linux programs saw (`tar --zstd -tvf FILE`). Backups made by any Local Desktop app (the official one, a bleeding-edge build) restore in any other, and on another phone.
+
+To move to this app from an app without the Backup section (the official Local Desktop, say), make the archive inside the old system, from its terminal, with **All files access** granted so that `/android` is Android's storage ([Share files between Android and Linux](5-android-storage.md)):
+
+```sh
+sudo tar -I 'zstd -T0' -cpf /android/Download/my-system.tar.zst -C / \
+    --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' --exclude='./tmp/*' \
+    --exclude='./run/*' --exclude='./android/*' --exclude='./var/cache/pacman/pkg/*' .
+```
+
+Then restore `my-system.tar.zst` here. Archives that `tar` made (`.tar`, `.tar.gz`, `.tar.xz` or `.tar.zst`) restore if they hold a Linux system with `/etc` and `/usr`.
+
 On Android 12 and later, the page also has a card about Android's [phantom process killer](1-getting-started.md#disable-phantom-process-killer). Android doesn't let apps see whether it's turned off, so the card says only whether Local Desktop turns it off itself (when you've granted it `WRITE_SECURE_SETTINGS` over adb), and links to the ways to turn it off. Its switch brings back the notice about it that "Don't show again" turned off.
 
 ## Config file

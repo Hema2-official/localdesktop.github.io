@@ -201,6 +201,11 @@
       button.action:disabled {
         opacity: 0.4;
       }
+      progress {
+        width: 100%;
+        height: 8px;
+        accent-color: var(--accent);
+      }
       button.action.danger {
         border-color: var(--error);
         color: var(--error);
@@ -509,6 +514,73 @@
         </div>
       </fieldset>
 
+      <h2>Backup</h2>
+      <div class="card">
+        <div class="row column">
+          <span class="label">
+            <span class="title">Back up the Linux system</span>
+            <span class="description">
+              Into a file you pick: Downloads, an SD card, a USB stick, Drive. A running desktop
+              logs out first, so that its programs can save, and starts again when you go back
+              to it.
+            </span>
+          </span>
+          <div class="buttons">
+            <button class="action" id="backup">Back up…</button>
+          </div>
+        </div>
+        <label class="row">
+          <span class="label">
+            <span class="title">Include the package cache</span>
+            <span class="description" id="cache-size">
+              Packages pacman downloaded, which it can download again.
+            </span>
+          </span>
+          <input type="checkbox" role="switch" id="package-cache" />
+        </label>
+        <div class="row column">
+          <span class="label">
+            <span class="title">Restore a backup</span>
+            <span class="description">
+              It takes this Linux system's place the next time Local Desktop starts; until then,
+              nothing changes. Backups from any Local Desktop app work, and so does a
+              <code>tar</code> of a Linux system.
+            </span>
+          </span>
+          <div class="buttons">
+            <button class="action" id="restore">Restore…</button>
+          </div>
+        </div>
+        <div class="row column" id="restore-ask" hidden>
+          <span class="label">
+            <span class="title">Restore this backup?</span>
+            <span class="description" id="restore-about"></span>
+          </span>
+          <div class="buttons">
+            <button class="action danger" id="restore-yes">Restore it</button>
+            <button class="action" id="restore-no">Cancel</button>
+          </div>
+        </div>
+        <div class="row column" id="job" hidden>
+          <span class="label">
+            <span class="title" id="job-title"></span>
+            <span class="description" id="job-text"></span>
+          </span>
+          <progress id="job-bar" max="1" value="0"></progress>
+        </div>
+        <div class="row column" id="restored" hidden>
+          <span class="label">
+            <span class="title">A restored system is ready</span>
+            <span class="description" id="restored-about"></span>
+          </span>
+          <div class="buttons">
+            <button class="action" data-op="quit" data-running>Quit Local Desktop</button>
+            <button class="action" data-open="desktop" data-stopped>Start Local Desktop</button>
+            <button class="action" id="restore-discard">Don't restore it</button>
+          </div>
+        </div>
+      </div>
+
       <div id="phantom" hidden>
         <h2>Android's phantom process killer</h2>
         <div class="card">
@@ -668,6 +740,7 @@
         }
 
         showDrivers(state.gpu, values["graphics.adreno_drivers"]);
+        showBackup(state.backup || {});
 
         const login = document.getElementById("ssh-login");
         const address = state.ssh && app ? app.address() : null;
@@ -799,6 +872,186 @@
           resetDone.hidden = false;
         }
         show(next);
+      });
+
+      // "4.9 GB", "820 MB".
+      function size(bytes) {
+        if (bytes >= 1e9) {
+          return `${(bytes / 1e9).toFixed(1)} GB`;
+        }
+        return `${bytes > 0 ? Math.max(1, Math.round(bytes / 1e6)) : 0} MB`;
+      }
+
+      const apps = {
+        "app.polarbear": "Local Desktop",
+        "app.polarbear.edge": "Local Desktop (bleeding edge)",
+        "app.polarbear.dev": "Local Desktop Dev",
+      };
+
+      const desktops = { plasma: "Plasma", xfce: "Xfce" };
+
+      // What a backup holds, in a sentence.
+      function describe(manifest) {
+        if (!manifest) {
+          return (
+            "Not made by Local Desktop: it's restored if it holds a Linux system (/etc and " +
+            "/usr), with the owners and modes its archive gives."
+          );
+        }
+        const made = new Date(manifest.created * 1000).toLocaleString(undefined, {
+          dateStyle: "medium",
+          timeStyle: "short",
+        });
+        const maker = apps[manifest.app] || manifest.app;
+        const desktop = desktops[manifest.desktop] || manifest.desktop;
+        const what = [desktop, manifest.user && `user ${manifest.user}`]
+          .filter(Boolean)
+          .join(", ");
+        return (
+          `Made ${made} by ${maker} ${manifest.version}` +
+          (what ? `: ${what}` : "") +
+          `. ${manifest.files.toLocaleString()} files, ${size(manifest.bytes)}` +
+          (manifest.package_cache ? ", with the package cache." : ".")
+        );
+      }
+
+      // Whether a job ran at the last look: a backup that ended since hands its file back to
+      // Android, which deletes it if the backup failed.
+      let wasRunning = false;
+      let polling = null;
+      let screenKept = false;
+      function showBackup(backup) {
+        const job = backup.job;
+        const running = Boolean(job && !job.finished);
+        if (backup.package_cache_bytes) {
+          document.getElementById("cache-size").textContent =
+            `${size(backup.package_cache_bytes)} of packages pacman downloaded, which it ` +
+            "can download again.";
+        }
+        document.getElementById("backup").disabled = running || !state.ready;
+        document.getElementById("restore").disabled = running;
+        if (screenKept !== running && app) {
+          screenKept = running;
+          app.keepScreenOn(running);
+        }
+
+        const box = document.getElementById("job");
+        box.hidden = !job || (job.finished && !job.error && job.kind === "restore");
+        if (job) {
+          const backingUp = job.kind === "backup";
+          const bar = document.getElementById("job-bar");
+          const total = job.total || {};
+          const done = job.done || {};
+          bar.hidden = !running;
+          bar.value = total.bytes ? Math.min(1, done.bytes / total.bytes) : 0;
+          let title;
+          let text;
+          if (running) {
+            title = job.phase || (backingUp ? "Backing up" : "Restoring");
+            text = total.files
+              ? `${done.files.toLocaleString()} of ${total.files.toLocaleString()} files, ` +
+                `${size(done.bytes)} of ${size(total.bytes)}`
+              : `${done.files.toLocaleString()} files, ${size(done.bytes)}`;
+            if (backingUp && job.written) {
+              text += `, ${size(job.written)} written`;
+            }
+          } else if (job.error) {
+            title = backingUp ? "The backup failed" : "The restore failed";
+            text = job.error;
+          } else {
+            title = "Backed up";
+            text =
+              `${done.files.toLocaleString()} files, ${size(done.bytes)}, in a file of ` +
+              `${size(job.written)}.`;
+          }
+          document.getElementById("job-title").textContent = title;
+          document.getElementById("job-text").textContent = text;
+          if (backingUp && wasRunning && !running && app) {
+            if (job.error) {
+              app.discardBackupFile();
+            } else {
+              app.backupEnded();
+            }
+          }
+        }
+
+        const restored = backup.restored;
+        document.getElementById("restored").hidden = !restored;
+        if (restored) {
+          document.getElementById("restored-about").textContent =
+            `${describe(restored.manifest)} It takes this system's place the next time ` +
+            "Local Desktop starts" +
+            (state.running ? ": quit it, then open it again." : ".");
+        }
+        document.getElementById("restore-discard").disabled = running;
+
+        wasRunning = running;
+        clearTimeout(polling);
+        if (running) {
+          polling = setTimeout(refresh, 1000);
+        }
+      }
+
+      // The file picker's answer, from SettingsBridge: a backup started, or what a backup to
+      // restore holds.
+      window.chosen = (reply) => {
+        if (!reply) {
+          return;
+        }
+        if (reply.error) {
+          say(reply.error);
+          return;
+        }
+        say("");
+        if (reply.kind === "restore") {
+          const manifest = reply.manifest;
+          let about = `${reply.name ? reply.name + ": " : ""}${describe(manifest)}`;
+          if (manifest && reply.free_bytes && reply.free_bytes < manifest.bytes * 1.1) {
+            about += ` The phone has only ${size(reply.free_bytes)} free.`;
+          }
+          about +=
+            " Restoring lays it out beside this system, which it replaces the next time " +
+            "Local Desktop starts; this system and its files are then deleted.";
+          document.getElementById("restore-about").textContent = about;
+          document.getElementById("restore-ask").hidden = false;
+        }
+        refresh();
+      };
+
+      document.getElementById("backup").addEventListener("click", () => {
+        const date = new Date();
+        const day = [
+          date.getFullYear(),
+          String(date.getMonth() + 1).padStart(2, "0"),
+          String(date.getDate()).padStart(2, "0"),
+        ].join("-");
+        app.chooseBackup(
+          `localdesktop-backup-${day}.tar.zst`,
+          document.getElementById("package-cache").checked
+        );
+      });
+      document.getElementById("restore").addEventListener("click", () => {
+        document.getElementById("restore-ask").hidden = true;
+        app.chooseRestore();
+      });
+      document.getElementById("restore-no").addEventListener("click", () => {
+        document.getElementById("restore-ask").hidden = true;
+      });
+      document.getElementById("restore-yes").addEventListener("click", () => {
+        document.getElementById("restore-ask").hidden = true;
+        let reply;
+        try {
+          reply = JSON.parse(app.startRestore());
+        } catch (error) {
+          reply = { error: String(error) };
+        }
+        say(reply.error);
+        refresh();
+      });
+      document.getElementById("restore-discard").addEventListener("click", () => {
+        const reply = ask({ op: "restore-discard" });
+        say(reply.error);
+        refresh();
       });
 
       // Apps can't read whether it's off; the app knows whether it turns it off itself.

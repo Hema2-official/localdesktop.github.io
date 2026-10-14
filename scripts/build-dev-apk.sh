@@ -38,6 +38,9 @@ chmod +x "$cc"
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$cc"
 export CC_aarch64_linux_android="$cc"
 export AR_aarch64_linux_android=llvm-ar
+# The NDK's arm_neon.h is its own clang's, which the host's clang can't compile: zstd builds
+# without its NEON code here (the release build's NDK clang has it).
+export CFLAGS_aarch64_linux_android="${CFLAGS_aarch64_linux_android:+$CFLAGS_aarch64_linux_android }-DZSTD_NO_INTRINSICS"
 # 16 KB ELF alignment, as in the release build.
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=16384"
 

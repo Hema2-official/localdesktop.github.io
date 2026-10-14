@@ -98,6 +98,8 @@ tempfile = "3.20.0"
 toml = "0.8.12"
 tracing = "0.1.41"
 xz2 = { version = "0.1.7", features = ["static"] }
+zstd = { version = "0.13", features = ["zstdmt"] }
+flate2 = "1"
 zip = { version = "0.6.3", default-features = false, features = ["deflate"] }
 
 [patch.crates-io]

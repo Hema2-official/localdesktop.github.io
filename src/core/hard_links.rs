@@ -18,7 +18,8 @@ use std::{
 /// The store directory, relative to the rootfs.
 pub const STORE_DIR: &str = ".l2s";
 
-const PREFIX: &str = ".proot.l2s.";
+/// The name proot gives the data of a hard-linked file and the intermediate symlink to it.
+pub const PREFIX: &str = ".proot.l2s.";
 const MIGRATED_MARKER: &str = ".proot-migrated";
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -89,6 +90,11 @@ pub fn migrate(fs_root: &Path) -> io::Result<Option<Migration>> {
 
     fs::write(&marker, b"")?;
     Ok(Some(migration))
+}
+
+/// Note that the store has no data left beside first names: for a store laid out from scratch.
+pub fn mark_migrated(store: &Path) -> io::Result<()> {
+    fs::write(store.join(MIGRATED_MARKER), b"")
 }
 
 fn move_into_store(

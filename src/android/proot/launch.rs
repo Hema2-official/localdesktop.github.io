@@ -341,6 +341,23 @@ pub fn restart() {
     RESTARTING.store(false, Ordering::Release);
 }
 
+/// Log the desktop out for work that needs it stopped (a backup), the way a restart does. False
+/// if the logout was cancelled on the desktop: the session goes on.
+pub fn log_out_for(before: &str) -> bool {
+    let ended = end_session(before);
+    if !ended {
+        session::refresh();
+    }
+    ended
+}
+
+/// Start the desktop again after [`log_out_for`], with what changed in the config meanwhile.
+pub fn start_again() {
+    reload_local_config_for_restart();
+    session::refresh();
+    launch();
+}
+
 /// The notification's Quit: log the desktop out, so that its programs can save, then leave. A
 /// logout cancelled on the desktop cancels the quitting too.
 pub fn log_out_and_quit() {

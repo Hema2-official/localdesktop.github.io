@@ -39,6 +39,9 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
   Android's App info, or the desktop's menu). It changes the config file line by line and says
   when each change takes effect. When something is broken, it reinstalls every package at the
   next start, or puts the settings back to their defaults (keeping the old file).
+- **Backups of the Linux system** from the settings page, into a file you pick (Downloads, an SD
+  card, Drive), and restores of them: a standard `.tar.zst` that any Local Desktop app restores,
+  so moving between the official app and this one, or to another phone, keeps your system.
 - **The GPU** (Turnip on Qualcomm phones) for Vulkan programs, and Plasma's own drawing.
 
 The details are in the commits of the branch; the user docs in `gh-pages/docs/user/` describe
@@ -79,7 +82,9 @@ sync = true
   the desktop may not come up. The notification's terminal and `/var/log/localdesktop-session.log`
   show why; please report it with that log.
 - Newer bleeding-edge builds install over older ones. The official app and this one can't be
-  updated into each other, and uninstalling either deletes its Linux system.
+  updated into each other, and uninstalling either deletes its Linux system: back it up first
+  (the settings page's Backup section; for the official app, see "Backups" in
+  `gh-pages/docs/user/4-configurations.md`).
 - Android's phantom process killer and battery optimization affect it like the official app:
   see the app's own pages when it warns about them.
 

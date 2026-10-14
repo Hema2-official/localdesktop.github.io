@@ -6,6 +6,7 @@
 //! starts nothing else. While the app runs in the same process, the page also restarts the
 //! desktop, opens the terminal and tells what waits for a restart.
 
+use crate::android::backup;
 use crate::android::gpu_drivers;
 use crate::android::proot::setup::REINSTALL_REQUEST;
 use crate::android::proot::{launch, ssh};
@@ -35,6 +36,14 @@ pub fn handle(request: &str) -> String {
         Some("quit") => quit(),
         Some("terminal") => terminal(),
         Some("reset") => reset(),
+        Some("backup") => backup::start_backup(
+            fd(&request),
+            request["package_cache"].as_bool().unwrap_or(false),
+            request["version"].as_str().unwrap_or(VERSION),
+        ),
+        Some("restore-inspect") => backup::inspect(fd(&request)),
+        Some("restore") => backup::start_restore(fd(&request)),
+        Some("restore-discard") => backup::discard_restored(),
         Some("reinstall") => reinstall(request["on"].as_bool().unwrap_or(false)),
         Some("gpu-check") => {
             gpu_drivers::check_in_background();
@@ -43,6 +52,11 @@ pub fn handle(request: &str) -> String {
         _ => json!({ "error": "Not a request the app knows" }),
     };
     reply.to_string()
+}
+
+/// A file Android opened for the page (`SettingsBridge`), which the request hands over.
+fn fd(request: &Value) -> i32 {
+    request["fd"].as_i64().map_or(-1, |it| it as i32)
 }
 
 /// What the page shows.
@@ -74,6 +88,7 @@ fn state() -> Value {
         "gpu": gpu_drivers::status(),
         // Asked for: every package again at the next start.
         "reinstall": Path::new(ARCH_FS_ROOT).join(REINSTALL_REQUEST).exists(),
+        "backup": backup::state(),
         "version": VERSION,
     })
 }

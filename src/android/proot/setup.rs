@@ -2602,6 +2602,10 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
     let (sender, receiver) = mpsc::channel();
     let progress = Arc::new(Mutex::new(0));
 
+    // A system restored on the settings page takes the current one's place, config and all.
+    if crate::android::backup::swap_in_restored() {
+        reload_local_config();
+    }
     ArchProcess::remove_stale_temp_files();
     if ArchProcess::is_supported(&android_app) {
         sender
