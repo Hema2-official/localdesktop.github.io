@@ -112,34 +112,44 @@ fn start_process(android_app: &AndroidApp) {
     // For as long as the process lives. It ends in `process::exit`, which drops nothing anyway.
     std::mem::forget(guard);
 
-    // Wrap the Android logger with Sentry's logger
-    let logger = SentryLogger::with_dest(android_logger::AndroidLogger::default()).filter(|md| {
-        // How to use log::*() macros in this project:
-        // - log::error!() for critical errors that maintainers should be NOTIFIED about via email
-        // - log::trace!() for very detailed debugging information that need NOT to be captured with telemetry
-        // - log::info!() for everything else, maintainers can check this with Sentry's Logs
-        match md.level() {
-            // Capture error records as Sentry events
-            // These are grouped into issues, representing high-severity errors to act upon
-            log::Level::Error => LogFilter::Event,
-            // Ignore trace level records, as they're too verbose
-            log::Level::Trace => LogFilter::Ignore,
-            // Capture everything else as a log
-            _ => LogFilter::Log,
-        }
-    });
-
-    #[cfg(debug_assertions)] // Enable verbose logging in debug builds
-    let log_level = log::LevelFilter::Trace;
-    #[cfg(not(debug_assertions))]
-    let log_level = log::LevelFilter::Info;
-    if log::set_boxed_logger(Box::new(logger)).is_ok() {
-        log::set_max_level(log_level);
-    } else {
-        android_logger::init_once(android_logger::Config::default().with_max_level(log_level));
-    }
+    init_logging();
 
     ApplicationContext::build(android_app);
+}
+
+/// Logging to logcat, and to Sentry's logs where the build reports to it, once per process: the
+/// desktop's start sets it up, and so does the settings page, which can run without the desktop.
+pub fn init_logging() {
+    static LOGGING: std::sync::Once = std::sync::Once::new();
+    LOGGING.call_once(|| {
+        // Wrap the Android logger with Sentry's logger
+        let logger =
+            SentryLogger::with_dest(android_logger::AndroidLogger::default()).filter(|md| {
+                // How to use log::*() macros in this project:
+                // - log::error!() for critical errors that maintainers should be NOTIFIED about via email
+                // - log::trace!() for very detailed debugging information that need NOT to be captured with telemetry
+                // - log::info!() for everything else, maintainers can check this with Sentry's Logs
+                match md.level() {
+                    // Capture error records as Sentry events
+                    // These are grouped into issues, representing high-severity errors to act upon
+                    log::Level::Error => LogFilter::Event,
+                    // Ignore trace level records, as they're too verbose
+                    log::Level::Trace => LogFilter::Ignore,
+                    // Capture everything else as a log
+                    _ => LogFilter::Log,
+                }
+            });
+
+        #[cfg(debug_assertions)] // Enable verbose logging in debug builds
+        let log_level = log::LevelFilter::Trace;
+        #[cfg(not(debug_assertions))]
+        let log_level = log::LevelFilter::Info;
+        if log::set_boxed_logger(Box::new(logger)).is_ok() {
+            log::set_max_level(log_level);
+        } else {
+            android_logger::init_once(android_logger::Config::default().with_max_level(log_level));
+        }
+    });
 }
 
 /// The app, if an activity before this one built it. If that one still runs it (a new activity

@@ -208,6 +208,7 @@ pub extern "system" fn Java_app_polarbear_SettingsBridge_nativeCall<'local>(
     _class: JClass<'local>,
     request: JString<'local>,
 ) -> jstring {
+    crate::android::main::init_logging();
     let request: String = env.get_string(&request).map(Into::into).unwrap_or_default();
     let reply = handle(&request);
     env.new_string(reply)
