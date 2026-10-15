@@ -192,6 +192,23 @@
             >
               Done
             </button>
+            <button
+              @click="restore"
+              style="
+                display: block;
+                width: 100%;
+                margin-top: 8px;
+                padding: 10px;
+                border: none;
+                background: transparent;
+                color: #1a73e8;
+                font: inherit;
+                font-size: 15px;
+                cursor: pointer;
+              "
+            >
+              Restore a backup instead
+            </button>
           </div>
         </div>
       </div>
@@ -317,10 +334,16 @@
             this.ws.send(JSON.stringify({ desktop: this.desktop, username }));
             this.choosingDesktop = false;
           },
+          // The settings page's restore; the form stays until a backup has been restored.
+          restore() {
+            this.ws.send(JSON.stringify({ restore: true }));
+          },
           handleWebSocketMessage(data) {
             this.progress = data.progress;
             if (data.choose === "desktop") {
               this.choosingDesktop = true;
+            } else if (data.choose === "none") {
+              this.choosingDesktop = false;
             }
 
             const isError = data.isError || false;

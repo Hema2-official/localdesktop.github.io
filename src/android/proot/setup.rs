@@ -34,7 +34,7 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        mpsc::{self, Receiver, Sender, TryRecvError},
+        mpsc::{self, Receiver, RecvTimeoutError, Sender},
         Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -53,6 +53,8 @@ pub enum SetupMessage {
     /// Ask the setup page which desktop preset to install, and for whom; it answers through
     /// `desktop_choice`.
     ChooseDesktop,
+    /// A backup was restored instead of an answer to `ChooseDesktop`, which is no longer asked.
+    Restored,
 }
 
 /// The setup page's answer on a fresh install.
@@ -412,17 +414,33 @@ fn apply_desktop_choice(options: &SetupOptions) -> StageOutput {
     let mpsc_sender = options.mpsc_sender.clone();
     Some(thread::spawn(move || {
         let receiver = receiver.lock().unwrap();
-        let choice = match receiver.try_recv() {
-            Ok(choice) => choice,
-            Err(TryRecvError::Empty) => {
-                mpsc_sender
-                    .send(SetupMessage::Progress(
-                        "Choose a desktop to continue".to_string(),
-                    ))
-                    .unwrap_or(());
-                receiver.recv().unwrap_or_default()
+        let mut asked = false;
+        // The page's answer, or a backup restored from it (the settings page's restore) instead.
+        let choice = loop {
+            match receiver.recv_timeout(Duration::from_secs(1)) {
+                Ok(choice) => break choice,
+                Err(RecvTimeoutError::Disconnected) => break DesktopChoice::default(),
+                Err(RecvTimeoutError::Timeout) if crate::android::backup::restored_ready() => {
+                    mpsc_sender.send(SetupMessage::Restored).unwrap_or(());
+                    if crate::android::backup::swap_in_restored() {
+                        reload_local_config();
+                        log::info!(
+                            "Restored during setup: user {}",
+                            get_application_context().local_config.user.username
+                        );
+                    }
+                    return;
+                }
+                Err(RecvTimeoutError::Timeout) if !asked => {
+                    asked = true;
+                    mpsc_sender
+                        .send(SetupMessage::Progress(
+                            "Choose a desktop to continue".to_string(),
+                        ))
+                        .unwrap_or(());
+                }
+                Err(RecvTimeoutError::Timeout) => {}
             }
-            Err(TryRecvError::Disconnected) => DesktopChoice::default(),
         };
         let preset = if choice.preset == "plasma" {
             DesktopPreset::Plasma
@@ -2623,10 +2641,13 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
     }
 
     // A fresh install asks which desktop to install; the answer is applied once the rootfs exists.
+    // So does a first start cut short while the page asked: the system is unpacked, but there's
+    // no config yet, and setup never got to the stage after the answer (/proc's stand-ins).
     let (choice_sender, choice_receiver) = mpsc::channel();
-    let fresh_install = Path::new(ARCH_FS_ROOT)
-        .read_dir()
-        .map_or(true, |mut d| d.next().is_none());
+    let fs_root = Path::new(ARCH_FS_ROOT);
+    let fresh_install = fs_root.read_dir().map_or(true, |mut d| d.next().is_none())
+        || (!fs_root.join(CONFIG_FILE.trim_start_matches('/')).exists()
+            && !fs_root.join("proc/.version").exists());
     if fresh_install {
         sender.send(SetupMessage::ChooseDesktop).unwrap_or(());
     }
@@ -2639,8 +2660,8 @@ pub fn setup(android_app: AndroidApp) -> PolarBearBackend {
 
     let stages: Vec<SetupStage> = vec![
         Box::new(setup_arch_fs),                // Step 1. Setup Arch FS (extract)
-        Box::new(simulate_linux_sysdata_stage), // Step 2. Simulate Linux system data
-        Box::new(apply_desktop_choice),         // Step 3. Write the desktop chosen on a fresh install
+        Box::new(apply_desktop_choice), // Step 2. Write the desktop chosen on a fresh install, or put a restored backup in place
+        Box::new(simulate_linux_sysdata_stage), // Step 3. Simulate Linux system data
         Box::new(setup_user),                   // Step 3b. Create the session user, before anything lands in its home
         Box::new(setup_package_mirrors), // Step 3c. The fastest package mirrors first, once
         Box::new(install_dependencies),         // Step 4. Install dependencies

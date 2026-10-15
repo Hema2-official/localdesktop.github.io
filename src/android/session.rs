@@ -317,6 +317,39 @@ pub fn setup_progress(progress: u16, message: &str, failed: bool) {
     });
 }
 
+/// Open the settings page at its restore, for the setup page's "Restore a backup instead".
+pub fn open_settings_to_restore(android_app: &AndroidApp) {
+    with_activity(android_app, "open the settings to restore", |env, activity| {
+        let class = app_class(env, activity, "app.polarbear.SettingsActivity")?;
+        let intent = env.new_object(
+            "android/content/Intent",
+            "(Landroid/content/Context;Ljava/lang/Class;)V",
+            &[activity.into(), (&class).into()],
+        )?;
+        let key = env.new_string("app.polarbear.RESTORE")?;
+        env.call_method(
+            &intent,
+            "putExtra",
+            "(Ljava/lang/String;Z)Landroid/content/Intent;",
+            &[(&key).into(), JValue::Bool(1)],
+        )?;
+        // FLAG_ACTIVITY_NEW_TASK: the settings have a task of their own.
+        env.call_method(
+            &intent,
+            "addFlags",
+            "(I)Landroid/content/Intent;",
+            &[JValue::Int(0x1000_0000)],
+        )?;
+        env.call_method(
+            activity,
+            "startActivity",
+            "(Landroid/content/Intent;)V",
+            &[(&intent).into()],
+        )?;
+        Ok(())
+    });
+}
+
 /// Show one of the app's pages (e.g. the terminal) in `WebPageActivity`.
 pub fn open_page(android_app: &AndroidApp, url: &str) {
     with_activity(android_app, "open a page", |env, activity| {

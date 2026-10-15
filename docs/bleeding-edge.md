@@ -41,7 +41,8 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
   next start, or puts the settings back to their defaults (keeping the old file).
 - **Backups of the Linux system** from the settings page, into a file you pick (Downloads, an SD
   card, Drive), and restores of them: a standard `.tar.zst` that any Local Desktop app restores,
-  so moving between the official app and this one, or to another phone, keeps your system.
+  so moving between the official app and this one, or to another phone, keeps your system. A
+  first start can restore one instead of installing a desktop ("Restore a backup instead").
 - **The GPU** (Turnip on Qualcomm phones) for Vulkan programs, and Plasma's own drawing.
 
 The details are in the commits of the branch; the user docs in `gh-pages/docs/user/` describe

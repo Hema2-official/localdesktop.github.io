@@ -331,6 +331,11 @@ fn busy() -> bool {
         .is_some_and(|it| !it.finished)
 }
 
+/// Whether a restored system waits to take the current one's place.
+pub fn restored_ready() -> bool {
+    !busy() && restored().is_dir()
+}
+
 /// Forget a restored system that waits for the next start.
 pub fn discard_restored() -> Value {
     if busy() {

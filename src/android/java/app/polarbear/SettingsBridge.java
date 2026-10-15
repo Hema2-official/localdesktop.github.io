@@ -124,6 +124,17 @@ final class SettingsBridge {
         }
     }
 
+    /** Close the page, back to where it was opened from. */
+    @JavascriptInterface
+    public void close() {
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                activity.finish();
+            }
+        });
+    }
+
     /** Keep the screen on while a backup or a restore goes on. */
     @JavascriptInterface
     public void keepScreenOn(final boolean on) {

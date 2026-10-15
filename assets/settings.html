@@ -915,6 +915,9 @@
         );
       }
 
+      // The setup page's "Restore a backup instead" opened the page.
+      const restoreFromSetup = new URLSearchParams(location.search).has("restore");
+
       // Whether a job ran at the last look: a backup that ended since hands its file back to
       // Android, which deletes it if the backup failed.
       let wasRunning = false;
@@ -985,6 +988,10 @@
         }
         document.getElementById("restore-discard").disabled = running;
 
+        // Opened from the setup page, which takes the restored system from here.
+        if (restoreFromSetup && wasRunning && !running && job.kind === "restore" && !job.error) {
+          app.close();
+        }
         wasRunning = running;
         clearTimeout(polling);
         if (running) {
@@ -996,6 +1003,10 @@
       // restore holds.
       window.chosen = (reply) => {
         if (!reply) {
+          // The picker was cancelled: back to the setup page, which asks again.
+          if (restoreFromSetup) {
+            app.close();
+          }
           return;
         }
         if (reply.error) {
@@ -1014,6 +1025,7 @@
             "Local Desktop starts; this system and its files are then deleted.";
           document.getElementById("restore-about").textContent = about;
           document.getElementById("restore-ask").hidden = false;
+          document.getElementById("restore-ask").scrollIntoView({ block: "center" });
         }
         refresh();
       };
@@ -1036,6 +1048,9 @@
       });
       document.getElementById("restore-no").addEventListener("click", () => {
         document.getElementById("restore-ask").hidden = true;
+        if (restoreFromSetup) {
+          app.close();
+        }
       });
       document.getElementById("restore-yes").addEventListener("click", () => {
         document.getElementById("restore-ask").hidden = true;
@@ -1047,6 +1062,7 @@
         }
         say(reply.error);
         refresh();
+        document.getElementById("job").scrollIntoView({ block: "center" });
       });
       document.getElementById("restore-discard").addEventListener("click", () => {
         const reply = ask({ op: "restore-discard" });
@@ -1115,6 +1131,9 @@
         }
       });
       refresh();
+      if (restoreFromSetup && app) {
+        app.chooseRestore();
+      }
     </script>
   </body>
 </html>

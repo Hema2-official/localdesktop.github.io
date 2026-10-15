@@ -87,6 +87,17 @@ impl WebviewBackend {
                         question_open.store(true, Ordering::Release);
                         desktop_question(progress)
                     }
+                    SetupMessage::Restored => {
+                        question_open.store(false, Ordering::Release);
+                        OwnedMessage::Text(
+                            json!({
+                                "progress": progress,
+                                "message": "Setting up the restored backup...",
+                                "choose": "none",
+                            })
+                            .to_string(),
+                        )
+                    }
                 };
 
                 let mut active_client = active_client_clone.lock().unwrap();
@@ -158,6 +169,13 @@ impl WebviewBackend {
                             Ok(OwnedMessage::Text(text)) => {
                                 let value: serde_json::Value =
                                     serde_json::from_str(&text).unwrap_or_default();
+                                // "Restore a backup instead": the settings page's restore, which
+                                // setup takes in place of an answer once it's done.
+                                if value["restore"].as_bool() == Some(true) {
+                                    if let Some(app) = session::current_app() {
+                                        session::open_settings_to_restore(&app);
+                                    }
+                                }
                                 if let Some(desktop) = value["desktop"].as_str() {
                                     if question_open.swap(false, Ordering::AcqRel) {
                                         let _ = desktop_choice.send(DesktopChoice {

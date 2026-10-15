@@ -11,6 +11,8 @@ import android.webkit.WebView;
  */
 public class SettingsActivity extends WebPageActivity {
     static final String PAGE = "file:///android_asset/settings.html";
+    /** Open at the restore, for the setup page's "Restore a backup instead". */
+    static final String EXTRA_RESTORE = "app.polarbear.RESTORE";
     /** Android's file picker, for where a backup goes and which one to restore. */
     static final int CHOOSE_BACKUP = 1;
     static final int CHOOSE_RESTORE = 2;
@@ -20,7 +22,7 @@ public class SettingsActivity extends WebPageActivity {
 
     @Override
     protected String pageUrl(Intent intent) {
-        return PAGE;
+        return intent.getBooleanExtra(EXTRA_RESTORE, false) ? PAGE + "?restore" : PAGE;
     }
 
     @Override
