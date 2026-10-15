@@ -24,6 +24,11 @@ fn main() {
     let lib_path = "./assets/libs/arm64-v8a";
     println!("cargo::rustc-link-search={}", lib_path);
 
+    // The app forks without the handlers libraries register for fork (src/android/fork.rs).
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        println!("cargo::rustc-cdylib-link-arg=-Wl,--wrap=fork");
+    }
+
     let package = package_name();
     println!("cargo::rustc-env=LOCALDESKTOP_PACKAGE={package}");
 

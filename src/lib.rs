@@ -22,6 +22,7 @@ pub mod android {
     pub mod accessibility;
     pub mod backup;
     pub mod battery;
+    pub mod fork;
     pub mod clipboard;
     pub mod gpu_drivers;
     pub mod guest;
