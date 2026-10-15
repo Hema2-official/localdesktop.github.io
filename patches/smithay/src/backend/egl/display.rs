@@ -43,6 +43,40 @@ pub(crate) static BUFFER_READER: Mutex<Option<WeakBufferReader>> = Mutex::new(No
 static DISPLAYS: LazyLock<Mutex<HashSet<WeakEGLDisplayHandle>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
+/// Makes EGL images of dma-bufs for displays whose EGL can't import them
+/// (no `EGL_EXT_image_dma_buf_import`), such as Android's, which imports its own buffers instead.
+pub trait DmabufImageImporter: Send + Sync {
+    /// An image of `dmabuf` on `display`, for `GL_TEXTURE_2D` textures.
+    fn create_image(&self, display: ffi::egl::types::EGLDisplay, dmabuf: &Dmabuf) -> Result<EGLImage, Error>;
+    /// The client committed an image's buffer, which a texture is now bound to. The renderer's
+    /// context is current.
+    fn image_committed(&self, _image: EGLImage) {}
+    /// An image `create_image` made was destroyed. The renderer's context is current.
+    fn image_destroyed(&self, image: EGLImage);
+}
+
+static DMABUF_IMAGE_IMPORTER: std::sync::OnceLock<Box<dyn DmabufImageImporter>> = std::sync::OnceLock::new();
+
+/// Sets the importer for displays that can't import dma-bufs themselves, once per process.
+/// Returns whether it was set.
+pub fn set_dmabuf_image_importer(importer: Box<dyn DmabufImageImporter>) -> bool {
+    DMABUF_IMAGE_IMPORTER.set(importer).is_ok()
+}
+
+/// Tells the importer an image's buffer was committed, which may be one of its.
+pub(crate) fn dmabuf_image_committed(image: EGLImage) {
+    if let Some(importer) = DMABUF_IMAGE_IMPORTER.get() {
+        importer.image_committed(image);
+    }
+}
+
+/// Tells the importer an image was destroyed, which may be one of its.
+pub(crate) fn dmabuf_image_destroyed(image: EGLImage) {
+    if let Some(importer) = DMABUF_IMAGE_IMPORTER.get() {
+        importer.image_destroyed(image);
+    }
+}
+
 /// Wrapper around [`ffi::EGLDisplay`](ffi::egl::types::EGLDisplay) to ensure display is only destroyed
 /// once all resources bound to it have been dropped.
 #[derive(Debug)]
@@ -589,6 +623,23 @@ impl EGLDisplay {
         &self.extensions[..]
     }
 
+    /// The importer that makes this display's images of dma-bufs, where EGL can't.
+    fn dmabuf_image_importer(&self) -> Option<&'static dyn DmabufImageImporter> {
+        if self
+            .extensions
+            .iter()
+            .any(|s| s == "EGL_EXT_image_dma_buf_import")
+        {
+            return None;
+        }
+        DMABUF_IMAGE_IMPORTER.get().map(|importer| importer.as_ref())
+    }
+
+    /// Whether a [`DmabufImageImporter`] makes this display's images of dma-bufs.
+    pub fn has_dmabuf_image_importer(&self) -> bool {
+        self.dmabuf_image_importer().is_some()
+    }
+
     /// Returns a list of formats for dmabufs that can be rendered to.
     pub fn dmabuf_render_formats(&self) -> &FormatSet {
         &self.dmabuf_render_formats
@@ -723,6 +774,10 @@ impl EGLDisplay {
     #[instrument(level = "trace", skip(self), parent = &self.span, err)]
     #[profiling::function]
     pub fn create_image_from_dmabuf(&self, dmabuf: &Dmabuf) -> Result<EGLImage, Error> {
+        if let Some(importer) = self.dmabuf_image_importer() {
+            return importer.create_image(**self.display, dmabuf);
+        }
+
         if !self.extensions.iter().any(|s| s == "EGL_KHR_image_base")
             && !self
                 .extensions

@@ -1,10 +1,12 @@
-use super::bind::bind_socket;
+use super::{bind::bind_socket, dmabuf};
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_output,
-    delegate_pointer_constraints,
-    delegate_presentation, delegate_seat, delegate_shm, delegate_single_pixel_buffer,
-    delegate_viewporter, delegate_xdg_shell,
+    backend::{
+        allocator::dmabuf::Dmabuf,
+        renderer::{gles::GlesRenderer, utils::on_commit_buffer_handler},
+    },
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_fractional_scale,
+    delegate_output, delegate_pointer_constraints, delegate_presentation, delegate_seat,
+    delegate_shm, delegate_single_pixel_buffer, delegate_viewporter, delegate_xdg_shell,
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
@@ -18,6 +20,7 @@ use smithay::{
             with_states, with_surface_tree_downward, CompositorClientState, CompositorHandler,
             CompositorState, SurfaceAttributes, TraversalAction,
         },
+        dmabuf::{DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         fractional_scale::{
             with_fractional_scale, FractionalScaleHandler, FractionalScaleManagerState,
         },
@@ -90,6 +93,9 @@ pub struct State {
     pub pointer_constraints_state: PointerConstraintsState,
     pub presentation_state: PresentationState,
     pub fractional_scale_state: FractionalScaleManagerState,
+    pub dmabuf_state: DmabufState,
+    /// The dma-buf global, once the renderer can draw clients' dma-bufs.
+    pub dmabuf_global: Option<DmabufGlobal>,
     /// The Android window's size in physical pixels.
     pub size: Size<i32, Logical>,
     /// The scale offered to clients that support fractional scaling: the Android UI scale.
@@ -229,6 +235,26 @@ impl CompositorHandler for State {
     }
 }
 
+impl DmabufHandler for State {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        // The renderer imports the buffer when it first draws it.
+        if dmabuf::can_import(&dmabuf) {
+            let _ = notifier.successful::<State>();
+        } else {
+            notifier.failed();
+        }
+    }
+}
+
 impl ShmHandler for State {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
@@ -346,6 +372,7 @@ delegate_single_pixel_buffer!(State);
 delegate_pointer_constraints!(State);
 delegate_presentation!(State);
 delegate_fractional_scale!(State);
+delegate_dmabuf!(State);
 
 impl Compositor {
     pub fn build() -> Result<Compositor, Box<dyn Error>> {
@@ -381,6 +408,8 @@ impl Compositor {
                 smithay::utils::Clock::<Monotonic>::new().id() as u32,
             ),
             fractional_scale_state: FractionalScaleManagerState::new::<State>(&dh),
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
             size: (1920, 1080).into(),
             client_scale: 1.0,
             scaled_surfaces: Vec::new(),
@@ -461,6 +490,21 @@ impl Compositor {
             }
         }
         Ok(())
+    }
+
+    /// Offer clients the dma-buf protocol once the renderer can draw their dma-bufs.
+    pub fn offer_dmabufs(&mut self, renderer: &GlesRenderer) {
+        if self.state.dmabuf_global.is_some() || !dmabuf::install(renderer.egl_context().display())
+        {
+            return;
+        }
+        let display = self.display.handle();
+        let global = self
+            .state
+            .dmabuf_state
+            .create_global::<State>(&display, dmabuf::formats());
+        self.state.dmabuf_global = Some(global);
+        log::info!("Graphics: clients may hand over dma-bufs");
     }
 
     /// The client waker woke the event loop; `service_clients` lets it poll again.

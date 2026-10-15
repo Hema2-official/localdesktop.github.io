@@ -111,7 +111,10 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
             PolarBearBackend::Wayland(ref mut backend) => {
                 if backend.graphic_renderer.is_none() {
                     match bind(event_loop, backend.graphics_context.take()) {
-                        Ok(winit) => backend.graphic_renderer = Some(winit),
+                        Ok(mut winit) => {
+                            backend.compositor.offer_dmabufs(winit.renderer());
+                            backend.graphic_renderer = Some(winit);
+                        }
                         Err(error) => {
                             log::error!("Failed to initialize Wayland renderer on resume: {error}");
                             accessibility::set_runtime_active(false);

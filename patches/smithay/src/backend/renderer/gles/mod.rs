@@ -702,6 +702,7 @@ impl GlesRenderer {
                 },
                 CleanupResource::EGLImage(image) => unsafe {
                     ffi_egl::DestroyImageKHR(**self.egl.display().get_display_handle(), image);
+                    crate::backend::egl::display::dmabuf_image_destroyed(image);
                 },
                 CleanupResource::FramebufferObject(fbo) => unsafe {
                     self.gl.DeleteFramebuffers(1, &fbo);
@@ -1149,7 +1150,9 @@ impl ImportDma for GlesRenderer {
         }
 
         self.existing_dmabuf_texture(buffer)?.map(Ok).unwrap_or_else(|| {
-            let is_external = !self.egl.dmabuf_render_formats().contains(&buffer.format());
+            // An importer's images are of formats GL_TEXTURE_2D takes.
+            let is_external = !self.egl.display().has_dmabuf_image_importer()
+                && !self.egl.dmabuf_render_formats().contains(&buffer.format());
             let image = self
                 .egl
                 .display()
@@ -1157,6 +1160,7 @@ impl ImportDma for GlesRenderer {
                 .map_err(GlesError::BindBufferEGLError)?;
 
             let tex = self.import_egl_image(image, is_external, None)?;
+            crate::backend::egl::display::dmabuf_image_committed(image);
             let format = fourcc_to_gl_formats(buffer.format().code)
                 .map(|(internal, _, _)| internal)
                 .unwrap_or(ffi::RGBA8);
@@ -1203,6 +1207,7 @@ impl GlesRenderer {
             }
             let tex = Some(texture.0.texture);
             self.import_egl_image(egl_images[0], texture.0.is_external, tex)?;
+            crate::backend::egl::display::dmabuf_image_committed(egl_images[0]);
         }
         Ok(Some(texture.clone()))
     }
