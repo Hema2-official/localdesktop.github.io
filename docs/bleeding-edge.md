@@ -47,7 +47,8 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
   OpenGL programs through Zink (`[graphics] zink = false` turns that off).
   `localdesktop direct <program>` runs a Wayland program (a game, a video player) over the
   desktop, fullscreen, on the app's own display: it hands the app its GPU buffers (dma-bufs)
-  instead of having its frames copied through the desktop, for half the CPU or less.
+  instead of having its frames copied through the desktop, for half the CPU or less. Such
+  programs share the clipboard, and Android's keyboard comes up for their text fields.
 
 The details are in the commits of the branch; the user docs in `gh-pages/docs/user/` describe
 the settings (`4-configurations.md`), the non-root user (`2-creating-a-non-root-user.md`) and
