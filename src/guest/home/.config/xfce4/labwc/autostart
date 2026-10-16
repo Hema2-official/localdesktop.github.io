@@ -1,2 +1,0 @@
-#!/bin/sh
-/usr/local/bin/localdesktop-wlroots-output >"${XDG_RUNTIME_DIR:-/tmp}/localdesktop-wlroots-output.log" 2>&1 &

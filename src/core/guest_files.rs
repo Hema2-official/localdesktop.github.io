@@ -61,8 +61,6 @@ pub const STARTXFCE4: &str = guest_file!("rootfs/usr/local/bin/startxfce4-locald
 /// `@XFT_DPI@`.
 pub const XFCE_SESSION_INIT: &str =
     guest_file!("rootfs/usr/local/bin/localdesktop-xfce-session-init");
-/// `@UI_SCALE@`.
-pub const WLROOTS_OUTPUT: &str = guest_file!("rootfs/usr/local/bin/localdesktop-wlroots-output");
 pub const XFCE_SESSION_XML: &str =
     guest_file!("home/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml");
 /// `@XFT_DPI@`.
@@ -73,7 +71,6 @@ pub const XFCE_SESSION_INIT_AUTOSTART: &str =
 pub const XFCE_POWER_MANAGER_AUTOSTART: &str =
     guest_file!("home/.config/autostart/xfce4-power-manager.desktop");
 pub const LABWC_RC: &str = guest_file!("home/.config/xfce4/labwc/rc.xml");
-pub const LABWC_AUTOSTART: &str = guest_file!("home/.config/xfce4/labwc/autostart");
 pub const LABWC_ENVIRONMENT: &str = guest_file!("home/.config/xfce4/labwc/environment");
 
 /// A guest file with its `@NAME@` placeholders filled in. A placeholder alone on its line stands
@@ -140,7 +137,6 @@ mod tests {
             ),
             (STARTXFCE4, &["ENV", "GPU"]),
             (XFCE_SESSION_INIT, &["XFT_DPI"]),
-            (WLROOTS_OUTPUT, &["UI_SCALE"]),
             (XSETTINGS_XML, &["XFT_DPI"]),
         ] {
             assert_eq!(placeholders(template), names);
@@ -154,7 +150,6 @@ mod tests {
             NO_SANDBOX_ENTRIES,
             TURNIP_CHECK,
             PLASMA_UNPIN_MISSING_APPS,
-            LABWC_AUTOSTART,
         ] {
             assert!(placeholders(plain).is_empty(), "{plain}");
         }

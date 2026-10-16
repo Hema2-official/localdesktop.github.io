@@ -1937,25 +1937,15 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
     let _ = fs::remove_file(autostart_dir.join("localdesktop-xfce-scale.desktop"));
     let _ = fs::remove_file(autostart_dir.join("localdesktop-wlroots-output.desktop"));
     let _ = fs::remove_file(fs_root.join("usr/local/bin/localdesktop-xfce-scale"));
-
-    // labwc runs wlr-randr from its autostart script once the compositor owns the output
-    // (labwc-config.5). Xfce stores labwc config under ~/.config/xfce4/labwc/.
-    //
-    // Host geometry is written to /tmp/localdesktop-output by the Android compositor before
-    // launch; the script waits for that file instead of applying a hardcoded fallback mode.
-    write_executable(
-        &fs_root.join("usr/local/bin/localdesktop-wlroots-output"),
-        &fill(
-            guest_files::WLROOTS_OUTPUT,
-            &[("UI_SCALE", &ui_scale.to_string())],
-        ),
-    );
+    // labwc's output gets the UI scale from the guest link (`guest::output`), which replaced a
+    // script that labwc's autostart ran to poll for it.
+    let _ = fs::remove_file(fs_root.join("usr/local/bin/localdesktop-wlroots-output"));
+    let _ = fs::remove_file(labwc_dir.join("autostart"));
 
     let _ = fs::create_dir_all(&labwc_dir);
     // Nested on our compositor: reuse the parent wl_output mode when possible (labwc-config.5).
     fs::write(labwc_dir.join("rc.xml"), guest_files::LABWC_RC)
         .expect("Failed to write labwc rc.xml defaults");
-    write_executable(&labwc_dir.join("autostart"), guest_files::LABWC_AUTOSTART);
 
     // Arch wiki: lock prevents startxfce4 from overwriting custom labwc environment.
     // https://wiki.archlinux.org/title/Xfce#Using_labwc_custom_keymaps

@@ -4,7 +4,7 @@ use crate::android::{
         compositor::{
             popups_of, send_frames_surface_tree, take_presentation_feedback_surface_tree,
         },
-        write_guest_output_state, CentralizedEvent, TouchMode, WaylandBackend,
+        set_guest_output_scale, CentralizedEvent, TouchMode, WaylandBackend,
     },
     guest,
 };
@@ -406,7 +406,7 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
             }
 
             let guest_scale = guest_scale_factor.round().max(1.0) as i32;
-            write_guest_output_state(size.w, size.h, guest_scale);
+            set_guest_output_scale(guest_scale);
 
             let state = &mut backend.compositor.state;
             state.set_client_scale(guest_scale as f64);

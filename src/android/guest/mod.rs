@@ -14,6 +14,7 @@ pub mod bus;
 pub mod clipboard;
 pub mod control;
 pub mod notifications;
+pub mod output;
 pub mod power;
 pub mod screen;
 pub mod shared;
@@ -59,6 +60,8 @@ pub enum Event {
     Battery,
     /// Another app shared something with the desktop.
     Shared,
+    /// The Android window's UI scale changed.
+    Output,
 }
 
 struct Shared {
@@ -157,6 +160,7 @@ pub struct State {
     globals: Globals,
     pub clipboard: Option<clipboard::Desktop>,
     pub screen: Option<screen::Desktop>,
+    pub output: Option<output::Desktop>,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -250,6 +254,7 @@ impl Session {
                 },
                 clipboard: None,
                 screen: None,
+                output: None,
             },
             bound: false,
             clogged: false,
@@ -305,8 +310,16 @@ impl Session {
         if let Some(job) = power {
             job.connected(battery.as_ref());
         }
+        self.state.output = output::Desktop::bind(&self.state.globals, &handle);
+        if self.state.output.is_some() {
+            log::info!(
+                "Output: sets the scale of the desktop's outputs at {}",
+                self.socket.display()
+            );
+        }
         if self.state.clipboard.is_none()
             && self.state.screen.is_none()
+            && self.state.output.is_none()
             && !watching
             && !standing_in
         {
@@ -327,6 +340,9 @@ impl Session {
             }
             if let (Some(job), Some(desktop)) = (jobs.screen(), self.state.screen.as_mut()) {
                 job.dispatched(desktop);
+            }
+            if let Some(desktop) = self.state.output.as_mut() {
+                desktop.apply(&self.queue.handle());
             }
             match self.connection.flush() {
                 Ok(()) => self.clogged = false,
@@ -593,7 +609,9 @@ impl Link {
         if let Some(job) = &mut jobs.control {
             job.open();
         }
-        let wanted = jobs.clipboard_on || jobs.screen_on || jobs.notifications_on || jobs.power_on;
+        // Setting a nested wlroots compositor's scale (`output`) is always wanted: without it its
+        // desktop shows at a third of the size.
+        let wanted = true;
         if !wanted {
             self.disconnect("turned off");
             self.watcher = None;

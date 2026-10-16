@@ -7,7 +7,7 @@ use crate::android::{
         pipewire_standalone_aaudio,
         wayland::{
             about_to_wait, bind, centralize, centralize_injected_keyboard, handle,
-            write_guest_output_state, CentralizedEvent, State,
+            set_guest_output_scale, CentralizedEvent, State,
         },
         webview::ErrorVariant,
     },
@@ -73,7 +73,7 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
     );
 
     let guest_scale = guest_scale_factor.round().max(1.0) as i32;
-    write_guest_output_state(content_size.w, content_size.h, guest_scale);
+    set_guest_output_scale(guest_scale);
 
     let state = &mut backend.compositor.state;
     state.set_client_scale(guest_scale as f64);

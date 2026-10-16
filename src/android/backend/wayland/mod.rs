@@ -8,7 +8,7 @@ mod keymap;
 mod output_state;
 mod winit_backend;
 
-pub use output_state::write_guest_output_state;
+pub use output_state::set_guest_output_scale;
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};
