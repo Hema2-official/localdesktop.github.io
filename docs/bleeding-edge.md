@@ -44,9 +44,10 @@ Desktop, with its own Linux system, so trying it doesn't touch what you have.
   so moving between the official app and this one, or to another phone, keeps your system. A
   first start can restore one instead of installing a desktop ("Restore a backup instead").
 - **The GPU** (Turnip on Qualcomm phones) for Vulkan programs, Plasma's own drawing, and
-  OpenGL programs through Zink (`[graphics] zink = false` turns that off). Programs that draw
-  straight on the app's own Wayland display hand it their GPU buffers (dma-bufs) instead of
-  copying their frames.
+  OpenGL programs through Zink (`[graphics] zink = false` turns that off).
+  `localdesktop direct <program>` runs a Wayland program (a game, a video player) over the
+  desktop, fullscreen, on the app's own display: it hands the app its GPU buffers (dma-bufs)
+  instead of having its frames copied through the desktop, for half the CPU or less.
 
 The details are in the commits of the branch; the user docs in `gh-pages/docs/user/` describe
 the settings (`4-configurations.md`), the non-root user (`2-creating-a-non-root-user.md`) and
