@@ -18,4 +18,13 @@ final class Native {
 
     /** Another app shared something with the desktop (see ShareActivity). */
     static native void onShared();
+
+    /** Android's keyboard typed text: being composed, or finished (see SoftKeyboard). */
+    static native void onKeyboardText(String text, boolean composing);
+
+    /** Android's keyboard pressed a key `count` times, by its Linux key code (see SoftKeyboard). */
+    static native void onKeyboardKey(int code, int count);
+
+    /** Android's keyboard now covers this much of the window's bottom, in pixels. */
+    static native void onKeyboardHeight(int height);
 }

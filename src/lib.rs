@@ -15,6 +15,7 @@ pub mod core {
     pub mod power_profiles;
     pub mod settings;
     pub mod sharing;
+    pub mod soft_keyboard;
     pub mod upower;
 }
 
@@ -34,6 +35,7 @@ pub mod android {
     pub mod main;
     pub mod session;
     pub mod settings;
+    pub mod soft_keyboard;
     pub mod terminal;
     pub mod app {
         pub mod build;

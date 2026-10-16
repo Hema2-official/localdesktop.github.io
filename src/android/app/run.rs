@@ -13,7 +13,9 @@ use crate::android::{
     },
     guest,
     proot::launch::launch,
-    session, terminal,
+    session,
+    soft_keyboard::{self, Typed},
+    terminal,
     utils::{
         ndk::{self, run_in_jvm},
         webview::show_webview_popup,
@@ -23,7 +25,7 @@ use crate::core::config;
 use smithay::output::{Mode, Output, PhysicalProperties, Scale, Subpixel};
 use smithay::utils::Transform;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::window::WindowId;
 
@@ -161,6 +163,30 @@ impl ApplicationHandler<AppUserEvent> for PolarBearApp {
         if let AppUserEvent::WaylandClientsReady = event {
             // Serviced in `about_to_wait`, right after this.
             backend.compositor.clients_ready();
+            return;
+        }
+        if let AppUserEvent::Keyboard = event {
+            for typed in soft_keyboard::drain() {
+                match typed {
+                    Typed::Text { text, composing } => backend
+                        .compositor
+                        .state
+                        .text_input
+                        .type_text(&text, composing),
+                    Typed::Height(height) => backend.compositor.state.set_keyboard_height(height),
+                    Typed::Key { code, count } => {
+                        for state in [ElementState::Pressed, ElementState::Released]
+                            .into_iter()
+                            .cycle()
+                            .take(2 * count as usize)
+                        {
+                            let time = backend.clock.now().as_millis() as u64;
+                            let event = centralize_injected_keyboard(code, state, time, backend);
+                            handle(event, backend, event_loop);
+                        }
+                    }
+                }
+            }
             return;
         }
 

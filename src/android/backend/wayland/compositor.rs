@@ -1,4 +1,4 @@
-use super::{bind::bind_socket, dmabuf};
+use super::{bind::bind_socket, dmabuf, text_input::TextInput};
 use smithay::{
     backend::{
         allocator::dmabuf::Dmabuf,
@@ -99,6 +99,10 @@ pub struct State {
     pub data_control_state: DataControlState,
     pub seat_state: SeatState<Self>,
     pub display_handle: DisplayHandle,
+    /// Android's keyboard for programs' text fields.
+    pub text_input: TextInput,
+    /// How much of the window's bottom Android's keyboard covers, in physical pixels.
+    keyboard_height: i32,
     // Nested compositors such as KWin require these.
     pub viewporter_state: ViewporterState,
     pub single_pixel_buffer_state: SinglePixelBufferState,
@@ -265,12 +269,17 @@ impl State {
         });
     }
 
-    /// Configure a toplevel to fill the window, in the toplevel's own size units.
+    /// Configure a toplevel to fill the window, in the toplevel's own size units: above Android's
+    /// keyboard, if it is up for this toplevel's text field.
     pub fn configure_toplevel(&self, toplevel: &ToplevelSurface) {
         let scale = self.surface_scale(toplevel.wl_surface());
+        let mut height = self.size.h;
+        if self.text_input.focused() == Some(toplevel.wl_surface()) {
+            height = (height - self.keyboard_height).max(1);
+        }
         let size = Size::from((
             (self.size.w as f64 / scale).round() as i32,
-            (self.size.h as f64 / scale).round() as i32,
+            (height as f64 / scale).round() as i32,
         ));
         // Full screen, as every toplevel here is: a client then takes the size as it is, where it
         // may choose its own for a plain window.
@@ -280,6 +289,14 @@ impl State {
             state.states.set(xdg_toplevel::State::Fullscreen);
         });
         toplevel.send_configure();
+    }
+
+    /// Android's keyboard came up, went away or changed its height.
+    pub fn set_keyboard_height(&mut self, height: i32) {
+        if self.keyboard_height != height {
+            self.keyboard_height = height;
+            self.reconfigure_toplevels();
+        }
     }
 
     /// Reconfigure the toplevels that already got their first configure (the others get it on
@@ -465,6 +482,7 @@ impl SeatHandler for State {
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
         let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client);
+        self.text_input.focus(focused);
     }
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: input::pointer::CursorImageStatus) {}
 }
@@ -646,6 +664,8 @@ impl Compositor {
             data_control_state: data_control_state(&dh),
             seat_state,
             display_handle: dh.clone(),
+            text_input: TextInput::new(&dh),
+            keyboard_height: 0,
             viewporter_state: ViewporterState::new::<State>(&dh),
             single_pixel_buffer_state: SinglePixelBufferState::new::<State>(&dh),
             pointer_constraints_state: PointerConstraintsState::new::<State>(&dh),

@@ -17,6 +17,8 @@ pub enum AppUserEvent {
     WaylandClientsReady,
     /// Another activity takes the app over: leave the event loop.
     LetGo,
+    /// Android's keyboard typed something (`soft_keyboard`).
+    Keyboard,
 }
 
 #[derive(Clone, Copy, Debug)]

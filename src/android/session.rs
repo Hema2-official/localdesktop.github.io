@@ -3,6 +3,7 @@
 
 use crate::android::guest;
 use crate::android::proot::{launch, ssh};
+use crate::android::soft_keyboard;
 use crate::android::terminal;
 use crate::android::utils::application_context::get_application_context;
 use crate::android::utils::ndk::run_in_jvm;
@@ -61,7 +62,11 @@ fn sdk_version(env: &mut JNIEnv) -> i32 {
 }
 
 /// Run a JNI call against the activity, logging (and clearing) whatever it throws.
-fn with_activity(android_app: &AndroidApp, what: &str, call: impl FnOnce(&mut JNIEnv, &JObject) -> JniResult<()>) {
+pub(crate) fn with_activity(
+    android_app: &AndroidApp,
+    what: &str,
+    call: impl FnOnce(&mut JNIEnv, &JObject) -> JniResult<()>,
+) {
     run_in_jvm(
         |env, app| {
             let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as *mut _jobject) };
@@ -106,7 +111,10 @@ pub fn register_natives(android_app: &AndroidApp) {
                     sig: "()V".into(),
                     fn_ptr: on_shared as *mut std::ffi::c_void,
                 },
-            ],
+            ]
+            .into_iter()
+            .chain(soft_keyboard::natives())
+            .collect::<Vec<_>>(),
         )
     });
 }

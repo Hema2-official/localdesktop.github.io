@@ -6,9 +6,11 @@ mod event_handler;
 mod input;
 mod keymap;
 mod output_state;
+mod text_input;
 mod winit_backend;
 
 pub use output_state::set_guest_output_scale;
+pub use text_input::Keyboard;
 
 pub use compositor::{Compositor, State};
 pub use event_centralizer::{centralize, centralize_injected_keyboard, CentralizedEvent};

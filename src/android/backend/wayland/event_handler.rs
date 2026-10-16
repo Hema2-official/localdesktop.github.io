@@ -6,7 +6,7 @@ use crate::android::{
         },
         set_guest_output_scale, CentralizedEvent, TouchMode, WaylandBackend,
     },
-    guest,
+    guest, soft_keyboard,
 };
 use smithay::backend::input::ButtonState;
 use smithay::backend::renderer::element::surface::{
@@ -179,6 +179,9 @@ pub fn about_to_wait(backend: &mut WaylandBackend, event_loop: &ActiveEventLoop)
     if let Err(error) = backend.compositor.service_clients() {
         log::error!("{error}");
     }
+    if let Some(keyboard) = backend.compositor.state.text_input.take_request() {
+        soft_keyboard::apply(&backend.android_app, keyboard);
+    }
 
     if backend.compositor.state.needs_redraw {
         if let Some(winit) = backend.graphic_renderer.as_ref() {
@@ -207,6 +210,12 @@ pub fn handle(event: CentralizedEvent, backend: &mut WaylandBackend, event_loop:
         // Copying takes one of these: the clipboard sharing tells the user's copies from what
         // programs put on the clipboard by themselves.
         guest::user_input();
+    }
+    if let CentralizedEvent::Input(InputEvent::TouchUp { .. } | InputEvent::PointerButton { .. }) =
+        &event
+    {
+        // A text field that takes the focus now does so for the user (`text_input`).
+        backend.compositor.state.text_input.user_input();
     }
     match event {
         CentralizedEvent::CloseRequested => {
