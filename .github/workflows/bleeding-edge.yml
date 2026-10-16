@@ -113,7 +113,9 @@ jobs:
 
       - name: Build xbuild
         working-directory: patches/xbuild
-        run: cargo install --path xbuild
+        # The versions in its lock file: crates.io has since yanked some it needs (zip 0.6), which
+        # an unlocked install refuses to pick.
+        run: cargo install --locked --path xbuild
 
       - name: Build APK
         run: x build --release --platform=android --arch=arm64 --format=apk
