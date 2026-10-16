@@ -1524,10 +1524,7 @@ fn setup_open_from_android(_: &SetupOptions) -> StageOutput {
         &fs_root.join(shared::OPEN_HELPER.trim_start_matches('/')),
         &fill(
             guest_files::OPEN_HELPER,
-            &[
-                ("SERVICE", shared::OPEN_SERVICE),
-                ("SPOOL", shared::SPOOL),
-            ],
+            &[("SERVICE", shared::OPEN_SERVICE), ("SPOOL", shared::SPOOL)],
         ),
     );
     let services = fs_root.join("usr/share/dbus-1/services");
@@ -1886,7 +1883,10 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
     .expect("Failed to write xfce4-session xfconf defaults");
     fs::write(
         xfconf_dir.join("xsettings.xml"),
-        &fill(guest_files::XSETTINGS_XML, &[("XFT_DPI", &xft_dpi.to_string())]),
+        &fill(
+            guest_files::XSETTINGS_XML,
+            &[("XFT_DPI", &xft_dpi.to_string())],
+        ),
     )
     .expect("Failed to write xsettings xfconf defaults");
 
@@ -1953,15 +1953,9 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
 
     let _ = fs::create_dir_all(&labwc_dir);
     // Nested on our compositor: reuse the parent wl_output mode when possible (labwc-config.5).
-    fs::write(
-        labwc_dir.join("rc.xml"),
-        guest_files::LABWC_RC,
-    )
-    .expect("Failed to write labwc rc.xml defaults");
-    write_executable(
-        &labwc_dir.join("autostart"),
-        guest_files::LABWC_AUTOSTART,
-    );
+    fs::write(labwc_dir.join("rc.xml"), guest_files::LABWC_RC)
+        .expect("Failed to write labwc rc.xml defaults");
+    write_executable(&labwc_dir.join("autostart"), guest_files::LABWC_AUTOSTART);
 
     // Arch wiki: lock prevents startxfce4 from overwriting custom labwc environment.
     // https://wiki.archlinux.org/title/Xfce#Using_labwc_custom_keymaps
