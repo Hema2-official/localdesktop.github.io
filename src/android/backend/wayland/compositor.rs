@@ -7,15 +7,16 @@ use smithay::{
             utils::{on_commit_buffer_handler, with_renderer_surface_state},
         },
     },
-    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_fractional_scale,
-    delegate_output, delegate_pointer_constraints, delegate_presentation, delegate_seat,
-    delegate_shm, delegate_single_pixel_buffer, delegate_viewporter, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_ext_data_control,
+    delegate_fractional_scale, delegate_output, delegate_pointer_constraints,
+    delegate_presentation, delegate_seat, delegate_shm, delegate_single_pixel_buffer,
+    delegate_viewporter, delegate_xdg_shell,
     desktop::{find_popup_root_surface, get_popup_toplevel_coords, PopupKind, PopupManager},
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
-        wayland_server::{protocol::wl_seat, Display},
+        wayland_server::{protocol::wl_seat, Display, DisplayHandle},
     },
     utils::{Logical, Monotonic, Point, Rectangle, Serial, Size, SERIAL_COUNTER},
     wayland::{
@@ -35,8 +36,10 @@ use smithay::{
         },
         selection::{
             data_device::{
-                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
+                ServerDndGrabHandler,
             },
+            ext_data_control::{DataControlHandler, DataControlState},
             SelectionHandler,
         },
         shell::xdg::{
@@ -91,7 +94,11 @@ pub struct State {
     pub xdg_shell_state: XdgShellState,
     pub shm_state: ShmState,
     pub data_device_state: DataDeviceState,
+    /// Clipboard managers' access to the selection: only the guest link's, which keeps the
+    /// selection here and the desktop's the same.
+    pub data_control_state: DataControlState,
     pub seat_state: SeatState<Self>,
+    pub display_handle: DisplayHandle,
     // Nested compositors such as KWin require these.
     pub viewporter_state: ViewporterState,
     pub single_pixel_buffer_state: SinglePixelBufferState,
@@ -360,6 +367,12 @@ impl DataDeviceHandler for State {
     }
 }
 
+impl DataControlHandler for State {
+    fn data_control_state(&self) -> &DataControlState {
+        &self.data_control_state
+    }
+}
+
 impl ClientDndGrabHandler for State {}
 impl ServerDndGrabHandler for State {
     fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
@@ -448,7 +461,11 @@ impl SeatHandler for State {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    /// The program with keyboard focus is the one that gets the selection to paste.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let client = focused.and_then(|surface| self.display_handle.get_client(surface.id()).ok());
+        set_data_device_focus(&self.display_handle, seat, client);
+    }
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: input::pointer::CursorImageStatus) {}
 }
 
@@ -558,6 +575,24 @@ pub fn send_frames_surface_tree(surface: &WlSurface, time: u32) {
 #[derive(Default)]
 pub struct ClientState {
     compositor_state: CompositorClientState,
+    /// The client is the app itself (the guest link), not a program in the guest.
+    from_app: bool,
+}
+
+/// Whether the other end of a client's socket is this process.
+fn from_app(stream: &impl AsRawFd) -> bool {
+    let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let got = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut size,
+        )
+    };
+    got == 0 && credentials.pid == std::process::id() as libc::pid_t
 }
 
 impl ClientData for ClientState {
@@ -574,6 +609,7 @@ delegate_compositor!(State);
 delegate_shm!(State);
 delegate_seat!(State);
 delegate_data_device!(State);
+delegate_ext_data_control!(State);
 delegate_output!(State);
 delegate_viewporter!(State);
 delegate_single_pixel_buffer!(State);
@@ -607,7 +643,9 @@ impl Compositor {
             xdg_shell_state: XdgShellState::new::<State>(&dh),
             shm_state: ShmState::new::<State>(&dh, vec![]),
             data_device_state: DataDeviceState::new::<State>(&dh),
+            data_control_state: data_control_state(&dh),
             seat_state,
+            display_handle: dh.clone(),
             viewporter_state: ViewporterState::new::<State>(&dh),
             single_pixel_buffer_state: SinglePixelBufferState::new::<State>(&dh),
             pointer_constraints_state: PointerConstraintsState::new::<State>(&dh),
@@ -658,14 +696,16 @@ impl Compositor {
     pub fn service_clients(&mut self) -> Result<(), String> {
         loop {
             match self.listener.accept() {
-                Ok(Some(stream)) => match self
-                    .display
-                    .handle()
-                    .insert_client(stream, Arc::new(ClientState::default()))
-                {
-                    Ok(client) => self.clients.push(client),
-                    Err(error) => log::error!("Failed to insert Wayland client: {error}"),
-                },
+                Ok(Some(stream)) => {
+                    let data = ClientState {
+                        from_app: from_app(&stream),
+                        ..Default::default()
+                    };
+                    match self.display.handle().insert_client(stream, Arc::new(data)) {
+                        Ok(client) => self.clients.push(client),
+                        Err(error) => log::error!("Failed to insert Wayland client: {error}"),
+                    }
+                }
                 Ok(None) => break,
                 Err(error) => {
                     log::error!("Failed to accept Wayland client: {error}");
@@ -734,6 +774,17 @@ impl Compositor {
         self.waker_ack = accessibility::event_loop_proxy()
             .and_then(|proxy| spawn_client_waker(display_fd, listener_fd, proxy));
     }
+}
+
+/// ext-data-control for the app's own clients only: the guest link connects from this process,
+/// the programs in the guest from theirs, and a program that can read the selection without
+/// focus could watch everything that is copied.
+fn data_control_state(dh: &DisplayHandle) -> DataControlState {
+    DataControlState::new::<State, _>(dh, None, |client| {
+        client
+            .get_data::<ClientState>()
+            .is_some_and(|data| data.from_app)
+    })
 }
 
 /// Wakes the event loop when a Wayland client sent something or a new one is connecting, so the

@@ -14,6 +14,12 @@
 //! for the desktop's images `ClipProvider.java` serves.
 //!
 //! What is copied never goes to the log, only how much of it.
+//!
+//! The app's own compositor, where `localdesktop direct` runs programs over the desktop, has a
+//! selection of its own. The link keeps it and the desktop's the same: whichever changes, the
+//! other gets a selection of the link's ("the relay's") with the same types, and what programs
+//! ask of that is asked of the original, passing their pipe on. Android's clip reaches those
+//! programs through the desktop's selection, and theirs reaches Android the same way.
 
 use super::{Globals, State};
 use crate::android::clipboard::{AndroidClipboard, Content};
@@ -158,6 +164,8 @@ enum Happened {
     Asked { mime_type: String, pipe: OwnedFd },
     /// The link's selection was replaced.
     Withdrawn,
+    /// A program wants the relay's selection.
+    Relayed { mime_type: String, pipe: OwnedFd },
 }
 
 /// The clipboard on the desktop's side.
@@ -168,6 +176,8 @@ pub struct Desktop {
     selection: Option<Offer>,
     /// The link's own selection there: Android's clip.
     source: Option<Source>,
+    /// The relay's selection there: the other compositor's.
+    relay: Option<Source>,
     /// The selection the compositor tells first is the one it had already.
     met: bool,
     happened: Vec<Happened>,
@@ -193,6 +203,7 @@ impl Desktop {
             device: Some(device),
             selection: None,
             source: None,
+            relay: None,
             met: false,
             happened: Vec::new(),
         })
@@ -208,6 +219,8 @@ impl Desktop {
     fn asked(&mut self, source: Source, mime_type: String, pipe: OwnedFd) {
         if self.source.as_ref() == Some(&source) {
             self.happened.push(Happened::Asked { mime_type, pipe });
+        } else if self.relay.as_ref() == Some(&source) {
+            self.happened.push(Happened::Relayed { mime_type, pipe });
         }
     }
 
@@ -216,6 +229,8 @@ impl Desktop {
         if self.source.as_ref() == Some(&source) {
             self.source = None;
             self.happened.push(Happened::Withdrawn);
+        } else if self.relay.as_ref() == Some(&source) {
+            self.relay = None;
         }
     }
 
@@ -223,6 +238,13 @@ impl Desktop {
     /// alone if another program has made one meanwhile, as unsetting it wouldn't.
     fn withdraw(&mut self) {
         if let Some(source) = self.source.take() {
+            source.destroy();
+        }
+    }
+
+    /// Take the relay's selection off this compositor: the other one is gone.
+    pub fn withdraw_relay(&mut self) {
+        if let Some(source) = self.relay.take() {
             source.destroy();
         }
     }
@@ -552,8 +574,9 @@ impl Job {
         log::trace!("Clipboard sharing: offered Android's clip to the desktop");
     }
 
-    /// Act on what the compositor told.
-    pub fn dispatched(&mut self, (desktop, queue): Link) {
+    /// Act on what the desktop's compositor told. `host` is the app's own, if the link is
+    /// connected to it.
+    pub fn dispatched(&mut self, (desktop, queue): Link, mut host: Option<Link>) {
         for happened in std::mem::take(&mut desktop.happened) {
             match happened {
                 Happened::Selected => {
@@ -576,9 +599,45 @@ impl Job {
                         }
                         _ => {}
                     }
+                    if let Some((host, host_queue)) = &mut host {
+                        mirror(desktop, (&mut **host, host_queue.clone()));
+                    }
                 }
                 Happened::Asked { mime_type, pipe } => self.answer(desktop, &mime_type, pipe),
                 Happened::Withdrawn => self.offered = None,
+                Happened::Relayed { mime_type, pipe } => {
+                    if let Some((host, _)) = &host {
+                        forward(host, &mime_type, pipe);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Act on what the app's own compositor told: keep its selection and the desktop's the same.
+    pub fn host_dispatched(&mut self, (host, queue): Link, mut desktop: Option<Link>) {
+        for happened in std::mem::take(&mut host.happened) {
+            match happened {
+                Happened::Selected => {
+                    let first = !std::mem::replace(&mut host.met, true);
+                    let Some((desktop, desktop_queue)) = &mut desktop else {
+                        continue;
+                    };
+                    // What the desktop has when the link meets this compositor goes there; from
+                    // then on, whichever was selected last.
+                    if first {
+                        mirror(desktop, (&mut *host, queue.clone()));
+                    } else {
+                        mirror(host, (&mut **desktop, desktop_queue.clone()));
+                    }
+                }
+                Happened::Relayed { mime_type, pipe } => {
+                    if let Some((desktop, _)) = &desktop {
+                        forward(desktop, &mime_type, pipe);
+                    }
+                }
+                // It only gets the relay's selections.
+                Happened::Asked { .. } | Happened::Withdrawn => {}
             }
         }
     }
@@ -977,6 +1036,43 @@ impl Job {
             self.stop_reading();
         }
     }
+}
+
+/// Make `from`'s selection `to`'s too, as the relay's. Not if it is the relay's there already,
+/// mirrored from `to`.
+fn mirror(from: &Desktop, (to, queue): Link) {
+    let types = from.selection.as_ref().map(Offer::types);
+    if types.as_deref().is_some_and(rules::is_relayed) {
+        return;
+    }
+    let (Some(types), Some(device)) = (types.filter(|it| !it.is_empty()), &to.device) else {
+        to.withdraw_relay();
+        return;
+    };
+    let source = to.manager.source(&queue);
+    for mime_type in &types {
+        source.offer(mime_type);
+    }
+    source.offer(rules::RELAY_TYPE);
+    device.select(&source);
+    // The compositor cancels the one it replaces, see `Desktop::cancelled`.
+    to.relay = Some(source);
+    log::trace!(
+        "Clipboard sharing: mirrored a selection of {} types",
+        types.len()
+    );
+}
+
+/// A program wants the relay's selection on one compositor: have `from`'s, the original, written
+/// into its pipe.
+fn forward(from: &Desktop, mime_type: &str, pipe: OwnedFd) {
+    let Some(selection) = &from.selection else {
+        return;
+    };
+    if !rules::is_relayed(&selection.types()) {
+        selection.receive(mime_type, pipe.as_fd());
+    }
+    // The request took a copy of the pipe: this one goes, so that the program sees the end.
 }
 
 /// Where the desktop's images wait for Android's apps to paste them (`ClipProvider.java`).

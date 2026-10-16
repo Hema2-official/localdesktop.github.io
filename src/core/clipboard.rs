@@ -6,6 +6,10 @@
 /// desktop's own and copy them back.
 pub const LINK_TYPE: &str = "application/x-localdesktop-clipboard";
 
+/// On the selections the link mirrors from the desktop's compositor to the app's own (where
+/// `localdesktop direct` runs programs) and back, so that it doesn't mirror them back again.
+pub const RELAY_TYPE: &str = "application/x-localdesktop-relayed";
+
 /// On the entry Plasma's clipboard history (Klipper) puts back when the clipboard was emptied:
 /// the program that had it quit, or the link withdrew its offer.
 const RESTORED_TYPE: &str = "application/x-kde-onlyReplaceEmpty";
@@ -133,6 +137,11 @@ pub fn desktop_types(kinds: Kinds) -> Vec<&'static str> {
 /// Whether a selection offering these types is one the link put there.
 pub fn is_from_link<T: AsRef<str>>(offered: &[T]) -> bool {
     offered.iter().any(|it| it.as_ref() == LINK_TYPE)
+}
+
+/// Whether a selection offering these types is one the link mirrored from the other compositor.
+pub fn is_relayed<T: AsRef<str>>(offered: &[T]) -> bool {
+    offered.iter().any(|it| it.as_ref() == RELAY_TYPE)
 }
 
 /// The type to ask a desktop selection for to get its text, the best one it offers.
@@ -461,6 +470,8 @@ mod tests {
         assert!(!desktop_types(TEXT).contains(&"text/html"));
         assert!(desktop_types(Kinds::default()).is_empty());
         assert!(!is_from_link(&["text/plain"]));
+        assert!(!is_relayed(&types));
+        assert!(is_relayed(&["text/plain", RELAY_TYPE]));
     }
 
     #[test]

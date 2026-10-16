@@ -9,6 +9,9 @@
 //! compositor has an event, its socket appears, or another thread has news (`notify`). Each job
 //! has a module of its own with its Wayland event handlers, and leaves the link alone while it
 //! has nothing to do.
+//!
+//! The link is also a client of the app's own compositor, where `localdesktop direct` runs
+//! programs over the desktop, for the clipboard alone (see `clipboard`).
 
 pub mod bus;
 pub mod clipboard;
@@ -22,7 +25,7 @@ pub mod system_bus;
 
 use crate::android::power_profile;
 use crate::android::utils::application_context::get_application_context;
-use crate::core::config::ARCH_FS_ROOT;
+use crate::core::config::{ARCH_FS_ROOT, WAYLAND_SOCKET_NAME};
 use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fs;
@@ -219,10 +222,12 @@ enum Ended {
     Lost(String),
 }
 
-/// The connection to the session's compositor.
+/// The connection to the session's compositor, or to the app's own.
 struct Session {
     socket: PathBuf,
     created: SystemTime,
+    /// The app's own compositor, for the clipboard alone.
+    host: bool,
     connection: Connection,
     queue: EventQueue<State>,
     state: State,
@@ -233,7 +238,7 @@ struct Session {
 }
 
 impl Session {
-    fn connect(socket: &Path, created: SystemTime) -> io::Result<Self> {
+    fn connect(socket: &Path, created: SystemTime, host: bool) -> io::Result<Self> {
         let stream = UnixStream::connect(socket)?;
         let connection = Connection::from_socket(stream).map_err(io::Error::other)?;
         let queue = connection.new_event_queue();
@@ -244,6 +249,7 @@ impl Session {
         Ok(Self {
             socket: socket.to_owned(),
             created,
+            host,
             connection,
             queue,
             state: State {
@@ -273,6 +279,9 @@ impl Session {
             return Ok(());
         }
         self.bound = true;
+        if self.host {
+            return self.bind_host(jobs);
+        }
         // Shares that came while there was no desktop.
         shared::look();
         let handle = self.queue.handle();
@@ -328,35 +337,59 @@ impl Session {
         Ok(())
     }
 
-    /// Handle what the compositor sent, send what there is to send, and get ready to read.
-    fn pump(&mut self, jobs: &mut Jobs) -> Result<ReadEventsGuard, Ended> {
-        loop {
-            self.queue
-                .dispatch_pending(&mut self.state)
-                .map_err(|error| Ended::Lost(error.to_string()))?;
-            self.bind(jobs)?;
-            if let (Some(job), Some(desktop)) = (jobs.clipboard(), self.state.clipboard.as_mut()) {
-                job.dispatched((desktop, self.queue.handle()));
-            }
-            if let (Some(job), Some(desktop)) = (jobs.screen(), self.state.screen.as_mut()) {
-                job.dispatched(desktop);
-            }
-            if let Some(desktop) = self.state.output.as_mut() {
-                desktop.apply(&self.queue.handle());
-            }
-            match self.connection.flush() {
-                Ok(()) => self.clogged = false,
-                Err(WaylandError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
-                    self.clogged = true
-                }
-                Err(error) => return Err(Ended::Lost(error.to_string())),
-            }
-            // None: more has arrived meanwhile.
-            if let Some(guard) = self.connection.prepare_read() {
-                return Ok(guard);
-            }
+    /// The app's own compositor: only the clipboard, the rest is the desktop's.
+    fn bind_host(&mut self, jobs: &mut Jobs) -> Result<(), Ended> {
+        let handle = self.queue.handle();
+        let seat: wl_seat::WlSeat = self.state.globals.bind(&handle, 1).ok_or(Ended::Unsuitable)?;
+        if jobs.clipboard().is_some() {
+            self.state.clipboard = clipboard::Desktop::bind(&self.state.globals, &seat, &handle);
         }
+        if self.state.clipboard.is_none() {
+            return Err(Ended::Unsuitable);
+        }
+        log::info!(
+            "Clipboard sharing: shares the desktop's selection with the app's own display at {}",
+            self.socket.display()
+        );
+        Ok(())
     }
+
+    /// Handle what the compositor sent, and bind what the jobs need once it has told what it
+    /// offers.
+    fn dispatch(&mut self, jobs: &mut Jobs) -> Result<(), Ended> {
+        self.queue
+            .dispatch_pending(&mut self.state)
+            .map_err(|error| Ended::Lost(error.to_string()))?;
+        self.bind(jobs)
+    }
+
+    /// Send what there is to send, and get ready to read. `None`: more has arrived meanwhile.
+    fn flush(&mut self) -> Result<Option<ReadEventsGuard>, Ended> {
+        match self.connection.flush() {
+            Ok(()) => self.clogged = false,
+            Err(WaylandError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
+                self.clogged = true
+            }
+            Err(error) => return Err(Ended::Lost(error.to_string())),
+        }
+        Ok(self.connection.prepare_read())
+    }
+
+    fn poll_entry(&self) -> libc::pollfd {
+        let events = if self.clogged {
+            libc::POLLIN | libc::POLLOUT
+        } else {
+            libc::POLLIN
+        };
+        poll_entry(self.connection.as_fd().as_raw_fd(), events)
+    }
+}
+
+/// Ready to read what the compositors send next.
+#[derive(Default)]
+struct Reading {
+    session: Option<ReadEventsGuard>,
+    host: Option<ReadEventsGuard>,
 }
 
 /// Watches for the session's compositor to make its socket.
@@ -471,6 +504,12 @@ fn compositor_sockets(directory: &Path) -> Vec<(PathBuf, SystemTime)> {
     sockets
 }
 
+/// Whether reading from a compositor failed for good. `WouldBlock` says that no whole message
+/// has arrived yet.
+fn lost(error: &WaylandError) -> bool {
+    !matches!(error, WaylandError::Io(error) if error.kind() == io::ErrorKind::WouldBlock)
+}
+
 fn poll_entry(fd: RawFd, events: i16) -> libc::pollfd {
     libc::pollfd {
         fd,
@@ -518,6 +557,10 @@ struct Link {
     shared: &'static Shared,
     watcher: Option<Watcher>,
     session: Option<Session>,
+    /// The connection to the app's own compositor.
+    host: Option<Session>,
+    /// It had no clipboard to share: not asked again.
+    host_unsuitable: bool,
     /// Compositors that had nothing for the jobs.
     unsuitable: Vec<(PathBuf, SystemTime)>,
     /// Look for the session's compositor (again).
@@ -548,6 +591,8 @@ impl Link {
             shared: SHARED.get().expect("the link's thread starts after its state is set"),
             watcher: None,
             session: None,
+            host: None,
+            host_unsuitable: false,
             unsuitable: Vec::new(),
             look: true,
             retry: None,
@@ -583,6 +628,116 @@ impl Link {
                 job.disconnected();
             }
             self.jobs.power.disconnected();
+            if let Some((host, _)) = self.host.as_mut().and_then(Session::clipboard) {
+                host.withdraw_relay();
+            }
+        }
+    }
+
+    /// The connection to the session's compositor ended.
+    fn session_ended(&mut self, ended: Ended) {
+        match ended {
+            Ended::Unsuitable => {
+                if let Some(session) = &self.session {
+                    let tried = (session.socket.clone(), session.created);
+                    log::info!(
+                        "Guest link: the compositor at {} has nothing for the jobs",
+                        tried.0.display()
+                    );
+                    self.unsuitable.push(tried);
+                }
+                self.disconnect("nothing to use there");
+            }
+            Ended::Lost(why) => self.disconnect(&why),
+        }
+        self.look = true;
+    }
+
+    /// Connect to the app's own compositor, for the clipboard of the programs that run on it.
+    fn connect_host(&mut self) {
+        let socket = Path::new(ARCH_FS_ROOT).join("tmp").join(WAYLAND_SOCKET_NAME);
+        match Session::connect(&socket, SystemTime::UNIX_EPOCH, true) {
+            Ok(host) => self.host = Some(host),
+            Err(error) => log::info!(
+                "Clipboard sharing: no connection to the app's own display: {error}"
+            ),
+        }
+    }
+
+    /// The connection to the app's own compositor ended. It is made again when the link next
+    /// looks for the desktop, unless that compositor had no clipboard to share.
+    fn host_ended(&mut self, ended: Ended) {
+        if self.host.take().is_none() {
+            return;
+        }
+        match ended {
+            Ended::Unsuitable => {
+                log::info!("Clipboard sharing: the app's own display has no clipboard to share");
+                self.host_unsuitable = true;
+            }
+            Ended::Lost(why) => log::info!("Clipboard sharing: left the app's own display ({why})"),
+        }
+        if let Some((desktop, _)) = self.session.as_mut().and_then(Session::clipboard) {
+            desktop.withdraw_relay();
+        }
+    }
+
+    /// Let the jobs act on what the compositors told.
+    fn act(&mut self) {
+        if let Some(job) = self.jobs.clipboard() {
+            if let Some(desktop) = self.session.as_mut().and_then(Session::clipboard) {
+                job.dispatched(desktop, self.host.as_mut().and_then(Session::clipboard));
+            }
+            if let Some(host) = self.host.as_mut().and_then(Session::clipboard) {
+                job.host_dispatched(host, self.session.as_mut().and_then(Session::clipboard));
+            }
+        }
+        if let Some(session) = &mut self.session {
+            if let (Some(job), Some(desktop)) = (self.jobs.screen(), session.state.screen.as_mut()) {
+                job.dispatched(desktop);
+            }
+            if let Some(desktop) = session.state.output.as_mut() {
+                desktop.apply(&session.queue.handle());
+            }
+        }
+    }
+
+    /// Handle what the compositors sent, let the jobs act on it, send what there is to send, and
+    /// get ready to read. `None` if the connection to the desktop ended.
+    fn pump(&mut self) -> Option<Reading> {
+        loop {
+            if let Some(Err(ended)) = self.session.as_mut().map(|it| it.dispatch(&mut self.jobs)) {
+                self.session_ended(ended);
+                return None;
+            }
+            if let Some(Err(ended)) = self.host.as_mut().map(|it| it.dispatch(&mut self.jobs)) {
+                self.host_ended(ended);
+            }
+            self.act();
+            let mut reading = Reading::default();
+            let mut again = false;
+            match self.session.as_mut().map(Session::flush) {
+                Some(Ok(Some(guard))) => reading.session = Some(guard),
+                Some(Ok(None)) => again = true,
+                Some(Err(ended)) => {
+                    drop(reading);
+                    self.session_ended(ended);
+                    return None;
+                }
+                None => {}
+            }
+            match self.host.as_mut().map(Session::flush) {
+                Some(Ok(Some(guard))) => reading.host = Some(guard),
+                Some(Ok(None)) => again = true,
+                Some(Err(ended)) => {
+                    self.host_ended(ended);
+                    again = true;
+                }
+                None => {}
+            }
+            if !again {
+                return Some(reading);
+            }
         }
     }
 
@@ -608,6 +763,11 @@ impl Link {
         }
         if let Some(job) = &mut jobs.control {
             job.open();
+        }
+        if !self.jobs.clipboard_on {
+            self.host = None;
+        } else if self.host.is_none() && !self.host_unsuitable {
+            self.connect_host();
         }
         // Setting a nested wlroots compositor's scale (`output`) is always wanted: without it its
         // desktop shows at a third of the size.
@@ -638,7 +798,7 @@ impl Link {
             {
                 return;
             }
-            match Session::connect(&socket, created) {
+            match Session::connect(&socket, created, false) {
                 Ok(session) => {
                     self.disconnect("a newer compositor is there");
                     self.session = Some(session);
@@ -702,28 +862,9 @@ impl Link {
                 self.find_session();
             }
 
-            let mut reading = None;
-            if let Some(session) = &mut self.session {
-                match session.pump(&mut self.jobs) {
-                    Ok(guard) => reading = Some(guard),
-                    Err(Ended::Unsuitable) => {
-                        let tried = (session.socket.clone(), session.created);
-                        log::info!(
-                            "Guest link: the compositor at {} has nothing for the jobs",
-                            tried.0.display()
-                        );
-                        self.unsuitable.push(tried);
-                        self.disconnect("nothing to use there");
-                        self.look = true;
-                        continue;
-                    }
-                    Err(Ended::Lost(why)) => {
-                        self.disconnect(&why);
-                        self.look = true;
-                        continue;
-                    }
-                }
-            }
+            let Some(reading) = self.pump() else {
+                continue;
+            };
 
             if let Some(held) = self.jobs.power.held_changed() {
                 if let Some(job) = &mut self.jobs.screen {
@@ -752,15 +893,11 @@ impl Link {
             }
             let session_entry = entries.len();
             if let Some(session) = &self.session {
-                let events = if session.clogged {
-                    libc::POLLIN | libc::POLLOUT
-                } else {
-                    libc::POLLIN
-                };
-                entries.push(poll_entry(
-                    session.connection.as_fd().as_raw_fd(),
-                    events,
-                ));
+                entries.push(session.poll_entry());
+            }
+            let host_entry = entries.len();
+            if let Some(host) = &self.host {
+                entries.push(host.poll_entry());
             }
             let job_entries = entries.len();
             if let Some(job) = &self.jobs.clipboard {
@@ -819,11 +956,18 @@ impl Link {
                     self.look = true;
                 }
             }
-            if let Some(guard) = reading {
+            if let Some(guard) = reading.session {
                 if entries[session_entry].revents & !libc::POLLOUT != 0 {
-                    if let Err(error) = guard.read() {
+                    if let Some(error) = guard.read().err().filter(lost) {
                         self.disconnect(&error.to_string());
                         self.look = true;
+                    }
+                }
+            }
+            if let Some(guard) = reading.host {
+                if entries[host_entry].revents & !libc::POLLOUT != 0 {
+                    if let Some(error) = guard.read().err().filter(lost) {
+                        self.host_ended(Ended::Lost(error.to_string()));
                     }
                 }
             }
