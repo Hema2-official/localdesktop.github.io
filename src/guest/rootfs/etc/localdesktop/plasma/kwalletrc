@@ -1,0 +1,4 @@
+[Wallet]
+# Without a PAM login nothing opens the wallet, so every app storing a secret would ask for its password.
+Enabled=false
+First Use=false

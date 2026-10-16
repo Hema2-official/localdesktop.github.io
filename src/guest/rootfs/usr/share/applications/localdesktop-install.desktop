@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Install on Android
+Comment=Install the app on the phone; Android asks first
+Icon=application-vnd.android.package-archive
+Exec=localdesktop install %f
+MimeType=application/vnd.android.package-archive;application/xapk-package-archive;
+NoDisplay=true
+Terminal=false

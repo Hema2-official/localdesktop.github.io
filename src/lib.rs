@@ -8,6 +8,7 @@ pub mod core {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub mod descriptors;
     pub mod gpu_drivers;
+    pub mod guest_files;
     pub mod hard_links;
     pub mod mirrors;
     pub mod power_management;

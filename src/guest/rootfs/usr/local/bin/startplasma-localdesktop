@@ -1,0 +1,20 @@
+#!/bin/sh
+@ENV@
+export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE
+export XDG_CONFIG_DIRS=/@PLASMA_XDG_DIR@:${XDG_CONFIG_DIRS:-/etc/xdg}
+# Qt sends its warnings to the journal, which nothing reads here, unless told otherwise; this
+# way they land in the session log.
+export QT_FORCE_STDERR_LOGGING=1
+@TURNIP_CHECK@
+@ZINK@
+# Qt Quick draws with Vulkan on the GPU when the Adreno driver works (see `setup_adreno_mesa`),
+# and with its own 2D renderer otherwise: without a GPU its OpenGL goes through llvmpipe, which
+# took two cores to scroll a Plasma menu. Without the check a broken driver would leave Plasma
+# without a panel.
+if [ -n "$turnip" ]; then
+    export QSG_RHI_BACKEND=vulkan
+else
+    export QT_QUICK_BACKEND=software
+fi
+/usr/local/bin/localdesktop-no-sandbox-entries
+exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"

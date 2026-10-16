@@ -1,0 +1,15 @@
+#!/usr/bin/python3
+# Onboard wrapper for proot/Android: patches signal.set_wakeup_fd to handle
+# OSError (ENOENT) caused by proot's fstat translation on socket file descriptors.
+import signal as _signal
+_orig_swf = _signal.set_wakeup_fd
+def _safe_swf(fd, **kwargs):
+    try:
+        return _orig_swf(fd, **kwargs)
+    except OSError:
+        return -1
+_signal.set_wakeup_fd = _safe_swf
+
+import runpy, sys
+sys.argv[0] = '/usr/sbin/onboard'
+runpy.run_path('/usr/sbin/onboard', run_name='__main__')

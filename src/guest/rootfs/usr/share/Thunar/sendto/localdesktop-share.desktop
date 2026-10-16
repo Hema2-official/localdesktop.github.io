@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Android Apps
+Icon=document-share
+Exec=localdesktop share %F

@@ -1,0 +1,3 @@
+[KDE]
+# KWin composites on the CPU here, so animations cost more than they add.
+AnimationDurationFactor=0

@@ -1,0 +1,43 @@
+#!/bin/sh
+target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+mkdir -p "$target_dir" || exit 0
+
+# The scan starts several processes per entry, which took seconds of every session start
+# under proot, so it only runs when something in the application directories changed.
+stamp="$target_dir/.localdesktop-no-sandbox-scanned"
+if [ -e "$stamp" ] && [ -z "$(find /usr/share/applications /usr/local/share/applications \
+        -maxdepth 1 -newer "$stamp" 2>/dev/null | head -n1)" ]; then
+    exit 0
+fi
+# Before scanning, so entries installed meanwhile get seen next time.
+touch "$stamp"
+
+for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
+    [ -f "$src" ] || continue
+
+    prog=$(sed -n 's/^Exec=//p' "$src" | head -n1 | awk '{print $1}')
+    [ -n "$prog" ] || continue
+    case "$prog" in
+        /*) bin="$prog" ;;
+        *) bin=$(command -v "$prog" 2>/dev/null) || continue ;;
+    esac
+    bin=$(readlink -f "$bin" 2>/dev/null)
+    [ -n "$bin" ] || continue
+
+    # Every Chromium/Electron build ships the setuid sandbox helper next to its binary,
+    # or one level up when the launcher lives in a bin/ subdirectory.
+    dir=$(dirname "$bin")
+    [ -e "$dir/chrome-sandbox" ] || [ -e "$dir/../chrome-sandbox" ] || continue
+
+    dst="$target_dir/$(basename "$src")"
+    # Leave alone anything the user wrote themselves.
+    if [ -e "$dst" ] && ! grep -q '^X-LocalDesktop-NoSandbox=' "$dst"; then
+        continue
+    fi
+
+    awk '
+        /^\[Desktop Entry\]/ && !seen { print; print "X-LocalDesktop-NoSandbox=true"; seen = 1; next }
+        /^Exec=/ && !/--no-sandbox/ { sub(/^Exec=[^ ]+/, "& --no-sandbox") }
+        { print }
+    ' "$src" > "$dst"
+done

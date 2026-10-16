@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Local Desktop - Online Docs
+Comment=Open the Local Desktop documentation website
+Exec=firefox @DOCS_HOME_URL@
+Icon=firefox
+Terminal=false
+StartupNotify=true

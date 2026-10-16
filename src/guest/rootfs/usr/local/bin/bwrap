@@ -1,0 +1,25 @@
+#!/bin/sh
+# bwrap shim for proot/Android: namespaces are unavailable, exec directly.
+# Strips all bwrap sandbox/namespace/bind flags, then exec's the target binary.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        # Three-argument flags (flag + src/key + dest/value)
+        --ro-bind|--bind|--dev-bind|--bind-try|--ro-bind-try|--dev-bind-try|\
+        --file|--bind-data|--ro-bind-data|--symlink|\
+        --setenv|--chmod) shift 3 ;;
+        # Two-argument flags (flag + single arg)
+        --tmpfs|--proc|--dir|\
+        --unsetenv|--perms|--cap-add|--cap-drop|\
+        --seccomp|--add-seccomp-fd|--info-fd|--json-status-fd|\
+        --block-fd|--userns-block-fd|--userns|--userns2|\
+        --pidns|--chdir|--dev|--mqueue) shift 2 ;;
+        # Zero-argument flags
+        --unshare-all|--unshare-user|--unshare-user-try|--unshare-pid|\
+        --unshare-ipc|--unshare-net|--unshare-uts|--unshare-cgroup|\
+        --unshare-cgroup-try|--share-net|--remount-ro|\
+        --as-pid-1|--die-with-parent|--new-session|--clearenv) shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+exec "$@"

@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<labwc_config>
+  <core>
+    <reuseOutputMode>yes</reuseOutputMode>
+  </core>
+</labwc_config>

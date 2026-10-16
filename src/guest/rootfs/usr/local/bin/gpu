@@ -1,0 +1,11 @@
+#!/bin/sh
+# Run an OpenGL program on the Adreno GPU, through Zink on Turnip: the desktop session does this
+# for every program unless `[graphics] zink = false`. Vulkan programs use the GPU without this.
+[ $# -gt 0 ] || { echo "Usage: gpu <program> [arguments]" >&2; exit 2; }
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+# X11 programs: Zink's own presentation (kopper) through GLX.
+export LIBGL_KOPPER_DRI2=1
+# Wayland programs: Mesa's EGL takes Zink's own presentation only in software mode, which this
+# library makes it believe without Zink believing it too.
+export LD_PRELOAD="/usr/local/lib/localdesktop/libegl-zink.so${LD_PRELOAD:+:$LD_PRELOAD}"
+exec "$@"

@@ -1,0 +1,3 @@
+[General]
+# Don't reopen the last session's apps; startup is slow enough already.
+loginMode=emptySession

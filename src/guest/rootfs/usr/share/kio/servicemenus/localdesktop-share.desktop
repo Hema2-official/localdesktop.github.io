@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;
+Actions=share;
+X-KDE-Priority=TopLevel
+
+[Desktop Action share]
+Name=Share with Android Apps…
+Icon=document-share
+Exec=localdesktop share %F

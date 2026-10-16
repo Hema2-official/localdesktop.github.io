@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Local Desktop Xfce Session Init
+Comment=Apply HiDPI font scaling and refresh sandbox-free application entries
+Exec=/usr/local/bin/localdesktop-xfce-session-init
+Terminal=false
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true

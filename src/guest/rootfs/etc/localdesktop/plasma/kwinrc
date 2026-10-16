@@ -1,0 +1,5 @@
+[Wayland]
+# Plasma's on-screen keyboard, for touch-only use, drawn without the GPU (PLASMA_KEYBOARD).
+InputMethod=/usr/share/applications/localdesktop-keyboard.desktop
+# Show it for any input: touches reach KWin as mouse events, which it would otherwise ignore.
+VirtualKeyboardMode=2

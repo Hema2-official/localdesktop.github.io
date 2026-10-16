@@ -1,0 +1,4 @@
+[Daemon]
+# Android already locks the phone.
+Autolock=false
+LockOnResume=false

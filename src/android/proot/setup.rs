@@ -20,6 +20,7 @@ use crate::{
         },
         control,
         gpu_drivers::{self as driver_releases, Release},
+        guest_files::{self, fill},
         hard_links,
     },
 };
@@ -342,10 +343,7 @@ fn setup_machine_id(_: &SetupOptions) -> StageOutput {
 /// Sets `TZ` from the `/etc/localtime` link. Without it glibc stats `/etc/localtime` on every
 /// `localtime()` call and Qt looks for `/etc/timezone` and `/etc/TZ`, and under proot each of those
 /// is a traced syscall: Plasma's clock alone made about 15 a second, `ls -l` one per file.
-const TZ_FROM_LOCALTIME: &str = r#"if [ -z "${TZ:-}" ] && zone=$(readlink /etc/localtime 2>/dev/null); then
-    case "$zone" in */zoneinfo/*) export TZ="${zone#*/zoneinfo/}" ;; esac
-fi
-"#;
+const TZ_FROM_LOCALTIME: &str = guest_files::TZ_FROM_LOCALTIME;
 
 fn setup_time_zone(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
@@ -919,18 +917,7 @@ const ADRENO_MESA_FAILED: &str = "var/lib/localdesktop/adreno-mesa.failed";
 const ADRENO_MESA_RETRY_SECS: u64 = 24 * 60 * 60;
 /// `gpu <program>` runs an OpenGL program on the Adreno. Vulkan programs use it without help.
 const GPU_HELPER: &str = "usr/local/bin/gpu";
-const GPU_HELPER_SCRIPT: &str = r#"#!/bin/sh
-# Run an OpenGL program on the Adreno GPU, through Zink on Turnip: the desktop session does this
-# for every program unless `[graphics] zink = false`. Vulkan programs use the GPU without this.
-[ $# -gt 0 ] || { echo "Usage: gpu <program> [arguments]" >&2; exit 2; }
-export MESA_LOADER_DRIVER_OVERRIDE=zink
-# X11 programs: Zink's own presentation (kopper) through GLX.
-export LIBGL_KOPPER_DRI2=1
-# Wayland programs: Mesa's EGL takes Zink's own presentation only in software mode, which this
-# library makes it believe without Zink believing it too.
-export LD_PRELOAD="/usr/local/lib/localdesktop/libegl-zink.so${LD_PRELOAD:+:$LD_PRELOAD}"
-exec "$@"
-"#;
+const GPU_HELPER_SCRIPT: &str = guest_files::GPU_HELPER;
 /// The library `gpu` preloads (src/guest/egl-zink.c), as the APK has it and where the rootfs
 /// gets it.
 const ZINK_EGL_ASSET: &str = "guest/libegl-zink.so";
@@ -1276,27 +1263,13 @@ fn setup_firefox_config(_: &SetupOptions) -> StageOutput {
     let _ = fs::create_dir_all(&pref_dir).expect("Failed to create Firefox pref directory");
 
     // Create autoconfig.js in defaults/pref
-    let autoconfig_js = r#"pref("general.config.filename", "localdesktop.cfg");
-pref("general.config.obscure_value", 0);
-pref("general.config.sandbox_enabled", false);
-"#;
+    let autoconfig_js = guest_files::FIREFOX_AUTOCONFIG;
 
     let _ = fs::write(format!("{}/autoconfig.js", pref_dir), autoconfig_js)
         .expect("Failed to write Firefox autoconfig.js");
 
     // Create localdesktop.cfg in the Firefox root directory
-    let firefox_cfg = r#"// Auto updated by Local Desktop on each startup, do not edit manually
-defaultPref("media.cubeb.sandbox", false);
-defaultPref("security.sandbox.content.level", 0);
-defaultPref("media.allow-audio-non-utility", true);
-defaultPref("media.rdd-process.enabled", false);
-
-try {
-  var { SandboxUtils } = ChromeUtils.importESModule("resource://gre/modules/SandboxUtils.sys.mjs");
-  SandboxUtils.maybeWarnAboutDisabledContentSandbox = () => {};
-  SandboxUtils.observeContentSandboxPref = () => {};
-} catch (_) {}
-"#; // It is required that the first line of this file is a comment, even if you have nothing to comment. Docs: https://support.mozilla.org/en-US/kb/customizing-firefox-using-autoconfig
+    let firefox_cfg = guest_files::FIREFOX_CONFIG; // It is required that the first line of this file is a comment, even if you have nothing to comment. Docs: https://support.mozilla.org/en-US/kb/customizing-firefox-using-autoconfig
 
     let _ = fs::write(format!("{}/localdesktop.cfg", firefox_root), firefox_cfg)
         .expect("Failed to write Firefox configuration");
@@ -1529,32 +1502,7 @@ fn setup_fake_bwrap(_: &SetupOptions) -> StageOutput {
     // blocked by Android SELinux. We replace it with a shim that strips all
     // namespace/sandbox flags and directly exec's the target binary.
     // This unblocks glycin-svg (used by Onboard) which sandbox-loads SVG files via bwrap.
-    let wrapper = r#"#!/bin/sh
-# bwrap shim for proot/Android: namespaces are unavailable, exec directly.
-# Strips all bwrap sandbox/namespace/bind flags, then exec's the target binary.
-while [ $# -gt 0 ]; do
-    case "$1" in
-        # Three-argument flags (flag + src/key + dest/value)
-        --ro-bind|--bind|--dev-bind|--bind-try|--ro-bind-try|--dev-bind-try|\
-        --file|--bind-data|--ro-bind-data|--symlink|\
-        --setenv|--chmod) shift 3 ;;
-        # Two-argument flags (flag + single arg)
-        --tmpfs|--proc|--dir|\
-        --unsetenv|--perms|--cap-add|--cap-drop|\
-        --seccomp|--add-seccomp-fd|--info-fd|--json-status-fd|\
-        --block-fd|--userns-block-fd|--userns|--userns2|\
-        --pidns|--chdir|--dev|--mqueue) shift 2 ;;
-        # Zero-argument flags
-        --unshare-all|--unshare-user|--unshare-user-try|--unshare-pid|\
-        --unshare-ipc|--unshare-net|--unshare-uts|--unshare-cgroup|\
-        --unshare-cgroup-try|--share-net|--remount-ro|\
-        --as-pid-1|--die-with-parent|--new-session|--clearenv) shift ;;
-        --) shift; break ;;
-        *) break ;;
-    esac
-done
-exec "$@"
-"#;
+    let wrapper = guest_files::BWRAP;
 
     let _ = fs::create_dir_all(
         wrapper_path
@@ -1574,25 +1522,12 @@ fn setup_open_from_android(_: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     write_executable(
         &fs_root.join(shared::OPEN_HELPER.trim_start_matches('/')),
-        &format!(
-            r#"#!/bin/sh
-# Opens what Android handed Local Desktop ("Open with", "Share"). The app leaves each target in
-# the spool and has the session's D-Bus start this script ({service}), so it runs in the
-# session, with its environment, and what it opens stays there. It doesn't take the name: the
-# bus starts it anew each time.
-spool="${{XDG_RUNTIME_DIR:-/tmp}}/{spool}"
-for request in "$spool"/*; do
-    [ -f "$request" ] || continue
-    target=$(cat "$request")
-    rm -f "$request"
-    xdg-open "$target" </dev/null &
-done
-# A failure on purpose: the bus takes a clean exit for a service that went to the background,
-# and waits for the name until it gives up (two minutes), with every request in between.
-exit 1
-"#,
-            service = shared::OPEN_SERVICE,
-            spool = shared::SPOOL
+        &fill(
+            guest_files::OPEN_HELPER,
+            &[
+                ("SERVICE", shared::OPEN_SERVICE),
+                ("SPOOL", shared::SPOOL),
+            ],
         ),
     );
     let services = fs_root.join("usr/share/dbus-1/services");
@@ -1611,61 +1546,16 @@ exit 1
 
 /// "Install on Android" for apps, in the file manager's "Open with": the only program for them,
 /// so also what opening one does.
-const INSTALL_ENTRY: &str = "[Desktop Entry]
-Type=Application
-Name=Install on Android
-Comment=Install the app on the phone; Android asks first
-Icon=application-vnd.android.package-archive
-Exec=localdesktop install %f
-MimeType=application/vnd.android.package-archive;application/xapk-package-archive;
-NoDisplay=true
-Terminal=false
-";
+const INSTALL_ENTRY: &str = guest_files::INSTALL_ENTRY;
 /// The app's settings page, which also links to Android's settings for it.
-const SETTINGS_ENTRY: &str = "[Desktop Entry]
-Type=Application
-Name=Local Desktop Settings
-GenericName=Settings of the Android app
-Comment=The desktop, its user, what it shares with Android, SSH and the GPU drivers
-Icon=smartphone
-Exec=localdesktop open-settings
-Categories=Settings;
-Terminal=false
-";
+const SETTINGS_ENTRY: &str = guest_files::SETTINGS_ENTRY;
 /// "Share with Android Apps…" in the context menu of Dolphin and of Plasma's desktop, for files.
 /// KIO runs a service menu outside the applications folders only if it's executable or root's.
-const SHARE_SERVICE_MENU: &str = "[Desktop Entry]
-Type=Service
-X-KDE-ServiceTypes=KonqPopupMenu/Plugin
-MimeType=all/allfiles;
-Actions=share;
-X-KDE-Priority=TopLevel
-
-[Desktop Action share]
-Name=Share with Android Apps…
-Icon=document-share
-Exec=localdesktop share %F
-";
+const SHARE_SERVICE_MENU: &str = guest_files::SHARE_SERVICE_MENU;
 /// The same in the "Send To" menu of Thunar, Xfce's file manager.
-const SHARE_SEND_TO: &str = "[Desktop Entry]
-Type=Application
-Version=1.0
-Name=Android Apps
-Icon=document-share
-Exec=localdesktop share %F
-";
+const SHARE_SEND_TO: &str = guest_files::SHARE_SEND_TO;
 /// Bundles of split APKs, which shared-mime-info doesn't know.
-const BUNDLE_TYPE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
-<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-  <mime-type type="application/xapk-package-archive">
-    <comment>Android app bundle</comment>
-    <icon name="application-vnd.android.package-archive"/>
-    <sub-class-of type="application/zip"/>
-    <glob pattern="*.xapk"/>
-    <glob pattern="*.apks"/>
-  </mime-type>
-</mime-info>
-"#;
+const BUNDLE_TYPE: &str = guest_files::BUNDLE_TYPE;
 
 /// `localdesktop`, the command that asks Android for things (`guest::control`), with "Install on
 /// Android" for apps, sharing files with Android's apps and Android's settings for the app in the
@@ -1675,77 +1565,12 @@ fn setup_localdesktop_command(_: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop"),
-        &format!(
-            r#"#!/bin/sh
-# Asks Local Desktop, the Android app this Linux runs in, to do something on Android's side.
-pipe={pipe}
-usage() {{
-    cat >&2 <<'EOF'
-Usage: localdesktop COMMAND
-  open-url URL      open a web or mail link with Android's apps
-  share FILE...     share files with an Android app, picked in Android's share sheet
-  install FILE      install an Android app (.apk, .xapk, .apks); Android asks first
-  open-settings     open Local Desktop's settings
-  open-terminal     open Local Desktop's terminal
-  restart-desktop   log out of the desktop and start it again
-  direct PROGRAM... run a Wayland program over the desktop, full screen, straight on Local
-                    Desktop's display: the GPU's frames reach the screen without copies (games)
-EOF
-    exit 2
-}}
-send() {{
-    case "$1" in
-        *'
-'*) echo "localdesktop: no line breaks, please" >&2; exit 2 ;;
-    esac
-    if [ ! -p "$pipe" ]; then
-        echo "localdesktop: Local Desktop isn't listening at $pipe" >&2
-        exit 1
-    fi
-    printf '%s\n' "$1" | timeout 5 tee "$pipe" > /dev/null || {{
-        echo "localdesktop: Local Desktop didn't take it" >&2
-        exit 1
-    }}
-}}
-case "$1" in
-    open-url) [ $# -eq 2 ] || usage; send "open-url $2" ;;
-    share)
-        [ $# -ge 2 ] || usage
-        shift
-        # One line, a tab between the files; the app tells what it can't share.
-        tab=$(printf '\t')
-        files=
-        for file in "$@"; do
-            path=$(realpath -e -- "$file") || exit 1
-            case "$path" in
-                *"$tab"*) echo "localdesktop: can't share $file: its name has a tab" >&2; exit 2 ;;
-            esac
-            files="${{files:+$files$tab}}$path"
-        done
-        [ ${{#files}} -lt 16000 ] || {{ echo "localdesktop: too many files at once" >&2; exit 2; }}
-        send "share $files" ;;
-    install)
-        [ $# -eq 2 ] || usage
-        file=$(realpath -e -- "$2") || exit 1
-        send "install $file" ;;
-    open-settings | open-terminal | restart-desktop) [ $# -eq 1 ] || usage; send "$1" ;;
-    direct)
-        [ $# -ge 2 ] || usage
-        shift
-        # Local Desktop's own display, which puts the newest window on top. Wayland only: X11
-        # programs would land on the desktop's Xwayland.
-        export WAYLAND_DISPLAY={wayland}
-        unset DISPLAY
-        export SDL_VIDEODRIVER=wayland SDL_VIDEO_DRIVER=wayland QT_QPA_PLATFORM=wayland
-        export GDK_BACKEND=wayland MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=wayland
-        # It takes Vulkan's own buffers (dma-bufs), so frames needn't be copied to shared memory.
-        unset MESA_VK_WSI_DEBUG
-        exec "$@" ;;
-    *) usage ;;
-esac
-"#,
-            pipe = control::PIPE,
-            wayland = format!("/tmp/{WAYLAND_SOCKET_NAME}"),
+        &fill(
+            guest_files::LOCALDESKTOP_COMMAND,
+            &[
+                ("PIPE", control::PIPE),
+                ("WAYLAND_DISPLAY", &format!("/tmp/{WAYLAND_SOCKET_NAME}")),
+            ],
         ),
     );
     for (path, entry) in [
@@ -1893,59 +1718,13 @@ fn setup_chromium_no_sandbox(_: &SetupOptions) -> StageOutput {
     // the user's own XDG directory, re-running every session to catch newly installed apps.
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-no-sandbox-entries"),
-        r#"#!/bin/sh
-target_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-mkdir -p "$target_dir" || exit 0
-
-# The scan starts several processes per entry, which took seconds of every session start
-# under proot, so it only runs when something in the application directories changed.
-stamp="$target_dir/.localdesktop-no-sandbox-scanned"
-if [ -e "$stamp" ] && [ -z "$(find /usr/share/applications /usr/local/share/applications \
-        -maxdepth 1 -newer "$stamp" 2>/dev/null | head -n1)" ]; then
-    exit 0
-fi
-# Before scanning, so entries installed meanwhile get seen next time.
-touch "$stamp"
-
-for src in /usr/share/applications/*.desktop /usr/local/share/applications/*.desktop; do
-    [ -f "$src" ] || continue
-
-    prog=$(sed -n 's/^Exec=//p' "$src" | head -n1 | awk '{print $1}')
-    [ -n "$prog" ] || continue
-    case "$prog" in
-        /*) bin="$prog" ;;
-        *) bin=$(command -v "$prog" 2>/dev/null) || continue ;;
-    esac
-    bin=$(readlink -f "$bin" 2>/dev/null)
-    [ -n "$bin" ] || continue
-
-    # Every Chromium/Electron build ships the setuid sandbox helper next to its binary,
-    # or one level up when the launcher lives in a bin/ subdirectory.
-    dir=$(dirname "$bin")
-    [ -e "$dir/chrome-sandbox" ] || [ -e "$dir/../chrome-sandbox" ] || continue
-
-    dst="$target_dir/$(basename "$src")"
-    # Leave alone anything the user wrote themselves.
-    if [ -e "$dst" ] && ! grep -q '^X-LocalDesktop-NoSandbox=' "$dst"; then
-        continue
-    fi
-
-    awk '
-        /^\[Desktop Entry\]/ && !seen { print; print "X-LocalDesktop-NoSandbox=true"; seen = 1; next }
-        /^Exec=/ && !/--no-sandbox/ { sub(/^Exec=[^ ]+/, "& --no-sandbox") }
-        { print }
-    ' "$src" > "$dst"
-done
-"#,
+        guest_files::NO_SANDBOX_ENTRIES,
     );
 
     // Same flag for terminal launches, following the /usr/local/bin PATH-priority pattern.
     write_executable(
         &fs_root.join("usr/local/bin/chromium"),
-        r#"#!/bin/sh
-[ -x /usr/bin/chromium ] || { echo "chromium is not installed" >&2; exit 127; }
-exec /usr/bin/chromium --no-sandbox "$@"
-"#,
+        guest_files::CHROMIUM,
     );
 
     None
@@ -1961,22 +1740,7 @@ fn setup_onboard_signal_fix(_: &SetupOptions) -> StageOutput {
     // We install a wrapper at /usr/local/bin/onboard (higher PATH priority than /usr/sbin)
     // that monkey-patches signal.set_wakeup_fd to swallow OSError before launching the
     // real Onboard binary.
-    let wrapper = r#"#!/usr/bin/python3
-# Onboard wrapper for proot/Android: patches signal.set_wakeup_fd to handle
-# OSError (ENOENT) caused by proot's fstat translation on socket file descriptors.
-import signal as _signal
-_orig_swf = _signal.set_wakeup_fd
-def _safe_swf(fd, **kwargs):
-    try:
-        return _orig_swf(fd, **kwargs)
-    except OSError:
-        return -1
-_signal.set_wakeup_fd = _safe_swf
-
-import runpy, sys
-sys.argv[0] = '/usr/sbin/onboard'
-runpy.run_path('/usr/sbin/onboard', run_name='__main__')
-"#;
+    let wrapper = guest_files::ONBOARD;
 
     let _ = fs::create_dir_all(
         wrapper_path
@@ -2026,42 +1790,19 @@ fn android_ui_scale(density_dpi: i32) -> i32 {
 
 /// The start of every session launcher: audio, a private runtime directory, the compositor socket.
 fn session_environment() -> String {
-    format!(
-        r#"export PIPEWIRE_RUNTIME_DIR={PIPEWIRE_GUEST_RUNTIME_DIR}
-export PULSE_SERVER={PULSE_GUEST_SERVER}
-# A private runtime directory per user, like logind would provide, so sockets, locks and dconf
-# state that another user's session left in the shared /tmp don't get in the way.
-if [ -z "${{XDG_RUNTIME_DIR:-}}" ] || [ "$XDG_RUNTIME_DIR" = /tmp ]; then
-    XDG_RUNTIME_DIR=/tmp/runtime-$(id -u)
-fi
-mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-export XDG_RUNTIME_DIR
-# Local Desktop's own compositor socket stays in /tmp.
-case "${{WAYLAND_DISPLAY:=wayland-0}}" in
-    /*) ;;
-    *) WAYLAND_DISPLAY=/tmp/$WAYLAND_DISPLAY ;;
-esac
-export WAYLAND_DISPLAY
-# Electron adds --no-sandbox when this is set; Android has no user namespaces for it to use.
-export ELECTRON_DISABLE_SANDBOX=1
-# The compositors here only take shared-memory buffers (there's no GPU render node), so Vulkan
-# apps have to present through them.
-export MESA_VK_WSI_DEBUG=sw
-# Firefox's main process can't reopen a memfd read-only through /proc/self/fd (Android's SELinux),
-# so it shares memory through /dev/shm instead; its content processes still insist on memfd seals
-# and crashed on every page ("Shared memory PlatformHandle is not safe to map").
-export MOZ_SHM_NO_SEALS=1
-{TZ_FROM_LOCALTIME}"#
+    fill(
+        guest_files::SESSION_ENVIRONMENT,
+        &[
+            ("PIPEWIRE_GUEST_RUNTIME_DIR", PIPEWIRE_GUEST_RUNTIME_DIR),
+            ("PULSE_GUEST_SERVER", PULSE_GUEST_SERVER),
+            ("TZ_FROM_LOCALTIME", TZ_FROM_LOCALTIME),
+        ],
     )
 }
 
 /// Finds out whether Turnip works, into `$turnip` (about 0.2 s): the Adreno driver is installed
 /// and finds the GPU.
-const TURNIP_CHECK: &str = r#"turnip=
-if vulkaninfo --summary 2>/dev/null | grep -q 'driverName *= turnip'; then
-    turnip=1
-fi
-"#;
+const TURNIP_CHECK: &str = guest_files::TURNIP_CHECK;
 
 /// OpenGL programs draw through Zink on Turnip (`[graphics] zink`), where `TURNIP_CHECK` found it
 /// working: with the library `gpu` preloads, Mesa's EGL doesn't fall back to llvmpipe when Zink
@@ -2071,13 +1812,7 @@ fn zink_environment() -> String {
     if !graphics.adreno_drivers || !graphics.zink {
         return String::new();
     }
-    format!(
-        r#"if [ -n "$turnip" ] && [ -e {ZINK_EGL_LIB} ]; then
-    export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1
-    export LD_PRELOAD="{ZINK_EGL_LIB}${{LD_PRELOAD:+:$LD_PRELOAD}}"
-fi
-"#
-    )
+    fill(guest_files::ZINK, &[("ZINK_EGL_LIB", ZINK_EGL_LIB)])
 }
 
 /// Desktop items are seeded create-if-missing (the run-once mechanism described on
@@ -2093,17 +1828,9 @@ fn seed_desktop_items(home_dir: &Path, pdf_viewer: &str) {
     if !online_docs.exists() {
         let written = fs::write(
             &online_docs,
-            format!(
-                r#"[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Local Desktop - Online Docs
-Comment=Open the Local Desktop documentation website
-Exec=firefox {DOCS_HOME_URL}
-Icon=firefox
-Terminal=false
-StartupNotify=true
-"#
+            fill(
+                guest_files::ONLINE_DOCS_ENTRY,
+                &[("DOCS_HOME_URL", DOCS_HOME_URL)],
             ),
         );
         if written.is_ok() {
@@ -2154,33 +1881,12 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
     let _ = fs::create_dir_all(&xfconf_dir);
     fs::write(
         xfconf_dir.join("xfce4-session.xml"),
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-
-<channel name="xfce4-session" version="1.0">
-  <property name="startup" type="empty">
-    <property name="ssh-agent" type="empty">
-      <property name="enabled" type="bool" value="false"/>
-    </property>
-    <property name="gpg-agent" type="empty">
-      <property name="enabled" type="bool" value="false"/>
-    </property>
-  </property>
-</channel>
-"#,
+        guest_files::XFCE_SESSION_XML,
     )
     .expect("Failed to write xfce4-session xfconf defaults");
     fs::write(
         xfconf_dir.join("xsettings.xml"),
-        &format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-
-<channel name="xsettings" version="1.0">
-  <property name="Xft" type="empty">
-    <property name="DPI" type="int" value="{xft_dpi}"/>
-  </property>
-</channel>
-"#
-        ),
+        &fill(guest_files::XSETTINGS_XML, &[("XFT_DPI", &xft_dpi.to_string())]),
     )
     .expect("Failed to write xsettings xfconf defaults");
 
@@ -2194,9 +1900,9 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
     };
     write_executable(
         &fs_root.join("usr/local/bin/startxfce4-localdesktop"),
-        &format!(
-            "#!/bin/sh\n{}{gpu}exec startxfce4 --wayland \"$@\"\n",
-            session_environment()
+        &fill(
+            guest_files::STARTXFCE4,
+            &[("ENV", &session_environment()), ("GPU", &gpu)],
         ),
     );
 
@@ -2204,18 +1910,9 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
     // refreshes the --no-sandbox application entries for anything installed since last session.
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-xfce-session-init"),
-        &format!(
-            r#"#!/bin/sh
-for _ in $(seq 1 50); do
-    xfconf-query -c xsettings -lv >/dev/null 2>&1 && break
-    sleep 0.1
-done
-
-xfconf-query -c xsettings -p /Xft/DPI -n -t int -s {xft_dpi} 2>/dev/null || \
-xfconf-query -c xsettings -p /Xft/DPI -t int -s {xft_dpi}
-
-/usr/local/bin/localdesktop-no-sandbox-entries
-"#
+        &fill(
+            guest_files::XFCE_SESSION_INIT,
+            &[("XFT_DPI", &xft_dpi.to_string())],
         ),
     );
 
@@ -2226,28 +1923,14 @@ xfconf-query -c xsettings -p /Xft/DPI -t int -s {xft_dpi}
 
     fs::write(
         autostart_dir.join("localdesktop-xfce-session-init.desktop"),
-        r#"[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Local Desktop Xfce Session Init
-Comment=Apply HiDPI font scaling and refresh sandbox-free application entries
-Exec=/usr/local/bin/localdesktop-xfce-session-init
-Terminal=false
-OnlyShowIn=XFCE;
-X-GNOME-Autostart-enabled=true
-"#,
+        guest_files::XFCE_SESSION_INIT_AUTOSTART,
     )
     .expect("Failed to write Xfce session init autostart entry");
 
     // xfce4-power-manager expects host power interfaces that proot cannot provide.
     fs::write(
         autostart_dir.join("xfce4-power-manager.desktop"),
-        r#"[Desktop Entry]
-Type=Application
-Name=Power Manager
-Hidden=true
-OnlyShowIn=XFCE;
-"#,
+        guest_files::XFCE_POWER_MANAGER_AUTOSTART,
     )
     .expect("Failed to disable xfce4-power-manager autostart");
 
@@ -2262,68 +1945,9 @@ OnlyShowIn=XFCE;
     // launch; the script waits for that file instead of applying a hardcoded fallback mode.
     write_executable(
         &fs_root.join("usr/local/bin/localdesktop-wlroots-output"),
-        &format!(
-            r#"#!/bin/sh
-# Keep labwc's wlroots output aligned with the Android host window.
-state_file="/tmp/localdesktop-output"
-lock_file="${{XDG_RUNTIME_DIR:-/tmp}}/localdesktop-wlroots-output.pid"
-fallback_scale="{ui_scale}"
-
-if [ -r "$lock_file" ]; then
-    old_pid=$(cat "$lock_file" 2>/dev/null)
-    if [ -n "$old_pid" ] && kill -0 "$old_pid" 2>/dev/null; then
-        exit 0
-    fi
-fi
-echo "$$" > "$lock_file"
-trap 'rm -f "$lock_file"' EXIT INT TERM
-
-first_output() {{
-    wlr-randr 2>/dev/null | awk 'NF > 0 && $1 !~ /^Modes:/ && $1 !~ /^Current:/ && $1 !~ /^Position:/ && $1 !~ /^Transform:/ && $1 !~ /^Scale:/ {{ print $1; exit }}'
-}}
-
-read_output_state() {{
-    target_mode=""
-    target_scale="$fallback_scale"
-    if [ -r "$state_file" ]; then
-        . "$state_file"
-        target_mode="${{LOCALDESKTOP_OUTPUT_MODE:-}}"
-        target_scale="${{LOCALDESKTOP_OUTPUT_SCALE:-$target_scale}}"
-    fi
-    case "$target_mode" in
-        *x*) ;;
-        *) return 1 ;;
-    esac
-    case "$target_scale" in
-        ''|*[!0-9]*) target_scale="$fallback_scale" ;;
-    esac
-}}
-
-apply_output() {{
-    output="$1"
-    wlr-randr --output "$output" --custom-mode "${{target_mode}}@60Hz" --scale "$target_scale" >/dev/null 2>&1 && return 0
-    wlr-randr --output "$output" --custom-mode "$target_mode" --scale "$target_scale" >/dev/null 2>&1 && return 0
-    wlr-randr --output "$output" --mode "$target_mode" --scale "$target_scale" >/dev/null 2>&1 && return 0
-    wlr-randr --output "$output" --scale "$target_scale" >/dev/null 2>&1 && return 0
-    return 1
-}}
-
-last_config=""
-while true; do
-    if ! read_output_state; then
-        sleep 0.2
-        continue
-    fi
-    output=$(first_output)
-    if [ -n "$output" ]; then
-        config="$output $target_mode $target_scale"
-        if [ "$config" != "$last_config" ] && apply_output "$output"; then
-            last_config="$config"
-        fi
-    fi
-    sleep 1
-done
-"#
+        &fill(
+            guest_files::WLROOTS_OUTPUT,
+            &[("UI_SCALE", &ui_scale.to_string())],
         ),
     );
 
@@ -2331,27 +1955,19 @@ done
     // Nested on our compositor: reuse the parent wl_output mode when possible (labwc-config.5).
     fs::write(
         labwc_dir.join("rc.xml"),
-        r#"<?xml version="1.0"?>
-<labwc_config>
-  <core>
-    <reuseOutputMode>yes</reuseOutputMode>
-  </core>
-</labwc_config>
-"#,
+        guest_files::LABWC_RC,
     )
     .expect("Failed to write labwc rc.xml defaults");
     write_executable(
         &labwc_dir.join("autostart"),
-        r#"#!/bin/sh
-/usr/local/bin/localdesktop-wlroots-output >"${XDG_RUNTIME_DIR:-/tmp}/localdesktop-wlroots-output.log" 2>&1 &
-"#,
+        guest_files::LABWC_AUTOSTART,
     );
 
     // Arch wiki: lock prevents startxfce4 from overwriting custom labwc environment.
     // https://wiki.archlinux.org/title/Xfce#Using_labwc_custom_keymaps
     fs::write(
         labwc_dir.join("environment"),
-        "XDG_SESSION_TYPE=wayland\nXDG_CURRENT_DESKTOP=XFCE\n",
+        guest_files::LABWC_ENVIRONMENT,
     )
     .expect("Failed to write labwc environment file");
     fs::write(labwc_dir.join("lock"), "").expect("Failed to write labwc environment lock file");
@@ -2367,45 +1983,13 @@ done
 const PLASMA_XDG_DIR: &str = "etc/localdesktop/plasma";
 
 const PLASMA_DEFAULTS: &[(&str, &str)] = &[
-    (
-        "kwinrc",
-        "[Wayland]\n# Plasma's on-screen keyboard, for touch-only use, drawn without the GPU (PLASMA_KEYBOARD).\nInputMethod=/usr/share/applications/localdesktop-keyboard.desktop\n# Show it for any input: touches reach KWin as mouse events, which it would otherwise ignore.\nVirtualKeyboardMode=2\n",
-    ),
-    (
-        "kdeglobals",
-        "[KDE]\n# KWin composites on the CPU here, so animations cost more than they add.\nAnimationDurationFactor=0\n",
-    ),
-    (
-        "ksmserverrc",
-        "[General]\n# Don't reopen the last session's apps; startup is slow enough already.\nloginMode=emptySession\n",
-    ),
-    (
-        "kscreenlockerrc",
-        "[Daemon]\n# Android already locks the phone.\nAutolock=false\nLockOnResume=false\n",
-    ),
-    (
-        "kwalletrc",
-        "[Wallet]\n# Without a PAM login nothing opens the wallet, so every app storing a secret would ask for its password.\nEnabled=false\nFirst Use=false\n",
-    ),
-    (
-        "baloofilerc",
-        "[Basic Settings]\n# File indexing costs CPU and battery in the background.\nIndexing-Enabled=false\n",
-    ),
-    (
-        "kded6rc",
-        "# Background services for hardware, disks and network services that proot doesn't have.\n\
-         [Module-baloosearchmodule]\nautoload=false\n\n\
-         [Module-device_automounter]\nautoload=false\n\n\
-         [Module-devicenotifications]\nautoload=false\n\n\
-         [Module-donationmessage]\nautoload=false\n\n\
-         [Module-freespacenotifier]\nautoload=false\n\n\
-         [Module-geotimezoned]\nautoload=false\n\n\
-         [Module-kded_touchpad]\nautoload=false\n\n\
-         [Module-oom_notifier]\nautoload=false\n\n\
-         [Module-remotenotifier]\nautoload=false\n\n\
-         [Module-smbwatcher]\nautoload=false\n\n\
-         [Module-wpad_detector]\nautoload=false\n",
-    ),
+    ("kwinrc", guest_files::PLASMA_KWINRC),
+    ("kdeglobals", guest_files::PLASMA_KDEGLOBALS),
+    ("ksmserverrc", guest_files::PLASMA_KSMSERVERRC),
+    ("kscreenlockerrc", guest_files::PLASMA_KSCREENLOCKERRC),
+    ("kwalletrc", guest_files::PLASMA_KWALLETRC),
+    ("baloofilerc", guest_files::PLASMA_BALOOFILERC),
+    ("kded6rc", guest_files::PLASMA_KDED6RC),
 ];
 
 /// Plasma's on-screen keyboard as KWin starts it. It keeps its window and the GPU's buffers for it
@@ -2413,15 +1997,7 @@ const PLASMA_DEFAULTS: &[(&str, &str)] = &[
 /// rest of Plasma, it looks the same and holds about 35 MiB less.
 const PLASMA_KEYBOARD: (&str, &str) = (
     "usr/share/applications/localdesktop-keyboard.desktop",
-    "[Desktop Entry]
-Name=Plasma Keyboard (Local Desktop)
-Comment=Plasma's on-screen keyboard, drawn without the GPU to use less memory
-Exec=env -u QSG_RHI_BACKEND QT_QUICK_BACKEND=software plasma-keyboard
-Type=Application
-Icon=input-keyboard-virtual
-NoDisplay=true
-X-KDE-Wayland-VirtualKeyboard=true
-",
+    guest_files::PLASMA_KEYBOARD,
 );
 
 /// Autostart entries hidden by an entry of the same name in `PLASMA_XDG_DIR/autostart`.
@@ -2444,38 +2020,7 @@ const PLASMA_HIDDEN_AUTOSTART: &[&str] = &[
 /// A Plasma update script: plasmashell runs each one once per user, also on a brand-new layout.
 const PLASMA_UNPIN_MISSING_APPS: (&str, &str) = (
     "usr/share/plasma/shells/org.kde.plasma.desktop/contents/updates/localdesktop_unpin_missing_apps.js",
-    r#"// Local Desktop: unpin task manager launchers for applications that aren't installed, such as
-// Discover in Plasma's default pins, which the Plasma preset leaves out. readConfig() can't see
-// the widget's built-in defaults, so an unset list stands for this copy of them
-// (plasma-desktop 6.7, applets/taskmanager/main.xml).
-var defaultLaunchers = [
-    "applications:systemsettings.desktop",
-    "applications:org.kde.discover.desktop",
-    "preferred://filemanager",
-    "preferred://browser",
-];
-
-panels().forEach(function (panel) {
-    panel.widgets().forEach(function (widget) {
-        if (widget.type !== "org.kde.plasma.icontasks" && widget.type !== "org.kde.plasma.taskmanager") {
-            return;
-        }
-        widget.currentConfigGroup = ["General"];
-        var launchers = widget.readConfig("launchers", defaultLaunchers);
-        if (typeof launchers === "string") {
-            launchers = launchers ? launchers.split(",") : [];
-        }
-        var kept = launchers.filter(function (launcher) {
-            var match = /^applications:(.+)$/.exec(launcher);
-            return !match || applicationExists(match[1]);
-        });
-        if (kept.length !== launchers.length) {
-            widget.writeConfig("launchers", kept);
-            widget.reloadConfig();
-        }
-    });
-});
-"#,
+    guest_files::PLASMA_UNPIN_MISSING_APPS,
 );
 
 fn setup_plasma(_: &SetupOptions) -> StageOutput {
@@ -2487,28 +2032,14 @@ fn setup_plasma(_: &SetupOptions) -> StageOutput {
 
     write_executable(
         &fs_root.join("usr/local/bin/startplasma-localdesktop"),
-        &format!(
-            r#"#!/bin/sh
-{env}export XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE
-export XDG_CONFIG_DIRS=/{PLASMA_XDG_DIR}:${{XDG_CONFIG_DIRS:-/etc/xdg}}
-# Qt sends its warnings to the journal, which nothing reads here, unless told otherwise; this
-# way they land in the session log.
-export QT_FORCE_STDERR_LOGGING=1
-{turnip_check}{zink}# Qt Quick draws with Vulkan on the GPU when the Adreno driver works (see `setup_adreno_mesa`),
-# and with its own 2D renderer otherwise: without a GPU its OpenGL goes through llvmpipe, which
-# took two cores to scroll a Plasma menu. Without the check a broken driver would leave Plasma
-# without a panel.
-if [ -n "$turnip" ]; then
-    export QSG_RHI_BACKEND=vulkan
-else
-    export QT_QUICK_BACKEND=software
-fi
-/usr/local/bin/localdesktop-no-sandbox-entries
-exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
-"#,
-            env = session_environment(),
-            turnip_check = TURNIP_CHECK,
-            zink = zink_environment(),
+        &fill(
+            guest_files::STARTPLASMA,
+            &[
+                ("ENV", &session_environment()),
+                ("PLASMA_XDG_DIR", PLASMA_XDG_DIR),
+                ("TURNIP_CHECK", guest_files::TURNIP_CHECK),
+                ("ZINK", &zink_environment()),
+            ],
         ),
     );
 

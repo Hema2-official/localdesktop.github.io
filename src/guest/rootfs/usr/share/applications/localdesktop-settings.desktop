@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Local Desktop Settings
+GenericName=Settings of the Android app
+Comment=The desktop, its user, what it shares with Android, SSH and the GPU drivers
+Icon=smartphone
+Exec=localdesktop open-settings
+Categories=Settings;
+Terminal=false

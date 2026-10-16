@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/xapk-package-archive">
+    <comment>Android app bundle</comment>
+    <icon name="application-vnd.android.package-archive"/>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.xapk"/>
+    <glob pattern="*.apks"/>
+  </mime-type>
+</mime-info>

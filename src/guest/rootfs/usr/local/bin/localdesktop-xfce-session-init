@@ -1,0 +1,10 @@
+#!/bin/sh
+for _ in $(seq 1 50); do
+    xfconf-query -c xsettings -lv >/dev/null 2>&1 && break
+    sleep 0.1
+done
+
+xfconf-query -c xsettings -p /Xft/DPI -n -t int -s @XFT_DPI@ 2>/dev/null || \
+xfconf-query -c xsettings -p /Xft/DPI -t int -s @XFT_DPI@
+
+/usr/local/bin/localdesktop-no-sandbox-entries
