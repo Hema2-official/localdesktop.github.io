@@ -920,16 +920,21 @@ const ADRENO_MESA_RETRY_SECS: u64 = 24 * 60 * 60;
 /// `gpu <program>` runs an OpenGL program on the Adreno. Vulkan programs use it without help.
 const GPU_HELPER: &str = "usr/local/bin/gpu";
 const GPU_HELPER_SCRIPT: &str = r#"#!/bin/sh
-# Run an OpenGL program on the Adreno GPU: through Zink on Turnip, under X11 (Xwayland), because
-# the compositors here only take shared-memory buffers and OpenGL through Wayland can't use them.
-# Vulkan programs use the GPU without this.
+# Run an OpenGL program on the Adreno GPU, through Zink on Turnip. Vulkan programs use the GPU
+# without this.
 [ $# -gt 0 ] || { echo "Usage: gpu <program> [arguments]" >&2; exit 2; }
-export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1
-export DISPLAY="${DISPLAY:-:0}"
-unset WAYLAND_DISPLAY
-export QT_QPA_PLATFORM=xcb GDK_BACKEND=x11 SDL_VIDEODRIVER=x11 MOZ_ENABLE_WAYLAND=0
+export MESA_LOADER_DRIVER_OVERRIDE=zink
+# X11 programs: Zink's own presentation (kopper) through GLX.
+export LIBGL_KOPPER_DRI2=1
+# Wayland programs: Mesa's EGL takes Zink's own presentation only in software mode, which this
+# library makes it believe without Zink believing it too.
+export LD_PRELOAD="/usr/local/lib/localdesktop/libegl-zink.so${LD_PRELOAD:+:$LD_PRELOAD}"
 exec "$@"
 "#;
+/// The library `gpu` preloads (src/guest/egl-zink.c), as the APK has it and where the rootfs
+/// gets it.
+const ZINK_EGL_ASSET: &str = "guest/libegl-zink.so";
+const ZINK_EGL_LIB: &str = "/usr/local/lib/localdesktop/libegl-zink.so";
 
 fn setup_adreno_mesa(options: &SetupOptions) -> StageOutput {
     if !Path::new("/dev/kgsl-3d0").exists() {
@@ -938,6 +943,13 @@ fn setup_adreno_mesa(options: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     let wanted = get_application_context().local_config.graphics.adreno_drivers;
     let installed = fs_root.join(ADRENO_MESA_STATE).exists();
+    if wanted {
+        if let Err(error) =
+            install_guest_library(&options.android_app, fs_root, ZINK_EGL_ASSET, ZINK_EGL_LIB)
+        {
+            log::warn!("Could not install {ZINK_EGL_LIB}: {error}");
+        }
+    }
     // A newer release, which a look for one found (`android::gpu_drivers`).
     let update = gpu_drivers::pending_update().filter(|_| wanted && installed);
     if wanted == installed && (!wanted || adreno_mesa_intact(fs_root)) && update.is_none() {
@@ -1250,6 +1262,7 @@ fn restore_arch_mesa(sender: &Sender<SetupMessage>) -> Result<(), String> {
     }
     let _ = fs::remove_file(fs_root.join(ADRENO_MESA_STATE));
     let _ = fs::remove_file(fs_root.join(GPU_HELPER));
+    let _ = fs::remove_file(fs_root.join(ZINK_EGL_LIB.trim_start_matches('/')));
     Ok(())
 }
 
@@ -1777,7 +1790,12 @@ fn setup_fast_realpath(options: &SetupOptions) -> StageOutput {
         .performance
         .fast_realpath;
     if wanted {
-        if let Err(error) = install_fast_realpath(&options.android_app, fs_root) {
+        if let Err(error) = install_guest_library(
+            &options.android_app,
+            fs_root,
+            FAST_REALPATH_ASSET,
+            FAST_REALPATH_LIB,
+        ) {
             // A preloaded library that isn't there makes every program complain.
             log::warn!("Could not install {FAST_REALPATH_LIB}: {error}");
             wanted = false;
@@ -1789,8 +1807,14 @@ fn setup_fast_realpath(options: &SetupOptions) -> StageOutput {
     None
 }
 
-fn install_fast_realpath(android_app: &AndroidApp, fs_root: &Path) -> std::io::Result<()> {
-    let name = CString::new(FAST_REALPATH_ASSET).expect("asset name");
+/// Install a library of the APK's `asset` at `library` in the rootfs.
+fn install_guest_library(
+    android_app: &AndroidApp,
+    fs_root: &Path,
+    asset: &str,
+    library: &str,
+) -> std::io::Result<()> {
+    let name = CString::new(asset).expect("asset name");
     let mut asset = android_app
         .asset_manager()
         .open(&name)
@@ -1798,7 +1822,7 @@ fn install_fast_realpath(android_app: &AndroidApp, fs_root: &Path) -> std::io::R
     let mut bytes = Vec::with_capacity(asset.length());
     asset.read_to_end(&mut bytes)?;
 
-    let path = fs_root.join(FAST_REALPATH_LIB.trim_start_matches('/'));
+    let path = fs_root.join(library.trim_start_matches('/'));
     if fs::read(&path).is_ok_and(|installed| installed == bytes) {
         return Ok(());
     }
