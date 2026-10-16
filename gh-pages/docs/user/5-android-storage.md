@@ -47,6 +47,7 @@ The desktop's programs, and you in a terminal, can ask Android for things with t
 | `localdesktop open-settings` | Opens Local Desktop's settings (see [Configurations](4-configurations.md#settings-page)); from there, Android's settings for the app: its permissions, battery use and storage. The desktop's menu has it as "Local Desktop Settings". |
 | `localdesktop open-terminal` | Opens Local Desktop's terminal, as its notification does. |
 | `localdesktop restart-desktop` | Logs out of the desktop and starts it again, as the notification's "Restart desktop" does. |
+| `localdesktop direct PROGRAM...` | Runs a Wayland program full screen over the desktop, straight on Local Desktop's own display instead of the desktop's, until it closes. Its GPU frames reach the screen without copies, which suits games; see [GPU](4-configurations.md#gpu). |
 
 - In the file manager, "Share with Android Apps…" in a file's context menu (Dolphin, and Plasma's desktop) or Send To → "Android Apps" (Thunar) shares the selected files. The app you pick reads them where they are, without a copy, and only those files.
 - In the file manager, opening an `.apk`, `.xapk` or `.apks` installs it ("Install on Android"). As far as Android is concerned such apps come from an unknown source, so Google Play Protect may offer to scan them first.

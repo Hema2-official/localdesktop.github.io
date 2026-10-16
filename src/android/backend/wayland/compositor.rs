@@ -2,18 +2,22 @@ use super::{bind::bind_socket, dmabuf};
 use smithay::{
     backend::{
         allocator::dmabuf::Dmabuf,
-        renderer::{gles::GlesRenderer, utils::on_commit_buffer_handler},
+        renderer::{
+            gles::GlesRenderer,
+            utils::{on_commit_buffer_handler, with_renderer_surface_state},
+        },
     },
     delegate_compositor, delegate_data_device, delegate_dmabuf, delegate_fractional_scale,
     delegate_output, delegate_pointer_constraints, delegate_presentation, delegate_seat,
     delegate_shm, delegate_single_pixel_buffer, delegate_viewporter, delegate_xdg_shell,
+    desktop::{find_popup_root_surface, get_popup_toplevel_coords, PopupKind, PopupManager},
     input::{self, keyboard::KeyboardHandle, touch::TouchHandle, Seat, SeatHandler, SeatState},
     output::Output,
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{protocol::wl_seat, Display},
     },
-    utils::{Logical, Monotonic, Point, Serial, Size},
+    utils::{Logical, Monotonic, Point, Rectangle, Serial, Size, SERIAL_COUNTER},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -36,7 +40,8 @@ use smithay::{
             SelectionHandler,
         },
         shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
+            XdgShellState,
         },
         shm::{ShmHandler, ShmState},
         single_pixel_buffer::SinglePixelBufferState,
@@ -105,7 +110,18 @@ pub struct State {
     pub scaled_surfaces: Vec<WlSurface>,
     /// Something on screen changed since the last frame (a surface committed or went away).
     pub needs_redraw: bool,
+    pub popups: PopupManager,
+    /// The popup that asked for keyboard input (xdg_popup.grab), while it's open.
+    pub popup_grab: Option<WlSurface>,
+    /// The one output, the Android window, once there is one.
+    pub output: Option<Output>,
 }
+
+/// Marks a surface that was told it's on the output.
+struct EnteredOutput;
+
+/// Marks a toplevel configured again when it first showed something.
+struct ConfiguredWhenShown;
 
 impl State {
     /// The scale a surface's content maps to the screen with.
@@ -117,6 +133,131 @@ impl State {
         }
     }
 
+    /// The toplevels from the bottom up, the newest on top. A program started straight on this
+    /// display (a game, say) comes up over the desktop's own compositor and gives it back when it
+    /// closes. Only toplevels that have drawn something count, so one that hasn't yet doesn't take
+    /// input away from what's on screen.
+    pub fn stacked_toplevels(&self) -> Vec<ToplevelSurface> {
+        self.xdg_shell_state
+            .toplevel_surfaces()
+            .iter()
+            .filter(|toplevel| has_buffer(toplevel.wl_surface()))
+            .cloned()
+            .collect()
+    }
+
+    /// The toplevel on top, which input goes to.
+    pub fn top_toplevel(&self) -> Option<ToplevelSurface> {
+        self.stacked_toplevels().pop()
+    }
+
+    /// The surface at `location` (in the top toplevel's units) and where its origin is: one of
+    /// the top toplevel's popups, the topmost first, or else the toplevel itself.
+    pub fn surface_under(
+        &self,
+        location: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let toplevel = self.top_toplevel()?;
+        let root = toplevel.wl_surface();
+        let popups: Vec<_> = popups_of(root).collect();
+        for (popup, origin, area) in popups.into_iter().rev() {
+            if area.to_f64().contains(location) {
+                return Some((popup.wl_surface().clone(), origin.to_f64()));
+            }
+        }
+        Some((root.clone(), (0.0, 0.0).into()))
+    }
+
+    /// Whether `location` (in the top toplevel's units) is over one of its popups.
+    pub fn over_popup(&self, location: Point<f64, Logical>) -> bool {
+        let top = self.top_toplevel();
+        self.surface_under(location)
+            .is_some_and(|(surface, _)| top.is_some_and(|top| top.wl_surface() != &surface))
+    }
+
+    /// The surface keyboard input goes to: the top toplevel, or a popup of it that asked for
+    /// keyboard input.
+    pub fn keyboard_target(&self) -> Option<WlSurface> {
+        let toplevel = self.top_toplevel()?;
+        if let Some(popup) = self.popup_grab.as_ref().filter(|it| it.is_alive()) {
+            if popups_of(toplevel.wl_surface()).any(|(kind, ..)| kind.wl_surface() == popup) {
+                return Some(popup.clone());
+            }
+        }
+        Some(toplevel.wl_surface().clone())
+    }
+
+    /// Close the top toplevel's popups, as a press away from a menu does.
+    pub fn dismiss_popups(&mut self) {
+        let Some(toplevel) = self.top_toplevel() else {
+            return;
+        };
+        let root = toplevel.wl_surface();
+        let popups: Vec<_> = PopupManager::popups_for_surface(root).collect();
+        if popups.is_empty() {
+            return;
+        }
+        for (popup, _) in popups {
+            let _ = PopupManager::dismiss_popup(root, &popup);
+        }
+        self.popup_grab = None;
+        self.needs_redraw = true;
+    }
+
+    /// The surfaces whose frame callbacks are due when a frame goes out: the top toplevel with
+    /// its popups, and toplevels that haven't drawn yet. A compositor under a program started
+    /// straight on this display (the desktop's KWin under a game) waits instead of drawing.
+    pub fn surfaces_shown(&self) -> Vec<WlSurface> {
+        let top = self.top_toplevel();
+        let mut surfaces: Vec<WlSurface> = self
+            .xdg_shell_state
+            .toplevel_surfaces()
+            .iter()
+            .map(|toplevel| toplevel.wl_surface())
+            .filter(|surface| !has_buffer(surface))
+            .cloned()
+            .collect();
+        if let Some(top) = top {
+            surfaces
+                .extend(popups_of(top.wl_surface()).map(|(popup, ..)| popup.wl_surface().clone()));
+            surfaces.push(top.wl_surface().clone());
+        }
+        surfaces
+    }
+
+    /// Tell a surface it's on the output (wl_surface.enter), once: clients such as mpv, GTK and
+    /// SDL take their scale from the output their surfaces are on.
+    fn enter_output(&self, surface: &WlSurface) {
+        let Some(output) = &self.output else {
+            return;
+        };
+        if with_states(surface, |states| {
+            states
+                .data_map
+                .insert_if_missing_threadsafe(|| EnteredOutput)
+        }) {
+            output.enter(surface);
+        }
+    }
+
+    /// Place a popup where its positioner says, moved into the window as far as it allows.
+    fn place_popup(&self, popup: &PopupSurface) {
+        let kind = PopupKind::Xdg(popup.clone());
+        let Ok(root) = find_popup_root_surface(&kind) else {
+            return;
+        };
+        let scale = self.surface_scale(&root);
+        let mut target = Rectangle::from_size(Size::from((
+            (self.size.w as f64 / scale).round() as i32,
+            (self.size.h as f64 / scale).round() as i32,
+        )));
+        target.loc -= get_popup_toplevel_coords(&kind);
+        target.loc -= window_geometry(&root).loc;
+        popup.with_pending_state(|state| {
+            state.geometry = state.positioner.get_unconstrained_geometry(target);
+        });
+    }
+
     /// Configure a toplevel to fill the window, in the toplevel's own size units.
     pub fn configure_toplevel(&self, toplevel: &ToplevelSurface) {
         let scale = self.surface_scale(toplevel.wl_surface());
@@ -124,9 +265,12 @@ impl State {
             (self.size.w as f64 / scale).round() as i32,
             (self.size.h as f64 / scale).round() as i32,
         ));
+        // Full screen, as every toplevel here is: a client then takes the size as it is, where it
+        // may choose its own for a plain window.
         toplevel.with_pending_state(|state| {
             state.size = Some(size);
             state.states.set(xdg_toplevel::State::Activated);
+            state.states.set(xdg_toplevel::State::Fullscreen);
         });
         toplevel.send_configure();
     }
@@ -174,21 +318,35 @@ impl XdgShellHandler for State {
         self.needs_redraw = true;
     }
 
-    fn new_popup(&mut self, _surface: PopupSurface, _positioner: PositionerState) {
-        // Handle popup creation here
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        surface.with_pending_state(|state| state.geometry = positioner.get_geometry());
+        self.place_popup(&surface);
+        if let Err(error) = self.popups.track_popup(PopupKind::Xdg(surface)) {
+            log::warn!("A popup went away before it was shown: {error:?}");
+        }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // Handle popup grab here
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+        // Keyboard input goes to it (see `keyboard_target`); a press elsewhere closes it.
+        self.popup_grab = Some(surface.wl_surface().clone());
     }
 
     fn reposition_request(
         &mut self,
-        _surface: PopupSurface,
-        _positioner: PositionerState,
-        _token: u32,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
     ) {
-        // Handle popup reposition here
+        surface.with_pending_state(|state| {
+            state.geometry = positioner.get_geometry();
+            state.positioner = positioner;
+        });
+        self.place_popup(&surface);
+        surface.send_repositioned(token);
+    }
+
+    fn popup_destroyed(&mut self, _surface: PopupSurface) {
+        self.needs_redraw = true;
     }
 }
 
@@ -218,19 +376,39 @@ impl CompositorHandler for State {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        self.popups.commit(surface);
+        self.enter_output(surface);
         // Also answers the frame callbacks and presentation feedback this commit asked for.
         self.needs_redraw = true;
+
+        if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(surface) {
+            // Its first commit, before it shows anything: where it goes.
+            if !popup.is_initial_configure_sent() {
+                let _ = popup.send_configure();
+            }
+        }
 
         let toplevel = self
             .xdg_shell_state
             .toplevel_surfaces()
             .iter()
-            .find(|toplevel| {
-                toplevel.wl_surface() == surface && !toplevel.is_initial_configure_sent()
-            })
+            .find(|toplevel| toplevel.wl_surface() == surface)
             .cloned();
         if let Some(toplevel) = toplevel {
-            self.configure_toplevel(&toplevel);
+            if !toplevel.is_initial_configure_sent() {
+                self.configure_toplevel(&toplevel);
+            } else if has_buffer(surface)
+                && with_states(surface, |states| {
+                    states
+                        .data_map
+                        .insert_if_missing_threadsafe(|| ConfiguredWhenShown)
+                })
+            {
+                // Once more when it first shows something, as other compositors do: some clients
+                // (mpv) take the first configure's size for a hint in pixels, the later ones in
+                // their own units.
+                self.configure_toplevel(&toplevel);
+            }
         }
     }
 }
@@ -299,6 +477,36 @@ impl FractionalScaleHandler for State {
         // A toplevel that was already configured gets its logical size now.
         self.reconfigure_toplevels();
     }
+}
+
+/// Whether a surface has a buffer attached: it has drawn something.
+fn has_buffer(surface: &WlSurface) -> bool {
+    with_renderer_surface_state(surface, |state| state.buffer().is_some()).unwrap_or(false)
+}
+
+/// The window geometry a surface set (xdg_surface.set_window_geometry), if any.
+fn window_geometry(surface: &WlSurface) -> Rectangle<i32, Logical> {
+    with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<SurfaceCachedState>()
+            .current()
+            .geometry
+    })
+    .unwrap_or_default()
+}
+
+/// A toplevel's popups from the bottom up, each with where its surface's origin is and the area
+/// it shows, relative to the toplevel surface's origin.
+pub fn popups_of(
+    root: &WlSurface,
+) -> impl Iterator<Item = (PopupKind, Point<i32, Logical>, Rectangle<i32, Logical>)> {
+    let base = window_geometry(root).loc;
+    PopupManager::popups_for_surface(root).map(move |(popup, offset)| {
+        let geometry = popup.geometry();
+        let origin = base + offset - geometry.loc;
+        (popup, origin, Rectangle::new(base + offset, geometry.size))
+    })
 }
 
 /// Take the wp_presentation feedback requests of the surfaces' current state, to answer once the
@@ -414,6 +622,9 @@ impl Compositor {
             client_scale: 1.0,
             scaled_surfaces: Vec::new(),
             needs_redraw: false,
+            popups: PopupManager::default(),
+            popup_grab: None,
+            output: None,
         };
 
         let waker_ack = accessibility::event_loop_proxy().and_then(|proxy| {
@@ -467,16 +678,13 @@ impl Compositor {
             .dispatch_clients(&mut self.state)
             .map_err(|error| format!("Failed to dispatch clients: {error}"))?;
 
-        // Give the desktop keyboard focus as soon as it's there, not only after the first tap.
-        if self.keyboard.current_focus().is_none() {
-            if let Some(toplevel) = self.state.xdg_shell_state.toplevel_surfaces().first() {
-                let surface = toplevel.wl_surface().clone();
-                self.keyboard.set_focus(
-                    &mut self.state,
-                    Some(surface),
-                    smithay::utils::SERIAL_COUNTER.next_serial(),
-                );
-            }
+        // Keyboard input goes to what's on top from the moment it's there, not only after the
+        // first tap, and moves with it.
+        self.state.popups.cleanup();
+        let target = self.state.keyboard_target();
+        if target != self.keyboard.current_focus() {
+            self.keyboard
+                .set_focus(&mut self.state, target, SERIAL_COUNTER.next_serial());
         }
 
         self.display

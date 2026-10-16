@@ -16,7 +16,7 @@ use crate::{
         config::{
             first_config, valid_username, CommandConfig, DesktopPreset, ARCH_FS_ARCHIVE,
             ARCH_FS_ROOT, CONFIG_FILE, DOCS_HOME_URL, PIPEWIRE_GUEST_RUNTIME_DIR,
-            PULSE_GUEST_SERVER,
+            PULSE_GUEST_SERVER, WAYLAND_SOCKET_NAME,
         },
         control,
         gpu_drivers::{self as driver_releases, Release},
@@ -1669,7 +1669,8 @@ const BUNDLE_TYPE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 
 /// `localdesktop`, the command that asks Android for things (`guest::control`), with "Install on
 /// Android" for apps, sharing files with Android's apps and Android's settings for the app in the
-/// desktop's menus.
+/// desktop's menus. `localdesktop direct` runs a program on the app's own display instead of the
+/// desktop's, where it shows over the desktop until it closes.
 fn setup_localdesktop_command(_: &SetupOptions) -> StageOutput {
     let fs_root = Path::new(ARCH_FS_ROOT);
     write_executable(
@@ -1687,6 +1688,8 @@ Usage: localdesktop COMMAND
   open-settings     open Local Desktop's settings
   open-terminal     open Local Desktop's terminal
   restart-desktop   log out of the desktop and start it again
+  direct PROGRAM... run a Wayland program over the desktop, full screen, straight on Local
+                    Desktop's display: the GPU's frames reach the screen without copies (games)
 EOF
     exit 2
 }}
@@ -1726,10 +1729,23 @@ case "$1" in
         file=$(realpath -e -- "$2") || exit 1
         send "install $file" ;;
     open-settings | open-terminal | restart-desktop) [ $# -eq 1 ] || usage; send "$1" ;;
+    direct)
+        [ $# -ge 2 ] || usage
+        shift
+        # Local Desktop's own display, which puts the newest window on top. Wayland only: X11
+        # programs would land on the desktop's Xwayland.
+        export WAYLAND_DISPLAY={wayland}
+        unset DISPLAY
+        export SDL_VIDEODRIVER=wayland SDL_VIDEO_DRIVER=wayland QT_QPA_PLATFORM=wayland
+        export GDK_BACKEND=wayland MOZ_ENABLE_WAYLAND=1 ELECTRON_OZONE_PLATFORM_HINT=wayland
+        # It takes Vulkan's own buffers (dma-bufs), so frames needn't be copied to shared memory.
+        unset MESA_VK_WSI_DEBUG
+        exec "$@" ;;
     *) usage ;;
 esac
 "#,
-            pipe = control::PIPE
+            pipe = control::PIPE,
+            wayland = format!("/tmp/{WAYLAND_SOCKET_NAME}"),
         ),
     );
     for (path, entry) in [

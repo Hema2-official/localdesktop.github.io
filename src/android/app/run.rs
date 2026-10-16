@@ -60,6 +60,7 @@ fn configure_output(backend: &mut crate::android::backend::wayland::WaylandBacke
         let dh = backend.compositor.display.handle();
         backend.compositor.output_global = Some(output.create_global::<State>(&dh));
     }
+    backend.compositor.state.output = Some(output.clone());
 
     output.change_current_state(
         Some(Mode {

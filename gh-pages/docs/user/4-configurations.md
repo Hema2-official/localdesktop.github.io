@@ -107,6 +107,7 @@ On phones with a Qualcomm Adreno GPU, Local Desktop installs [Mesa for Android c
 - **Vulkan** programs (games, Zed, `vkcube`) run on the GPU without anything else to do.
 - **OpenGL** programs run on the GPU too, through Zink (OpenGL on top of Vulkan), for Wayland and X11 programs alike. Firefox draws on the CPU either way. With `zink = false` they draw on the CPU, unless started through `gpu`, for example `gpu mpv video.mkv`.
 - **Plasma** draws its panels and menus with Vulkan when the driver works, and with Qt's software renderer otherwise.
+- **Games** and other full-screen programs run fastest with `localdesktop direct`, for example `localdesktop direct vkcube`: the program shows over the desktop on Local Desktop's own display, which takes its GPU frames as they are, where the desktop's compositor would copy each one through the CPU. Wayland programs only; the desktop comes back when the program closes. The on-screen keyboard belongs to the desktop, so it isn't there for such programs.
 
 `pacman -Syu` leaves these packages alone (they're in `IgnorePkg` in `/etc/pacman.conf`), so an update can't swap Arch's Mesa back in. If an update removes a library the drivers need, the next start installs the newest release again, or puts Arch's Mesa back if that doesn't help either.
 
