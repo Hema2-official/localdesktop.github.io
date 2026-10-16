@@ -34,3 +34,16 @@ Galaxy S21 FE (Snapdragon 888), Android 16, the Plasma preset with the GPU drive
 | Memory | 665 MiB: plasmashell 302, KWin 85, the app 66, plasma-keyboard 60, Xwayland 25 |
 
 Most of the scrolling cost is moving pixels through the CPU: KWin composites the desktop on the CPU, and the app uploads the parts of KWin's frames that changed into a texture. Both go once KWin composites on the GPU, which needs a patched KWin (see [The GPU](10-gpu.md#the-desktop-on-the-gpu)).
+
+## proot's options
+
+Each option the app gives proot, left out in turn: `scripts/guest/syscall-bench.c` and `scripts/guest/proot-workloads.sh` through `scripts/dev-shell.sh -o OPTIONS`, with proot and the program pinned to one A78 core, three rounds alternating the settings (same phone, 2026-10-16). Times are medians; the workloads list Breeze's icons with `ls -lR`, run `/usr/bin/true` 300 times, and walk Python's library with `stat`, `realpath` and a read of each file.
+
+| Option | Cost | Why it's there |
+|---|---|---|
+| seccomp (on unless `PROOT_NO_SECCOMP` is set) | It saves: a system call proot doesn't handle costs 0.3 µs with it and 22 µs without; `stat` 26 instead of 36 µs, `open`+`close` 39 instead of 79, `fork`+`wait` 283 instead of 450; the workloads take 0.6 instead of 1.3 s (exec), 2.7 instead of 3.2 (ls), 1.7 instead of 2.3 (Python). | The desktop's programs show `Seccomp: 2` in `/proc/<pid>/status`. |
+| `--link2symlink` | Nothing measurable. | Hard links, which Android refuses apps. |
+| `--sysvipc` | Nothing measurable. | System V IPC: without it `shmget` fails with `ENOSYS`, and X11 programs lose MIT-SHM. |
+| `--root-id` with `-H` | `getuid` 13 µs instead of 0.3 (proot answers it), `readlink` 135 instead of 50 µs, listing a directory 321 instead of 246 µs; `ls -lR` 2.7 instead of 2.3 s. | Ownership and permissions (`root`, `sudo`, package managers). Without `-H` the ownership records show in listings, which doubled the Python walk. |
+
+`--uevent-stub` and `--netlink-route` only answer the netlink sockets Android refuses, so they cost nothing elsewhere. proot's `-L` (fix the size `lstat` reports for symbolic links) is left out: it handles only the `lstat` system calls, which arm64 doesn't have.
