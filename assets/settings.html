@@ -386,11 +386,21 @@
               <span class="label">
                 <span class="title">Drivers for the Adreno</span>
                 <span class="description">
-                  Mesa for Adreno GPUs: Vulkan (Turnip), and OpenGL through Zink with the
-                  <code>gpu</code> command. Off puts Arch's Mesa back.
+                  Mesa for Adreno GPUs: Vulkan (Turnip), and OpenGL through Zink. Off puts
+                  Arch's Mesa back.
                 </span>
               </span>
               <input type="checkbox" role="switch" data-setting="graphics.adreno_drivers" />
+            </label>
+            <label class="row">
+              <span class="label">
+                <span class="title">OpenGL on the GPU</span>
+                <span class="description">
+                  OpenGL programs draw through Zink on the Adreno's Vulkan driver. Off leaves
+                  them on the CPU, unless started with the <code>gpu</code> command.
+                </span>
+              </span>
+              <input type="checkbox" role="switch" data-setting="graphics.zink" />
             </label>
             <label class="row">
               <span class="label">
@@ -639,6 +649,7 @@
         "performance.fast_realpath": "Fast path lookups",
         "graphics.adreno_drivers": "Drivers for the Adreno",
         "graphics.driver_updates": "Look for newer drivers",
+        "graphics.zink": "OpenGL on the GPU",
         "ssh.enabled": "SSH server",
         "ssh.port": "SSH port",
         "ssh.password_login": "Password login",

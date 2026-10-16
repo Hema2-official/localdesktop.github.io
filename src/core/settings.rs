@@ -94,6 +94,7 @@ pub const SETTINGS: &[Setting] = &[
         Kind::Switch,
         Applies::NextStart,
     ),
+    setting("graphics", "zink", Kind::Switch, Applies::NextStart),
     setting("ssh", "enabled", Kind::Switch, Applies::NextStart),
     setting("ssh", "port", Kind::Port, Applies::NextStart),
     setting("ssh", "password_login", Kind::Switch, Applies::NextStart),

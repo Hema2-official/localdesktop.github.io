@@ -920,8 +920,8 @@ const ADRENO_MESA_RETRY_SECS: u64 = 24 * 60 * 60;
 /// `gpu <program>` runs an OpenGL program on the Adreno. Vulkan programs use it without help.
 const GPU_HELPER: &str = "usr/local/bin/gpu";
 const GPU_HELPER_SCRIPT: &str = r#"#!/bin/sh
-# Run an OpenGL program on the Adreno GPU, through Zink on Turnip. Vulkan programs use the GPU
-# without this.
+# Run an OpenGL program on the Adreno GPU, through Zink on Turnip: the desktop session does this
+# for every program unless `[graphics] zink = false`. Vulkan programs use the GPU without this.
 [ $# -gt 0 ] || { echo "Usage: gpu <program> [arguments]" >&2; exit 2; }
 export MESA_LOADER_DRIVER_OVERRIDE=zink
 # X11 programs: Zink's own presentation (kopper) through GLX.
@@ -2039,6 +2039,31 @@ export MOZ_SHM_NO_SEALS=1
     )
 }
 
+/// Finds out whether Turnip works, into `$turnip` (about 0.2 s): the Adreno driver is installed
+/// and finds the GPU.
+const TURNIP_CHECK: &str = r#"turnip=
+if vulkaninfo --summary 2>/dev/null | grep -q 'driverName *= turnip'; then
+    turnip=1
+fi
+"#;
+
+/// OpenGL programs draw through Zink on Turnip (`[graphics] zink`), where `TURNIP_CHECK` found it
+/// working: with the library `gpu` preloads, Mesa's EGL doesn't fall back to llvmpipe when Zink
+/// fails.
+fn zink_environment() -> String {
+    let graphics = get_application_context().local_config.graphics;
+    if !graphics.adreno_drivers || !graphics.zink {
+        return String::new();
+    }
+    format!(
+        r#"if [ -n "$turnip" ] && [ -e {ZINK_EGL_LIB} ]; then
+    export MESA_LOADER_DRIVER_OVERRIDE=zink LIBGL_KOPPER_DRI2=1
+    export LD_PRELOAD="{ZINK_EGL_LIB}${{LD_PRELOAD:+:$LD_PRELOAD}}"
+fi
+"#
+    )
+}
+
 /// Desktop items are seeded create-if-missing (the run-once mechanism described on
 /// `StageOutput`): write only when absent, so we never clobber the user's edits or re-create on
 /// every launch. Deleting an item re-seeds it next launch, same as the rest of the managed
@@ -2145,10 +2170,16 @@ fn setup_xfce_wayland(options: &SetupOptions) -> StageOutput {
 
     // https://docs.xfce.org/xfce/getting-started — `startxfce4 --wayland` starts the
     // session manager, panel, compositor (labwc), and desktop manager.
+    let zink = zink_environment();
+    let gpu = if zink.is_empty() {
+        String::new()
+    } else {
+        format!("{TURNIP_CHECK}{zink}")
+    };
     write_executable(
         &fs_root.join("usr/local/bin/startxfce4-localdesktop"),
         &format!(
-            "#!/bin/sh\n{}exec startxfce4 --wayland \"$@\"\n",
+            "#!/bin/sh\n{}{gpu}exec startxfce4 --wayland \"$@\"\n",
             session_environment()
         ),
     );
@@ -2447,11 +2478,11 @@ export XDG_CONFIG_DIRS=/{PLASMA_XDG_DIR}:${{XDG_CONFIG_DIRS:-/etc/xdg}}
 # Qt sends its warnings to the journal, which nothing reads here, unless told otherwise; this
 # way they land in the session log.
 export QT_FORCE_STDERR_LOGGING=1
-# Qt Quick draws with Vulkan on the GPU when the Adreno driver works (see `setup_adreno_mesa`),
+{turnip_check}{zink}# Qt Quick draws with Vulkan on the GPU when the Adreno driver works (see `setup_adreno_mesa`),
 # and with its own 2D renderer otherwise: without a GPU its OpenGL goes through llvmpipe, which
-# took two cores to scroll a Plasma menu. The check costs about 0.2 s; without it a broken driver
-# would leave Plasma without a panel.
-if vulkaninfo --summary 2>/dev/null | grep -q 'driverName *= turnip'; then
+# took two cores to scroll a Plasma menu. Without the check a broken driver would leave Plasma
+# without a panel.
+if [ -n "$turnip" ]; then
     export QSG_RHI_BACKEND=vulkan
 else
     export QT_QUICK_BACKEND=software
@@ -2459,7 +2490,9 @@ fi
 /usr/local/bin/localdesktop-no-sandbox-entries
 exec /usr/lib/plasma-dbus-run-session-if-needed startplasma-wayland "$@"
 "#,
-            env = session_environment()
+            env = session_environment(),
+            turnip_check = TURNIP_CHECK,
+            zink = zink_environment(),
         ),
     );
 

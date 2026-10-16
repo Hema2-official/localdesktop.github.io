@@ -105,7 +105,7 @@ The next start installs OpenSSH if needed, adds the key to the user's `~/.ssh/au
 On phones with a Qualcomm Adreno GPU, Local Desktop installs [Mesa for Android containers](https://github.com/lfdevs/mesa-for-android-container) by lfdevs in place of Arch's Mesa. Arch's build can only reach GPUs through `/dev/dri`, which Android doesn't give apps; this one talks to the Adreno through Android's own driver interface (KGSL). It's downloaded from the project's latest release and checked against its published checksum.
 
 - **Vulkan** programs (games, Zed, `vkcube`) run on the GPU without anything else to do.
-- **OpenGL** programs run on the GPU when started through `gpu`, for example `gpu mpv video.mkv`. It uses Zink (OpenGL on top of Vulkan), for Wayland and X11 programs alike. Firefox draws on the CPU either way.
+- **OpenGL** programs run on the GPU too, through Zink (OpenGL on top of Vulkan), for Wayland and X11 programs alike. Firefox draws on the CPU either way. With `zink = false` they draw on the CPU, unless started through `gpu`, for example `gpu mpv video.mkv`.
 - **Plasma** draws its panels and menus with Vulkan when the driver works, and with Qt's software renderer otherwise.
 
 `pacman -Syu` leaves these packages alone (they're in `IgnorePkg` in `/etc/pacman.conf`), so an update can't swap Arch's Mesa back in. If an update removes a library the drivers need, the next start installs the newest release again, or puts Arch's Mesa back if that doesn't help either.
@@ -118,6 +118,7 @@ To use Arch's own Mesa instead, or to keep the drivers you have:
 [graphics]
 adreno_drivers = false # Arch's Mesa
 driver_updates = false # no looking for newer releases
+zink = false           # OpenGL programs on the CPU
 ```
 
 ## Performance

@@ -192,6 +192,10 @@ pub struct GraphicsConfig {
     /// Look for a newer release once a week, which then installs the next time the app starts.
     #[serde(default = "default_true")]
     pub driver_updates: bool,
+    /// OpenGL programs draw on the GPU through Zink (OpenGL on Vulkan) where the drivers work;
+    /// `false` leaves them on llvmpipe, unless started through `gpu`.
+    #[serde(default = "default_true")]
+    pub zink: bool,
 }
 
 impl Default for GraphicsConfig {
@@ -199,6 +203,7 @@ impl Default for GraphicsConfig {
         Self {
             adreno_drivers: true,
             driver_updates: true,
+            zink: true,
         }
     }
 }
@@ -523,7 +528,7 @@ const KNOWN_KEYS: &[(&str, &[&str])] = &[
     ("user", &["username"]),
     ("desktop", &["preset"]),
     ("ssh", &["enabled", "port", "password_login", "authorized_keys"]),
-    ("graphics", &["adreno_drivers", "driver_updates"]),
+    ("graphics", &["adreno_drivers", "driver_updates", "zink"]),
     ("performance", &["cpu_boost", "fast_realpath"]),
     ("clipboard", &["sync"]),
     ("screen", &["sleep_when_idle"]),
@@ -851,6 +856,19 @@ mod tests {
         with_config_file("[graphics]\nadreno_drivers = false\n", |full_config_path| {
             let config = parse_config(full_config_path);
             assert!(!config.graphics.adreno_drivers);
+            assert!(config.problems.is_empty(), "{:?}", config.problems);
+        });
+    }
+
+    #[test]
+    fn should_draw_opengl_through_zink_unless_turned_off() {
+        with_config_file("[user]\nusername = \"alice\"\n", |full_config_path| {
+            assert!(parse_config(full_config_path).graphics.zink);
+        });
+        with_config_file("[graphics]\nzink = false\n", |full_config_path| {
+            let config = parse_config(full_config_path);
+            assert!(!config.graphics.zink);
+            assert!(config.graphics.adreno_drivers);
             assert!(config.problems.is_empty(), "{:?}", config.problems);
         });
     }
