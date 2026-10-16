@@ -77,6 +77,7 @@ pub fn launch() {
             log: None,
         }
         .run();
+        clear_runtime_directory();
 
         let local_config = get_application_context().local_config;
         super::ssh::start(&local_config);
@@ -296,6 +297,33 @@ fn log_out(before: &str) -> Logout {
         session::status(None);
     }
     outcome
+}
+
+/// Empty the session's runtime directory before the desktop starts, as logind does between
+/// logins: `/tmp` outlives the app, and programs that were killed leave their sockets, locks and
+/// authority files behind (ksmserver's ICE and X ones, KWin's Xwayland EIS locks), a set per
+/// session. The audio daemons, which outlive desktop sessions, keep theirs in `/tmp`.
+fn clear_runtime_directory() {
+    let directory = guest::runtime_directory();
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return;
+    };
+    let mut cleared = 0;
+    for entry in entries.flatten() {
+        let removed = match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => fs::remove_dir_all(entry.path()),
+            _ => fs::remove_file(entry.path()),
+        };
+        match removed {
+            Ok(()) => cleared += 1,
+            Err(error) => log::warn!("Could not remove {}: {error}", entry.path().display()),
+        }
+    }
+    if cleared > 0 {
+        log::info!(
+            "Desktop session: cleared {cleared} entries from the last one's runtime directory"
+        );
+    }
 }
 
 /// End the desktop session, logging it out first if it can be. False if the logout was

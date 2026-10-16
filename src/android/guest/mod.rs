@@ -441,7 +441,7 @@ fn session_uid(username: &str) -> u32 {
 
 /// Where the session's compositor makes its socket: the runtime directory every preset's
 /// launcher sets (see `session_environment` in the setup).
-fn runtime_directory() -> PathBuf {
+pub fn runtime_directory() -> PathBuf {
     let username = get_application_context().local_config.user.username;
     Path::new(ARCH_FS_ROOT).join(format!("tmp/runtime-{}", session_uid(&username)))
 }
